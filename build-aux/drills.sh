@@ -340,8 +340,8 @@ drill_diagram_spring() {
 
 # A steady wheel reading on through a diagram's pages: fitted ones edited a page every third notch,
 # at 120 ms a notch and at 450 ms, the page springing back between, presented ones a page a notch,
-# and pages taller than the view scrolled through and turned at each edge, down and up (DESIGN.md,
-# Diagram).
+# pages taller than the view scrolled through and turned at each edge, down and up, and Alt paging
+# them a notch a page onto each one's top at the zoom it was at (DESIGN.md, Diagram).
 drill_diagram_steady() {
 	launch 90 ACCENT_BENCH_DIAGRAM_NAV=steady:steady.drawio >"$dir/steady"
 	has "$dir/steady" \
@@ -349,7 +349,11 @@ drill_diagram_steady() {
 		'bench nav steady fitted nine at 450 ms pages=1>2>3>4 pull=0' \
 		'bench nav steady presented four at 120 ms pages=1>2>3>4>5 pull=0' \
 		'bench nav steady tall down twenty-eight at 120 ms pages=1>2>3 pull=0' \
-		'bench nav steady tall up twenty-eight at 120 ms pages=4>3>2 pull=0'
+		'bench nav steady tall up twenty-eight at 120 ms pages=4>3>2 pull=0' \
+		'bench nav steady tall alt down three at 120 ms pages=1>2>3>4 pull=0' \
+		'bench nav steady alt down page=4 zoom=1.00 on_top=true' \
+		'bench nav steady tall alt up three at 120 ms pages=4>3>2>1 pull=0' \
+		'bench nav steady alt up page=1 zoom=1.00 on_top=true'
 }
 
 # A diagram's labels found in the find bar through its pages and round, by a regular expression

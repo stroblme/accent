@@ -1374,6 +1374,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Let go before that, after 300 ms with no notch or with the fingers off the touchpad, the page springs back, though a wheel's notches still add up for a second after the last, so three slow ones turn it too, and a steady spin goes on turning a page every third notch (user decisions 2026-11-15).
   A presented page is a slide, turned by a notch or 40 px of a swipe and never pulled.
   The margin round the drawing does not count as page, or a stroke on a fitted page's edge would take a notch of its own.
+- Alt with the wheel pages without reading through the page, a notch or 40 px of a swipe going straight to the top of the next or the previous page at the zoom it is at, or fitting it while presented, so no push at the edge is needed (user decision 2026-11-17).
+  Shift with the wheel still scrolls sideways and Ctrl zooms.
 - The page is drawn on a sheet with a hairline edge, in the theme's look as a PDF page is (Colour).
   A page with its page view off (`page="0"`) has no sheet, as in draw.io: the whole canvas takes the page's colour, the drawing's own bounds are what is fitted, scrolled over and turned from at the edge, and a move has no page middle to snap to.
 - Under Dark and either Solarized half every colour the canvas paints — fills and gradients, lines, shadows and shading, text and its runs, a label's background and border, the page — is moved onto the theme's paper and ink as a PDF page's pixels are, white onto paper and black onto ink, each keeping its chroma; a formula is coloured as its label's text is; an SVG and a document-like picture go through the same remap as a colour matrix, and a photo or a GIF stays as it is (Image).
@@ -2105,7 +2107,8 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 
 ### PDF
 
-- Copy `Ctrl+C`; next and previous page `Space` / `Shift+Space`, `n` / `p` and `Right` / `Left`; `Up` / `Down` scroll a step and are not paging.
+- Copy `Ctrl+C`; next and previous page `Space` / `Shift+Space`, `n` / `p`, `Right` / `Left` and `Alt+scroll` a page a notch, as on a diagram (Diagram); `Up` / `Down` scroll a step and are not paging.
+  `Alt+scroll` pages the PDF under the pointer, which need not be the focused pane's, and stops on the last page.
 - Next Page and Previous Page are palette commands with no accelerator, fired by those keys as the tab's own: each is a typing key, and an application accelerator is dispatched at the window ahead of whatever has the keyboard, so `Space` in the table would be taken from the editor, the terminal and every entry.
 - Back and Forward are the window's (History): a PDF keeps no stack of its own.
   Only jumps go in — a link, an outline row, a page typed into Go to Line, a search's first step; paging is reading, and a history of single steps would have nothing to go back to.
@@ -2489,7 +2492,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 - `gtk-enable-animations` off stops all of it, read as each motion starts, so a change to it holds at once: libadwaita's and GTK's animations skip to their end, GTK runs no stylesheet transition, and our own ramps check it themselves; the outline then holds the three seconds and goes at once.
   The other timings we own are debounces, which keep the main loop free.
 - A mouse wheel's notch eases over 200 ms, ease-out cubic, as GTK eases a page key or a scrollbar press (`widgets::smooth_wheel`): GTK moves a notch's whole step at once, which reads as a stutter over text.
-  Notches in quick succession add up to one target; a touchpad, Shift's sideways scroll and Control's zoom stay GTK's.
+  Notches in quick succession add up to one target; a touchpad, Shift's sideways scroll and Control's zoom stay GTK's, and over a PDF or a diagram Alt pages instead (Diagram).
   Every scroller that scrolls up and down eases it: documents, the minimap (the view's own easing), images, diagrams, terminals, popovers, dialogs and the sidebar's panes, the Git pane's among them.
   The scrollers libadwaita builds into Preferences, Keyboard Shortcuts and About ease it too (`widgets::smooth_wheels`).
   Any other scroll meanwhile takes over where the easing is: the caret followed, a page key, a heading jumped to, a diagram's page turned at its edge.

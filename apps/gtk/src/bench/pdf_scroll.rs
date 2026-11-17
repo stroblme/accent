@@ -1,4 +1,4 @@
-//! PDF frame pacing under real wheel input and continuous adjustment motion.
+//! PDF frame pacing under real wheel input and continuous adjustment motion, and Alt+wheel paging.
 
 use super::*;
 
@@ -103,8 +103,57 @@ pub(super) fn run(app: &Rc<App>, rel: &str) {
         }
         clock.disconnect(update);
         clock.disconnect(paint);
+        alt(&app, &pdf, &reader, &scroller).await;
         bench_quit(&app);
     });
+}
+
+/// Alt+wheel at 100 %, from a third of the way down the first page: two notches down, one up,
+/// and one down on the last page's bottom, each step printing the page it left the reader on and
+/// whether that page's top is at the top of the view (DESIGN.md, PDF).
+async fn alt(
+    app: &Rc<App>,
+    pdf: &Rc<pdftab::PdfTab>,
+    reader: &pdfview::PdfView,
+    scroller: &gtk::ScrolledWindow,
+) {
+    pdf.set_zoom(pdfview::PdfZoom::Scale(1.0));
+    let adj = scroller.vadjustment();
+    adj.set_value(adj.page_size() / 3.0);
+    assert!(!pdf::settled(pdf, "alt_start").await);
+    let middle = graphene::Point::new(
+        scroller.width() as f32 / 2.0,
+        scroller.height() as f32 / 2.0,
+    );
+    let at = scroller.compute_point(&app.window, &middle).unwrap();
+    let (sx, sy) = app.window.surface_transform();
+    let pointer = format!("move {:.0} {:.0}", at.x() as f64 + sx, at.y() as f64 + sy);
+    let last = pdf.page_count() - 1;
+    let steps = [
+        ("down two", "scroll -2", None),
+        ("up one", "scroll 1", None),
+        ("down at the end", "scroll -1", Some(last)),
+    ];
+    for (name, scroll, bottom) in steps {
+        if let Some(page) = bottom {
+            reader.goto_page(page, None);
+            adj.set_value(adj.upper() - adj.page_size());
+        }
+        let from = adj.value();
+        super::git::xtest(&format!(
+            "{pointer}; keydown alt; {scroll}; sleep 0.3; keyup alt"
+        ))
+        .await;
+        let (page, value) = (reader.current_page(), adj.value());
+        reader.goto_page(page, None);
+        let on_top = (adj.value() - value).abs() < 1.0;
+        adj.set_value(value);
+        println!(
+            "bench pdf scroll alt {name} page={} on_top={on_top} moved={}",
+            page + 1,
+            value != from
+        );
+    }
 }
 
 fn report(name: &str, frames: &[(i64, f64, f64, usize)]) {

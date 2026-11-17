@@ -386,9 +386,10 @@ fn spring(app: &Rc<App>, rel: &str) {
 
 /// `ACCENT_BENCH_DIAGRAM_NAV=steady:<rel>`: a steady wheel read through a diagram's pages while
 /// edited, as a reader notches on page after page: fitted pages at 120 and 450 ms a notch,
-/// presented ones, and pages taller than the view scrolled through and on, down and up. Each run
-/// prints the pages it went through and the furthest pull after its last turn, and on a
-/// `steady-times` line when each page was reached.
+/// presented ones, and pages taller than the view scrolled through and on, down and up, then paged
+/// by Alt+wheel. Each run prints the pages it went through and the furthest pull after its last
+/// turn, and on a `steady-times` line when each page was reached; an Alt run also the page it
+/// ended on, its zoom and whether that page's top is at the top of the view.
 fn steady(app: &Rc<App>, rel: &str) {
     let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
@@ -438,6 +439,25 @@ fn steady(app: &Rc<App>, rel: &str) {
             &notches(28, 120, false),
         )
         .await;
+        // Alt pages from part way down a page, a notch a page, onto each page's top at the zoom
+        // it was at, going back up too, and with nothing pulled at an edge.
+        tab.show_page(0);
+        tab.zoom_to(1.0);
+        tab.scroll_by(0.0, -1e6);
+        glib::timeout_future(Duration::from_millis(400)).await;
+        let top = page_top(&tab);
+        tab.scroll_by(0.0, 300.0);
+        glib::timeout_future(Duration::from_millis(400)).await;
+        for (name, down) in [("down", true), ("up", false)] {
+            let steps = format!("keydown alt; {}; keyup alt", notches(3, 120, down));
+            read(&tab, &format!("tall alt {name} three at 120 ms"), &steps).await;
+            println!(
+                "bench nav steady alt {name} page={} zoom={:.2} on_top={}",
+                tab.page_index() + 1,
+                tab.scale(),
+                (page_top(&tab) - top).abs() < 1.0
+            );
+        }
         bench_quit(&app);
     });
 }
@@ -492,9 +512,7 @@ async fn read(tab: &Rc<crate::diagram::DiagramTab>, name: &str, steps: &str) {
         .iter()
         .map(|(p, ms)| format!("{p}@{ms}"))
         .collect();
-    let top = tab
-        .to_widget(&accent_drawio::Rect::new(0.0, 0.0, 1.0, 1.0))
-        .y;
+    let top = page_top(tab);
     println!(
         "bench nav steady {name} pages={} pull={:.0}",
         path.join(">"),
@@ -504,4 +522,10 @@ async fn read(tab: &Rc<crate::diagram::DiagramTab>, name: &str, steps: &str) {
         "bench nav steady-times {name} [{}] top={top:.0}",
         when.join(" ")
     );
+}
+
+/// Where the page's top is in the canvas.
+fn page_top(tab: &crate::diagram::DiagramTab) -> f64 {
+    tab.to_widget(&accent_drawio::Rect::new(0.0, 0.0, 1.0, 1.0))
+        .y
 }

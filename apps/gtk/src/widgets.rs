@@ -44,7 +44,7 @@ const WHEEL_MS: u32 = 200;
 /// GTK 4 moves a wheel notch's whole step at once. Only the wheel is eased: a touchpad's pixel
 /// deltas already scroll smoothly, Shift scrolls sideways and Control zooms, all left to GTK.
 /// On the scroller in bubble phase: what is inside it hears the wheel first (a scroller of its
-/// own, a diagram's page turn), and of one widget's controllers GTK runs the last added first,
+/// own, a diagram's page turn, Alt's paging of a PDF or a diagram), and of one widget's controllers GTK runs the last added first,
 /// so this one is ahead of the scroller's own. At an edge the wheel goes on to GTK, for its
 /// overshoot and for any scroller around this one.
 ///

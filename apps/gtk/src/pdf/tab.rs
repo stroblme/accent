@@ -447,6 +447,7 @@ pub fn open(
         move |colour| tab.recolour_picked(colour)
     ));
     tab.wire_keys();
+    tab.wire_wheel();
     tab.watch_clipboard();
     tab.wire_preview();
     tab.wire_comments();

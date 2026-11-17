@@ -266,7 +266,7 @@ use user_commands::bench_commands;
 ///   `bookmarks:<rel_path>[,<rel_diagram>]` (outline following),
 ///   `render:<rel_path>` (tiles/thumbnail bursts; hundreds of heavy pages),
 ///   `zoom:<rel_path>[,<shot_directory>]` (immediate zoom quality and time to sharp tiles),
-///   `scroll:<rel_path>` (wheel input and continuous PDF frame pacing),
+///   `scroll:<rel_path>` (wheel input and continuous PDF frame pacing, then Alt+wheel paging),
 ///   `broken:<rel_path or absolute path>` (truncation/recovery; scratch file),
 ///   `deep:<rel_path>[,<percent>]` (800% default; a few text pages),
 ///   `synctex:<rel_path>` (source/PDF round trip; scratch LaTeX `-synctex=1`
@@ -420,7 +420,7 @@ use user_commands::bench_commands;
 ///   of the window (`diagram::bench_diagram`).
 /// - `ACCENT_BENCH_DIAGRAM_NAV=spring:<rel>`: a diagram's pages turned by XTEST wheel notches,
 ///   pulled off their edge while edited and at once presented; `steady:<rel>`: the pages a steady
-///   wheel reads through, fitted, presented and taller than the view; `find:<rel>`: its labels searched
+///   wheel reads through, fitted, presented and taller than the view, and Alt+wheel's; `find:<rel>`: its labels searched
 ///   in the find bar and a page gone to; `links:<rel>`: shapes' links shown and followed by XTEST
 ///   (`diagram_nav::bench_diagram_nav`). Writes `<rel>`.
 /// - `ACCENT_BENCH_NOTEBOOK=<ipynb>,<marimo .py>,<long ipynb>`: outputs, cell edits with undo

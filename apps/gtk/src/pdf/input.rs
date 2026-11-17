@@ -1,5 +1,6 @@
 //! Wire PDF view signals, page menus and keys to tab or window actions in `open`.
 
+use std::cell::Cell;
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -386,6 +387,45 @@ impl PdfTab {
             }
         ));
         self.view.add_controller(keys);
+    }
+
+    /// Alt+wheel pages as `n` and `p` do, a notch a page, over the reading view and not the strip.
+    /// The tab's own paging rather than the window's command, which pages the active pane's PDF,
+    /// where a wheel goes to the one under the pointer. In bubble phase on the view, ahead of its
+    /// scrolled window, which would scroll as well.
+    pub(super) fn wire_wheel(self: &Rc<Self>) {
+        // What Alt+wheel has scrolled short of a notch (`zoom::page_steps`).
+        let alt = Rc::new(Cell::new(0.0));
+        let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+        wheel.connect_scroll(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            #[strong]
+            alt,
+            #[upgrade_or]
+            glib::Propagation::Proceed,
+            move |wheel, _, dy| {
+                // Ctrl zooms (`zoom::zoom_on_wheel`) and Shift scrolls across.
+                let held = crate::platform::PRIMARY_MODIFIER | gtk::gdk::ModifierType::SHIFT_MASK;
+                let state = wheel.current_event_state();
+                if !state.contains(gtk::gdk::ModifierType::ALT_MASK) || state.intersects(held) {
+                    alt.set(0.0);
+                    return glib::Propagation::Proceed;
+                }
+                let steps = crate::zoom::page_steps(&alt, dy, wheel.unit());
+                for _ in 0..steps.unsigned_abs() {
+                    match steps > 0 {
+                        // Not back up to the last page's top from further down it.
+                        true if tab.view.current_page() + 1 >= tab.page_count() => {}
+                        true => tab.next_page(),
+                        false => tab.previous_page(),
+                    }
+                }
+                glib::Propagation::Stop
+            }
+        ));
+        wheel.connect_scroll_end(move |_| alt.set(0.0));
+        self.view.add_controller(wheel);
     }
 
     /// Dispatch paging keys through window actions so palette and scripted commands share

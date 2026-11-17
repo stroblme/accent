@@ -241,6 +241,17 @@ pub fn wheel_steps(accum: &Cell<f64>, dy: f64) -> i32 {
     total.trunc() as i32
 }
 
+/// Alt+wheel's pages in `dy`, a notch a page as [`wheel_steps`] counts them and a touchpad's
+/// [`SWIPE_TURN`](crate::diagram::geometry::SWIPE_TURN) pixels a notch, about what a notch
+/// scrolls, so a swipe turns a page per notch's worth and never one per event.
+pub fn page_steps(accum: &Cell<f64>, dy: f64, unit: gdk::ScrollUnit) -> i32 {
+    let notches = match unit {
+        gdk::ScrollUnit::Wheel => dy,
+        _ => dy / crate::diagram::geometry::SWIPE_TURN,
+    };
+    wheel_steps(accum, notches)
+}
+
 /// Step zoom on Ctrl+scroll: `step(true)` zooms out and `step(false)` zooms in.
 ///
 /// Each controller accumulates smooth deltas independently so widgets cannot share notch
@@ -400,5 +411,20 @@ mod tests {
         assert_eq!(wheel_steps(&accum, 0.5), 1, "the other half completes it");
         assert_eq!(wheel_steps(&accum, 1.0), 1);
         assert_eq!(wheel_steps(&accum, -2.0), -2);
+    }
+
+    #[test]
+    fn a_swipe_pages_a_notch_worth_at_a_time() {
+        let accum = Cell::new(0.0);
+        let swipe = |dy| page_steps(&accum, dy, gdk::ScrollUnit::Surface);
+        assert_eq!(swipe(15.0), 0, "a swipe's event is not a page");
+        assert_eq!(swipe(15.0), 0);
+        assert_eq!(swipe(15.0), 1, "40 px of it are");
+        assert_eq!(swipe(120.0), 3);
+        // A high-resolution wheel's eighths of a notch add up the same way.
+        let wheel = |dy| page_steps(&accum, dy, gdk::ScrollUnit::Wheel);
+        accum.set(0.0);
+        assert_eq!(wheel(0.125), 0);
+        assert_eq!((0..7).map(|_| wheel(0.125)).sum::<i32>(), 1);
     }
 }

@@ -226,11 +226,13 @@ impl DiagramTab {
 
     /// A plain wheel pushed on past the top or bottom of the page turns it ([`Overshoot`]): a
     /// page being edited is pulled off its edge first, and springs back once the push rests for
-    /// [`REST_MS`], the push still counting a while longer. Ahead of the scrolled window, which
-    /// scrolls whatever this passes on.
+    /// [`REST_MS`], the push still counting a while longer. Alt+wheel pages instead, a notch a
+    /// page. Ahead of the scrolled window, which scrolls whatever this passes on.
     pub(super) fn wire_wheel(self: &Rc<Self>) {
         let overshoot = Rc::new(Cell::new(Overshoot::default()));
         let resting: Rc<RefCell<Option<glib::SourceId>>> = Rc::default();
+        // What Alt+wheel has scrolled short of a notch (`zoom::page_steps`).
+        let alt = Rc::new(Cell::new(0.0));
         let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);
         wheel.connect_scroll(glib::clone!(
             #[weak(rename_to = tab)]
@@ -239,14 +241,35 @@ impl DiagramTab {
             overshoot,
             #[strong]
             resting,
+            #[strong]
+            alt,
             #[upgrade_or]
             glib::Propagation::Proceed,
             move |wheel, dx, dy| {
-                // Ctrl zooms (`zoom::zoom_on_wheel`), and Shift and a sideways swipe scroll across.
+                // Ctrl zooms (`zoom::zoom_on_wheel`), Shift and a sideways swipe scroll across,
+                // and Alt pages.
                 let held = crate::platform::PRIMARY_MODIFIER | gdk::ModifierType::SHIFT_MASK;
-                if wheel.current_event_state().intersects(held) || dx.abs() >= dy.abs() {
+                let state = wheel.current_event_state();
+                if state.intersects(held) || dx.abs() >= dy.abs() {
                     return glib::Propagation::Proceed;
                 }
+                // Straight onto the next or previous page's top at the zoom it is at, or fitted
+                // while presented, with no push at the edge of the one it leaves.
+                if state.contains(gdk::ModifierType::ALT_MASK) {
+                    let steps = crate::zoom::page_steps(&alt, dy, wheel.unit());
+                    let land = tab.presenting.get().is_none().then_some(true);
+                    for _ in 0..steps.unsigned_abs() {
+                        if let Some(next) = tab.next_page(steps > 0) {
+                            tab.show_page_landing(next, land);
+                        }
+                    }
+                    if steps != 0 {
+                        overshoot.set(Overshoot::default());
+                        tab.view.set_pull(0.0);
+                    }
+                    return glib::Propagation::Stop;
+                }
+                alt.set(0.0);
                 let room = tab.view.has_room(dy > 0.0);
                 let ahead = tab.next_page(dy > 0.0).is_some();
                 let swipe = wheel.unit() == gdk::ScrollUnit::Surface;
@@ -285,6 +308,7 @@ impl DiagramTab {
             self,
             move |_| {
                 overshoot.set(Overshoot::default());
+                alt.set(0.0);
                 if let Some(rest) = resting.take() {
                     rest.remove();
                 }
