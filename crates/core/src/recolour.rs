@@ -176,9 +176,10 @@ const PAPER_LUMA: f32 = 0.80;
 /// its pale orange (`#ffe6cc`, 51) and a clear sky (`#87ceeb`, 100) do not.
 const PAPER_CHROMA: u8 = 38;
 
-/// A document is mostly its paper: a page of text is a few percent ink, a plot's lines less.
-/// Below half, the image is about something else.
-const PAPER_SHARE: f32 = 0.50;
+/// A document is largely its paper: a page of text is a few percent ink and a plot's lines
+/// less, while a logo's solid shapes can cover half its box (KIT's covers 52 %). Below two
+/// fifths, the image is about something else, such as a dark screenshot's background.
+const PAPER_SHARE: f32 = 0.40;
 
 /// The share of samples the colour count has to cover. The last tenth is left out because that
 /// is where anti-aliasing lives: the edge of every glyph and line spreads over the bins between
@@ -633,6 +634,15 @@ mod tests {
         c
     }
 
+    /// A logo on nothing: solid black and teal shapes over 55 % of its box, as KIT's fan and
+    /// letters cover half of theirs.
+    fn logo() -> Canvas {
+        let mut c = Canvas::new(600, 200, [0, 0, 0, 0]);
+        c.rect(0, 0, 80, 200, rgb(0x009682));
+        c.rect(120, 0, 600, 104, BLACK);
+        c
+    }
+
     /// A white plot: black axes and three sines in matplotlib's first three colours.
     fn plot() -> Canvas {
         let mut c = Canvas::new(640, 480, WHITE);
@@ -717,6 +727,7 @@ mod tests {
         for (name, image) in [
             ("text page", text_page()),
             ("line art", line_art()),
+            ("logo", logo()),
             ("plot", plot()),
             ("diagram", diagram()),
         ] {
