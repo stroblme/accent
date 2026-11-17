@@ -496,7 +496,7 @@ drill_paste() {
 	printf -- '---\ntitle: Note\n---\n\n# Note\n\nbefore\n\n```text\ncode\n```\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\nend\n' >"$vault/paste.md"
 	echo "* Org" >"$vault/paste.org"
 	echo "x = 1" >"$vault/paste.py"
-	printf '# Drop\n\ntext\n' >"$vault/drop.md"
+	printf -- '# Drop\n\n```text\ncode\n```\n\ntext\n' >"$vault/drop.md"
 	printf '* Drop\n\ntext\n' >"$vault/drop.org"
 	cat >"$vault/paste.ipynb" <<'EOF'
 {"cells": [{"cell_type": "markdown", "metadata": {}, "source": ["Notes\n"]},

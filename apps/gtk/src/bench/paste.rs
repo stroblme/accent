@@ -253,9 +253,10 @@ fn offer(app: &Rc<App>, html: &str, plain: &str, vscode: bool) {
 
 /// HTML dragged in from another window and let go at the end of a note, an org note and a code
 /// tab, and plain text at the end of the note: the note's and the org note's own drop writes their
-/// markup in one undo step, the others are GTK's, which put the text in. A browser's drag is
-/// another process's, which Xvfb cannot start, so a window of the drill's own offers the same
-/// HTML and text, dragged by XTEST.
+/// markup in one undo step, the others are GTK's, which put the text in. HTML of a text run alone
+/// goes into the note as its text, and so does HTML let go in the note's code block. A browser's
+/// drag is another process's, which Xvfb cannot start, so a window of the drill's own offers the
+/// same HTML and text, dragged by XTEST.
 async fn dropped(app: &Rc<App>) {
     let source = gtk::Window::builder()
         .decorated(false)
@@ -281,27 +282,36 @@ async fn dropped(app: &Rc<App>) {
     label.add_controller(drag);
     source.present();
     pumped().await;
-    for (rel, html) in [
-        ("drop.md", true),
-        ("drop.md", false),
-        ("drop.org", true),
-        ("paste.py", true),
+    let run = r#"<meta charset="utf-8"><p>Just text</p>"#;
+    // What is dragged, as HTML and text, and the text the drop is let go after, else the end.
+    for (rel, kind, html, plain, after) in [
+        ("drop.md", "html", Some(HTML), PLAIN, None),
+        ("drop.md", "plain", None, PLAIN, None),
+        ("drop.md", "text_run", Some(run), "Just text", None),
+        ("drop.md", "code_block", Some(HTML), PLAIN, Some("code")),
+        ("drop.org", "html", Some(HTML), PLAIN, None),
+        ("paste.py", "html", Some(HTML), PLAIN, None),
     ] {
         let Some(tab) = opened(app, rel).await else {
             println!("bench paste no_tab {rel}");
             continue;
         };
-        let plain = gdk::ContentProvider::for_value(&PLAIN.to_value());
+        let plain = gdk::ContentProvider::for_value(&plain.to_value());
         content.replace(Some(match html {
-            true => gdk::ContentProvider::new_union(&[
-                gdk::ContentProvider::for_bytes("text/html", &glib::Bytes::from(HTML.as_bytes())),
+            Some(html) => gdk::ContentProvider::new_union(&[
+                gdk::ContentProvider::for_bytes("text/html", &glib::Bytes::from(html.as_bytes())),
                 plain,
             ]),
-            false => plain,
+            None => plain,
         }));
         let buffer = &tab.buffer;
         buffer.place_cursor(&buffer.start_iter());
         glib::timeout_future(Duration::from_millis(300)).await;
+        let all = text(buffer);
+        let at = match after.and_then(|find| all.find(find).map(|at| at + find.len())) {
+            Some(at) => buffer.iter_at_offset(all[..at].chars().count() as i32),
+            None => buffer.end_iter(),
+        };
         // From the label's middle to just past the end of the text, both on screen, where a
         // window sits at the screen's corner with no window manager.
         let screen = |widget: &gtk::Widget, root: &gtk::Window, x: f32, y: f32| {
@@ -309,7 +319,7 @@ async fn dropped(app: &Rc<App>) {
             (widget.compute_point(root, &graphene::Point::new(x, y)))
                 .map(|p| (f64::from(p.x()) + sx, f64::from(p.y()) + sy))
         };
-        let end = tab.view.iter_location(&buffer.end_iter());
+        let end = tab.view.iter_location(&at);
         let (x, y) = tab.view.buffer_to_window_coords(
             gtk::TextWindowType::Widget,
             end.x() + 4,
@@ -340,12 +350,11 @@ async fn dropped(app: &Rc<App>) {
         super::git::xtest(&steps).await;
         until("paste", "the drop", 3000, || text(buffer) != before).await;
         let put = changed(&before, &text(buffer));
-        let kind = if html { "html" } else { "plain" };
         println!(
             "bench paste drop {rel} {kind}={put:?} ended={:?}",
             ended.get()
         );
-        if rel == "drop.md" && html {
+        if rel == "drop.md" && kind == "html" {
             let all = text(buffer);
             buffer.undo();
             println!(

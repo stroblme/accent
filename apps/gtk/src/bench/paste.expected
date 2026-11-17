@@ -26,5 +26,7 @@ bench paste diagram label_plain="Pasted\nSome bold and a link.\none\ntwo"
 bench paste drop drop.md html="## Pasted\n\nSome **bold** and a [link](https://example.org/).\n\n- one\n- two" ended=Some(true)
 bench paste drop undo removed=true
 bench paste drop drop.md plain="Pasted\nSome bold and a link.\none\ntwo" ended=Some(true)
+bench paste drop drop.md text_run="Just text" ended=Some(true)
+bench paste drop drop.md code_block="Pasted\nSome bold and a link.\none\ntwo" ended=Some(true)
 bench paste drop drop.org html="** Pasted\n\nSome *bold* and a [[https://example.org/][link]].\n\n- one\n- two" ended=Some(true)
 bench paste drop paste.py html="Pasted\nSome bold and a link.\none\ntwo" ended=Some(true)
