@@ -381,21 +381,25 @@ impl Panel {
             .margin_start(6)
             .margin_end(6)
             .build();
-        root.append(&chooser);
-        root.append(&single);
+        // Open at the end of the file's row, as Sync All is beside the Git pane's chooser.
+        let open = crate::widgets::icon_button("filetype-file-symbolic", "Open Bibliography");
+        open.set_action_name(Some("win.bib-open"));
+        let library = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        library.append(&chooser);
+        library.append(&single);
+        library.append(&open);
+        root.append(&library);
         let entries = Entries::new(app);
         let bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         bar.append(&entries.search);
-        let open = action_button("filetype-file-symbolic", "Open Bibliography", "bib-open");
-        open.add_css_class("flat");
-        bar.append(&open);
         bar.append(&menu_button(
             &FILE_ACTIONS,
             "win.bib-",
             "Bibliography Actions",
         ));
-        let add = action_button("list-add-symbolic", "Add Reference…", "bib-add");
-        add.add_css_class("suggested-action");
+        // Flat, as a Git section header's Stage All is: a filled button outweighed the row.
+        let add = crate::widgets::icon_button("list-add-symbolic", "Add Reference…");
+        add.set_action_name(Some("win.bib-add"));
         bar.append(&add);
         root.append(&bar);
         root.append(&entries.root);
@@ -643,14 +647,6 @@ impl Panel {
     }
 }
 
-fn action_button(icon: &str, label: &str, action: &str) -> gtk::Button {
-    gtk::Button::builder()
-        .icon_name(icon)
-        .tooltip_text(label)
-        .action_name(format!("win.{action}"))
-        .valign(gtk::Align::Center)
-        .build()
-}
 /// The header's More menu: what acts on the whole file.
 const FILE_ACTIONS: [&[(&str, &str)]; 3] = [
     &[
