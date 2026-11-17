@@ -140,6 +140,12 @@ impl App {
                 self,
                 move |tab| app.model_changed(tab)
             ));
+            // Nor the pictures beside it, told as the worker tells of a vault's.
+            tab.watch_pictures(glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move |rel: &str, added: bool| app.diagram_pictures_changed(rel, added)
+            ));
         }
         {
             let config = self.config.borrow();

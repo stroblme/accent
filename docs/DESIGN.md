@@ -1411,6 +1411,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - A picture a diagram names by a path (`image=pics/a.png`) is read beside the diagram through the vault, as a note's pictures are, so it never comes from outside the vault (or from outside its own folder for a diagram outside one), and a remote vault's comes from its host.
   The canvas, an export, a printout and a note's embed draw it alike, while draw.io's own sidebar pictures (`img/lib/…`) stay their boxes, since they live in draw.io and not in a vault.
   When the vault's watcher says its file changed, came or went, the canvas, the Outline and a note's embed draw it again, the canvas showing the picture as it was until the new one is decoded.
+  A diagram outside the vault watches the folders of its pictures itself while it is open, since no vault's watcher sees them, and draws them again the same way.
 - A note embeds a diagram as `![[x.drawio]]`, its first page, or `![[x.drawio#Page name]]`, the page of that name as the Outline lists it.
   The preview shows it as the SVG Export as SVG… writes, its drawing in the file's own colours, drawn as an SVG image is (Image): recoloured onto the theme's paper and ink unless Diagrams is switched off, inverted by Invert Image Colours, and as the file is in a printout or an export of the note.
   A click follows it as the link `[[x.drawio#Page name]]`, which opens the diagram on that page, or where it was left with a toast saying it has no such page; an embed naming none shows as a broken image.

@@ -111,6 +111,8 @@ pub struct DiagramTab {
     /// Monitor for files outside the vault, which the vault watcher cannot cover.
     /// `None` for files already watched by the worker.
     monitor: RefCell<Option<gio::FileMonitor>>,
+    /// The folders of the pictures such a file names by a path (`watch_pictures`).
+    pictures_watch: RefCell<Option<files::Watch>>,
     on_zoom: TabHook,
     on_page: TabHook,
     /// Emitted before explicit page jumps so the pane records the previous position for Back.
@@ -215,6 +217,7 @@ pub fn open(
         save: SaveState::at(etag, digest),
         autosave: Debounce::new(crate::editor::AUTOSAVE),
         monitor: RefCell::new(None),
+        pictures_watch: RefCell::new(None),
         on_zoom: Hook::default(),
         on_page: Hook::default(),
         on_jump: Hook::default(),
@@ -684,6 +687,23 @@ impl DiagramTab {
         self.view.set_files(files.clone());
         self.strip.set_files(files.clone());
         self.files.replace(files);
+        self.follow_pictures();
+    }
+
+    /// Watch the folders of the pictures a file outside the vault names by a path, which no
+    /// vault's watcher sees, and call `f` with each picture's path as it changes, comes (`true`)
+    /// or goes (`false`); the monitors go with the tab.
+    pub fn watch_pictures(&self, f: impl Fn(&str, bool) + 'static) {
+        self.pictures_watch.replace(Some(files::Watch::new(f)));
+        self.follow_pictures();
+    }
+
+    /// Watch the folders of the pictures the diagram names now, where `watch_pictures` asked.
+    fn follow_pictures(&self) {
+        let files = self.files();
+        if let (Some(watch), Some(files)) = (self.pictures_watch.borrow_mut().as_mut(), files) {
+            watch.follow(&files, &self.file());
+        }
     }
 
     /// Draw again the pictures the diagram names by a path that the file `rel` may be now that it
@@ -754,6 +774,7 @@ impl DiagramTab {
         self.show_picks();
         self.strip.set_pages(self.editor.borrow().file());
         self.sync_web();
+        self.follow_pictures();
         self.fill_props();
         self.on_history.emit(self);
         self.on_selection.emit(self);
@@ -1418,6 +1439,7 @@ impl DiagramTab {
         self.show_picks();
         self.strip.set_pages(self.editor.borrow().file());
         self.sync_web();
+        self.follow_pictures();
         self.fill_props();
         self.on_pages.emit(self);
         self.on_history.emit(self);

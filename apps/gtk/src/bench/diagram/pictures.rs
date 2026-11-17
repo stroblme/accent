@@ -7,7 +7,8 @@ use super::*;
 /// note-embed images and saved permission. Run twice with the same scratch home,
 /// server offline on the second run; permission and cached drawing must persist. A `url` that
 /// is a path is a picture beside the diagram, drawn with no banner and no Load, then drawn again
-/// as its file turns blue, goes and comes back red.
+/// as its file turns blue, goes and comes back red. An absolute `rel` is a diagram outside the
+/// vault.
 pub(super) fn web(app: &Rc<App>, rel: &str, url: &str) {
     let path = app.root().join(rel);
     if !path.exists() {

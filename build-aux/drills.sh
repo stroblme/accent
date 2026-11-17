@@ -442,6 +442,23 @@ drill_diagram_file_picture() {
 		'bench diagram web added embed pictures=1 new=true'
 }
 
+# The same of a diagram outside the vault, whose picture's folder no vault's watcher sees.
+drill_diagram_loose_picture() {
+	mkdir -p "$dir/loose/pics"
+	echo iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAIAAAAmkwkpAAAAEElEQVR4nGP4z8AARwzEcQCukw/x0F8jngAAAABJRU5ErkJggg== |
+		base64 -d >"$dir/loose/pics/red.png"
+	launch 60 "ACCENT_BENCH_DIAGRAM=web:$dir/loose/pic.drawio:pics/red.png" >"$dir/loose_picture"
+	has "$dir/loose_picture" \
+		'bench diagram web opened banner=false allowed=false pixel=Some([255, 0, 0]) downloaded=false' \
+		'bench diagram web embed pictures=1' \
+		'bench diagram web changed banner=false allowed=false pixel=Some([0, 0, 255]) downloaded=false' \
+		'bench diagram web changed embed pictures=1 new=true' \
+		'bench diagram web removed banner=false allowed=false pixel=Some([255, 255, 255]) downloaded=false' \
+		'bench diagram web removed embed pictures=0 new=true' \
+		'bench diagram web added banner=false allowed=false pixel=Some([255, 0, 0]) downloaded=false' \
+		'bench diagram web added embed pictures=1 new=true'
+}
+
 # A page `accent --render-diagram` shrinks to a pixel a unit, its 1 wide line on whole pixels of
 # that and a line 0 wide drawn a tenth of a pixel wide, as draw.io draws them (DESIGN.md, Diagram).
 drill_diagram_render() {

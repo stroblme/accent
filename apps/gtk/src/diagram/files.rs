@@ -3,12 +3,14 @@
 //! vault's fetched from its host. draw.io's own sidebar pictures (`img/lib/…`) are not in a
 //! vault, so they stay their boxes.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use accent_drawio::File;
 use gtk::gio;
+use gtk::prelude::*;
 
 use crate::assets::{self, Resolve};
 
@@ -65,9 +67,7 @@ impl Files {
     /// Find on a worker each picture `file`'s cells name by a path, so an output drawn at once
     /// reads them without waiting on a host.
     pub async fn fetch(&self, file: &File) {
-        let cells = file.pages.iter().flat_map(|p| &p.cells);
-        let srcs = cells.filter_map(|c| c.style.get("image").filter(|src| is_file(src)));
-        let srcs: Vec<String> = srcs.map(str::to_string).collect();
+        let srcs = named(file);
         let files = self.clone();
         crate::work::off_thread("diagram pictures", move || {
             for src in &srcs {
@@ -111,6 +111,69 @@ impl Files {
 
     fn found(&self) -> MutexGuard<'_, Found> {
         self.found.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// The pictures `file`'s cells name by a path, as written.
+fn named(file: &File) -> Vec<String> {
+    let cells = file.pages.iter().flat_map(|p| &p.cells);
+    let srcs = cells.filter_map(|c| c.style.get("image").filter(|src| is_file(src)));
+    srcs.map(str::to_string).collect()
+}
+
+/// The folders a diagram outside a vault reads its pictures from, watched while it is open, since
+/// no vault's watcher sees them: each picture's path is told as it changes, comes (`true`) or
+/// goes (`false`), as the vault's watcher tells a vault's.
+pub struct Watch {
+    told: Told,
+    folders: BTreeSet<PathBuf>,
+    monitors: Vec<gio::FileMonitor>,
+}
+
+/// Told of a picture's path and whether it came.
+type Told = Rc<dyn Fn(&str, bool)>;
+
+impl Watch {
+    pub fn new(told: impl Fn(&str, bool) + 'static) -> Watch {
+        Watch {
+            told: Rc::new(told),
+            folders: BTreeSet::new(),
+            monitors: Vec::new(),
+        }
+    }
+
+    /// Watch the folders `files` reads `file`'s pictures from, unless they are those watched.
+    pub fn follow(&mut self, files: &Files, file: &File) {
+        let folders: BTreeSet<PathBuf> = (named(file).iter())
+            .filter_map(|src| {
+                let path = PathBuf::from(beside(files.key(), src));
+                path.parent()?.canonicalize().ok()
+            })
+            .collect();
+        if folders != self.folders {
+            self.monitors = folders.iter().filter_map(|dir| self.monitor(dir)).collect();
+            self.folders = folders;
+        }
+    }
+
+    /// A monitor on `dir`, canonical as a picture's key is, telling of each file in it.
+    fn monitor(&self, dir: &Path) -> Option<gio::FileMonitor> {
+        let monitor = gio::File::for_path(dir)
+            .monitor_directory(gio::FileMonitorFlags::NONE, gio::Cancellable::NONE)
+            .ok()?;
+        let told = self.told.clone();
+        monitor.connect_changed(move |_, file, _, event| {
+            // `ChangesDoneHint` is a settled write, as for a loose file's own monitor.
+            let came = match event {
+                gio::FileMonitorEvent::Created => true,
+                gio::FileMonitorEvent::ChangesDoneHint | gio::FileMonitorEvent::Deleted => false,
+                _ => return,
+            };
+            if let Some(path) = file.path() {
+                told(&path.to_string_lossy(), came);
+            }
+        });
+        Some(monitor)
     }
 }
 
