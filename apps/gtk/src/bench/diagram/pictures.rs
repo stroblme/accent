@@ -6,7 +6,8 @@ use super::*;
 /// Probe a web-image diagram before/after Load: banner, canvas pixel, download state,
 /// note-embed images and saved permission. Run twice with the same scratch home,
 /// server offline on the second run; permission and cached drawing must persist. A `url` that
-/// is a path is a picture beside the diagram, drawn with no banner and no Load.
+/// is a path is a picture beside the diagram, drawn with no banner and no Load, then drawn again
+/// as its file turns blue, goes and comes back red.
 pub(super) fn web(app: &Rc<App>, rel: &str, url: &str) {
     let path = app.root().join(rel);
     if !path.exists() {
@@ -28,34 +29,71 @@ pub(super) fn web(app: &Rc<App>, rel: &str, url: &str) {
             println!("bench diagram no_tab");
             return bench_quit(&app);
         };
-        let state = |when: &str| {
+        let pixel = || {
             let canvas = tab.key_target();
             let r = tab.frame_of("w").map(|r| tab.to_widget(&r));
-            let pixel = r.zip(picture(&canvas)).map(|(r, shot)| {
+            r.zip(picture(&canvas)).map(|(r, shot)| {
                 let mut downloader = gdk::TextureDownloader::new(&shot);
                 downloader.set_format(gdk::MemoryFormat::R8g8b8a8);
                 let (bytes, stride) = downloader.download_bytes();
                 let i = (r.y + r.h / 2.0) as usize * stride + (r.x + r.w / 2.0) as usize * 4;
                 [bytes[i], bytes[i + 1], bytes[i + 2]]
-            });
+            })
+        };
+        let state = |when: &str| {
             println!(
-                "bench diagram web {when} banner={} allowed={} pixel={pixel:?} downloaded={}",
+                "bench diagram web {when} banner={} allowed={} pixel={:?} downloaded={}",
                 tab.web_banner_shown(),
                 tab.web_allowed(),
+                pixel(),
                 crate::diagram::web_downloaded(&url)
             );
         };
-        let embed = |web: bool| {
+        let drawn = |web: bool| {
             let (path, files) = (tab.path(), tab.files());
-            async move {
-                let svg = crate::diagram::embed::svg(&path, None, web, files).await;
-                svg.map_or(0, |s| s.matches("<image").count())
-            }
+            async move { crate::diagram::embed::svg(&path, None, web, files).await }
+        };
+        let embed = |web: bool| {
+            let drawn = drawn(web);
+            async move { drawn.await.map_or(0, |s| s.matches("<image").count()) }
         };
         pumped().await;
         state("opened");
         let allowed = app.web_images.borrow().contains(&rel);
         println!("bench diagram web embed pictures={}", embed(allowed).await);
+        if crate::diagram::files::is_file(&url) {
+            let file = app
+                .root()
+                .join(accent_core::path::parent_dir(&rel))
+                .join(&url);
+            let red = std::fs::read(&file).expect("the picture");
+            let blue = solid_png([0, 0, 255]);
+            let mut was = drawn(allowed).await;
+            // Each with the pixel it is to show: blue, the paper inside its dashed box, red.
+            for (when, bytes, shown) in [
+                ("changed", Some(blue), [0, 0, 255]),
+                ("removed", None, [255, 255, 255]),
+                ("added", Some(red), [255, 0, 0]),
+            ] {
+                match bytes {
+                    Some(bytes) => std::fs::write(&file, bytes).expect("write the picture"),
+                    None => std::fs::remove_file(&file).expect("remove the picture"),
+                }
+                // Until the watcher has told the window and the picture has landed, or 5 s.
+                let asked = Instant::now();
+                while pixel() != Some(shown) && asked.elapsed() < Duration::from_secs(5) {
+                    glib::timeout_future(Duration::from_millis(50)).await;
+                }
+                state(when);
+                let now = drawn(allowed).await;
+                let pictures = now.as_ref().map_or(0, |s| s.matches("<image").count());
+                println!(
+                    "bench diagram web {when} embed pictures={pictures} new={}",
+                    now != was
+                );
+                was = now;
+            }
+        }
         if tab.web_banner_shown() {
             tab.press_load();
             let asked = Instant::now();
@@ -74,6 +112,14 @@ pub(super) fn web(app: &Rc<App>, rel: &str, url: &str) {
         }
         bench_quit(&app);
     });
+}
+
+/// A 4 × 4 PNG of one colour.
+fn solid_png(rgb: [u8; 3]) -> Vec<u8> {
+    let bytes = glib::Bytes::from_owned(rgb.repeat(16));
+    let format = gdk::MemoryFormat::R8g8b8;
+    let texture = gdk::MemoryTexture::new(4, 4, format, &bytes, 12);
+    texture.save_to_png_bytes().to_vec()
 }
 
 /// A page holding one SVG picture of hairlines, rings and small text, 80 × 60 on its own and

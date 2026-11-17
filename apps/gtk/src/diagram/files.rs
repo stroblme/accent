@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use accent_drawio::File;
 use gtk::gio;
@@ -19,14 +19,17 @@ pub fn is_file(src: &str) -> bool {
 }
 
 /// Where the diagram `key` (a vault path, or an absolute one outside a vault) reads the pictures
-/// it names by a path, each found once.
+/// it names by a path, each found once until its file changes.
 #[derive(Clone)]
 pub struct Files {
     resolve: Arc<Resolve>,
     key: Arc<str>,
-    /// By the path as written: the file on this machine, `None` for one that is not there.
-    found: Arc<Mutex<HashMap<String, Option<PathBuf>>>>,
+    /// By the path as written: the file's key and its copy on this machine, `None` for one that
+    /// is not there.
+    found: Arc<Mutex<Found>>,
 }
+
+type Found = HashMap<String, Option<(String, PathBuf)>>;
 
 impl Files {
     /// Read through the vault's `resolve` (`App::asset_resolver`).
@@ -74,15 +77,40 @@ impl Files {
         .await;
     }
 
+    /// The pictures, by their paths as written, that the file `rel` may be now that it changed,
+    /// came (`added`) or went: those found at it, or under it for a folder, and when it came
+    /// those of its name, which may be found there now.
+    pub fn naming(&self, rel: &str, added: bool) -> Vec<String> {
+        let name = |path: &str| path.rsplit('/').next().unwrap_or(path).to_string();
+        let found = self.found();
+        let named = found.iter().filter(|(src, found)| match found {
+            Some((key, _)) if accent_core::path::is_under(key, rel) => true,
+            _ => added && name(src) == name(rel),
+        });
+        named.map(|(src, _)| src.clone()).collect()
+    }
+
+    /// Find the pictures at `srcs` again the next time they are read.
+    pub fn forget(&self, srcs: &[String]) {
+        let mut found = self.found();
+        for src in srcs {
+            found.remove(src);
+        }
+    }
+
     fn find(&self, src: &str) -> Option<PathBuf> {
-        let lock = || self.found.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(found) = lock().get(src) {
-            return found.clone();
+        if let Some(found) = self.found().get(src) {
+            return found.as_ref().map(|(_, path)| path.clone());
         }
         let rel = beside(&self.key, src);
-        let found = assets::resolve_asset(&*self.resolve, &self.key, &rel).map(|(_, path)| path);
-        lock().insert(src.to_string(), found.clone());
-        found
+        let found = assets::resolve_asset(&*self.resolve, &self.key, &rel);
+        let path = found.as_ref().map(|(_, path)| path.clone());
+        self.found().insert(src.to_string(), found);
+        path
+    }
+
+    fn found(&self) -> MutexGuard<'_, Found> {
+        self.found.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -128,5 +156,31 @@ mod tests {
             Some("image/png")
         );
         assert_eq!(files.read("../top.png"), None);
+    }
+
+    #[test]
+    fn a_picture_changed_came_or_went_is_named_by_its_file() {
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(vault.path().join("d/pics")).unwrap();
+        std::fs::write(vault.path().join("d/pics/a.png"), b"\x89PNG\r\n\x1a\n").unwrap();
+        let root = vault.path().to_path_buf();
+        let resolve: Arc<Resolve> = Arc::new(move |rel: &str| {
+            Some((rel.to_string(), root.join(rel))).filter(|f| f.1.is_file())
+        });
+        let files = Files::new(resolve, "d/x.drawio");
+        assert!(files.read("pics/a.png").is_some() && files.read("pics/b.png").is_none());
+        let named = |rel, added| files.naming(rel, added);
+        // A file changed or gone, or its folder gone, names the picture found at it.
+        assert_eq!(named("d/pics/a.png", false), ["pics/a.png"]);
+        assert_eq!(named("d/pics", false), ["pics/a.png"]);
+        assert!(named("d/pics/b.png", false).is_empty() && named("d/a.png", false).is_empty());
+        // One that came names those of its name, found or not, which may be found there now.
+        assert_eq!(named("d/pics/b.png", true), ["pics/b.png"]);
+        assert_eq!(named("elsewhere/a.png", true), ["pics/a.png"]);
+        // Forgotten, it is found again: there now.
+        std::fs::write(vault.path().join("d/pics/b.png"), b"\x89PNG\r\n\x1a\n").unwrap();
+        assert!(files.read("pics/b.png").is_none());
+        files.forget(&named("d/pics/b.png", true));
+        assert!(files.read("pics/b.png").is_some());
     }
 }

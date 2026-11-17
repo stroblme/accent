@@ -7,6 +7,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use accent_core::recolour;
 use accent_drawio::scene::{Snap, line_height, line_width, wrap_width};
@@ -267,9 +268,20 @@ impl Cache {
         self.shown(index, widget, || {
             let files = self.files.borrow().clone()?;
             let src = src.to_string();
-            let key = hash(&format!("{}\n{src}", files.key()));
-            Some((key, move || files.read(&src)))
+            Some((file_key(&files, &src), move || files.read(&src)))
         })
+    }
+
+    /// Read again the pictures `files` names by `srcs`, whose files changed, came or went, each
+    /// drawn as it was until it lands. One not shown yet is read once it is.
+    pub fn reread(&self, files: &Files, srcs: &[String]) {
+        for src in srcs {
+            let key = file_key(files, src);
+            if self.decoded.borrow().contains_key(&key) {
+                let (files, src) = (files.clone(), src.clone());
+                self.decode(key, move || files.read(&src));
+            }
+        }
     }
 
     /// The picture prim `index` draws from the download cache, `None` before it is downloaded:
@@ -311,31 +323,55 @@ impl Cache {
         })?;
         match self.decoded.borrow_mut().get_mut(&key)? {
             Decoding::Done(picture) => picture.clone(),
-            Decoding::Asked(waiting) => {
+            Decoding::Asked {
+                waiting, before, ..
+            } => {
                 if !waiting.iter().any(|w| w.upgrade().as_ref() == Some(widget)) {
                     waiting.push(widget.downgrade());
                 }
                 self.waiting.set(true);
-                None
+                before.clone()
             }
         }
     }
 
     /// Decode what `read` reads as the picture under `key`, unless it has been asked for: at
-    /// once, or for the screen on a worker (`sharp::Queue`), which measures it too
-    /// (`Picture::document`), the widgets showing it drawn again once it lands.
+    /// once, or for the screen on a worker ([`Cache::decode`]).
     fn ask(&self, key: u64, read: impl FnOnce() -> Option<(String, Vec<u8>)> + Send + 'static) {
         if self.decoded.borrow().contains_key(&key) {
             return;
         }
-        let work = move || read().and_then(|(mime, bytes)| decode(bytes, &mime));
         if !self.deferred.get() {
-            let done = Decoding::Done(work().map(Picture::new));
+            let picture = read().and_then(|(mime, bytes)| decode(bytes, &mime));
+            let done = Decoding::Done(picture.map(Picture::new));
             self.decoded.borrow_mut().insert(key, done);
             return;
         }
-        let asked = Decoding::Asked(Vec::new());
-        self.decoded.borrow_mut().insert(key, asked);
+        self.decode(key, read);
+    }
+
+    /// Decode what `read` reads as the picture under `key` on a worker (`sharp::Queue`), which
+    /// measures it too (`Picture::document`), the widgets showing it drawn again once it lands.
+    /// Asked again meanwhile, its file having changed, it lands from the last read alone.
+    fn decode(&self, key: u64, read: impl FnOnce() -> Option<(String, Vec<u8>)> + Send + 'static) {
+        static ASKS: AtomicU64 = AtomicU64::new(0);
+        let ask = ASKS.fetch_add(1, Ordering::Relaxed);
+        {
+            let mut decoded = self.decoded.borrow_mut();
+            let (waiting, before) = match decoded.remove(&key) {
+                Some(Decoding::Asked {
+                    waiting, before, ..
+                }) => (waiting, before),
+                Some(Decoding::Done(before)) => (Vec::new(), before),
+                None => (Vec::new(), None),
+            };
+            let asked = Decoding::Asked {
+                ask,
+                waiting,
+                before,
+            };
+            decoded.insert(key, asked);
+        }
         let decoded = Rc::downgrade(&self.decoded);
         self.queue.push(async move {
             // Not for a tab closed meanwhile.
@@ -343,7 +379,7 @@ impl Cache {
                 return;
             }
             let done = crate::work::off_thread("diagram picture", move || {
-                let decoded = work()?;
+                let decoded = read().and_then(|(mime, bytes)| decode(bytes, &mime))?;
                 let measure = || crate::look::measure(&decoded.texture).document;
                 decoded.document.get_or_init(measure);
                 Some(decoded)
@@ -352,29 +388,47 @@ impl Cache {
             let Some(decoded) = decoded.upgrade() else {
                 return;
             };
+            let mut decoded = decoded.borrow_mut();
+            let last =
+                matches!(decoded.get(&key), Some(Decoding::Asked { ask: a, .. }) if *a == ask);
+            if !last {
+                return;
+            }
             let picture = done.flatten().map(Picture::new);
-            let was = decoded.borrow_mut().insert(key, Decoding::Done(picture));
-            if let Some(Decoding::Asked(waiting)) = was {
-                for widget in waiting.iter().filter_map(|w| w.upgrade()) {
-                    widget.queue_draw();
-                }
+            let Some(Decoding::Asked { waiting, .. }) =
+                decoded.insert(key, Decoding::Done(picture))
+            else {
+                return;
+            };
+            drop(decoded);
+            for widget in waiting.iter().filter_map(|w| w.upgrade()) {
+                widget.queue_draw();
             }
         });
     }
 }
 
-/// A picture of `Cache::decoded`: being decoded on a worker for the widgets waiting on it, or
-/// decoded, `None` for one that does not decode.
+/// A picture of `Cache::decoded`: being decoded on a worker by the ask numbered `ask`, for the
+/// widgets waiting on it, which draw it as it was `before` its file changed meanwhile; or decoded,
+/// `None` for one that does not decode.
 enum Decoding {
-    Asked(Vec<glib::WeakRef<gtk::Widget>>),
+    Asked {
+        ask: u64,
+        waiting: Vec<glib::WeakRef<gtk::Widget>>,
+        before: Option<Rc<Picture>>,
+    },
     Done(Option<Rc<Picture>>),
 }
 
 impl Decoding {
-    /// The picture decoded, if it is an SVG, which draws copies of itself (`sharp`).
+    /// The picture drawn, if it is an SVG, which draws copies of itself (`sharp`).
     fn svg(&self) -> Option<&Rc<Svg>> {
         match self {
-            Decoding::Done(Some(picture)) => picture.svg.as_ref(),
+            Decoding::Done(Some(picture))
+            | Decoding::Asked {
+                before: Some(picture),
+                ..
+            } => picture.svg.as_ref(),
             _ => None,
         }
     }
@@ -384,6 +438,12 @@ fn hash(s: &str) -> u64 {
     let mut h = DefaultHasher::new();
     s.hash(&mut h);
     h.finish()
+}
+
+/// The key in `Cache::decoded` of the picture `files` reads at `src`, which tells it from another
+/// diagram's of the same path.
+fn file_key(files: &Files, src: &str) -> u64 {
+    hash(&format!("{}\n{src}", files.key()))
 }
 
 /// A picture decoded, on any thread: its pixels, an SVG's text, and whether it reads as a

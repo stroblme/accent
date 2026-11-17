@@ -204,6 +204,23 @@ impl App {
                 | Event::FileRemoved(_)
                 | Event::FileRenamed { .. }
         );
+        // A picture a diagram names by a path, drawn again wherever the diagram is shown; a
+        // rename is its old name gone and its new one come.
+        match &event {
+            Event::FileChanged(rel) | Event::FileRemoved(rel) => {
+                self.diagram_pictures_changed(rel, false)
+            }
+            Event::FilesAdded(rels) => {
+                for rel in rels {
+                    self.diagram_pictures_changed(rel, true);
+                }
+            }
+            Event::FileRenamed { from, to } => {
+                self.diagram_pictures_changed(from, false);
+                self.diagram_pictures_changed(to, true);
+            }
+            _ => {}
+        }
         if let Some(panel) = self.bibliography.get() {
             panel.follow(&event);
             if panel.changed_by(&event) {

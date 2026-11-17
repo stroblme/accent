@@ -686,6 +686,28 @@ impl DiagramTab {
         self.files.replace(files);
     }
 
+    /// Draw again the pictures the diagram names by a path that the file `rel` may be now that it
+    /// changed, came (`added`) or went (`Files::naming`), each found again on a worker first as
+    /// `set_files` finds them, a remote vault's fetched from its host.
+    pub fn pictures_changed(self: &Rc<Self>, rel: &str, added: bool) {
+        let Some(files) = self.files() else {
+            return;
+        };
+        let srcs = files.naming(rel, added);
+        if srcs.is_empty() {
+            return;
+        }
+        files.forget(&srcs);
+        let (file, tab) = (self.file(), Rc::downgrade(self));
+        glib::spawn_future_local(async move {
+            files.fetch(&file).await;
+            if let Some(tab) = tab.upgrade() {
+                tab.view.reread(&files, &srcs);
+                tab.strip.forget();
+            }
+        });
+    }
+
     /// Draw the pictures the diagram links from the web, or not: the window says so on opening,
     /// from what the reader said before, and when they say Load.
     pub fn allow_web(self: &Rc<Self>, on: bool) {

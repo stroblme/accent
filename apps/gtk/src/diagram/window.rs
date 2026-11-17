@@ -48,6 +48,19 @@ fn parse_text(text: accent_core::fs::Text) -> Parsed {
 }
 
 impl App {
+    /// Draw again the pictures named by a path that the file `rel` may be now that it changed,
+    /// came (`added`) or went, in every open diagram and every note's embed of one.
+    pub(crate) fn diagram_pictures_changed(&self, rel: &str, added: bool) {
+        for key in super::embed::forget(rel, added) {
+            self.reshow_preview_image(&key);
+        }
+        for doc in self.docs() {
+            if let Doc::Diagram(tab) = doc {
+                tab.pictures_changed(rel, added);
+            }
+        }
+    }
+
     /// Read and parse on a worker, then open a tab once its page is ready.
     pub(crate) fn open_diagram(self: &Rc<Self>, key: &str, path: &Path, how: Opened) {
         let vault = self.vault().filter(|_| !doc::is_loose_key(key)).cloned();

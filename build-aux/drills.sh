@@ -392,7 +392,7 @@ drill_diagram_links() {
 }
 
 # A diagram's picture named by a path, read beside it in the vault, on the canvas and in a note's
-# embed, with no web banner.
+# embed, with no web banner, and drawn again in both as its file changes, goes and comes back.
 drill_diagram_file_picture() {
 	mkdir -p "$vault/d/pics"
 	echo iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAIAAAAmkwkpAAAAEElEQVR4nGP4z8AARwzEcQCukw/x0F8jngAAAABJRU5ErkJggg== |
@@ -400,7 +400,13 @@ drill_diagram_file_picture() {
 	launch 60 ACCENT_BENCH_DIAGRAM=web:d/pic.drawio:pics/red.png >"$dir/file_picture"
 	has "$dir/file_picture" \
 		'bench diagram web opened banner=false allowed=false pixel=Some([255, 0, 0]) downloaded=false' \
-		'bench diagram web embed pictures=1'
+		'bench diagram web embed pictures=1' \
+		'bench diagram web changed banner=false allowed=false pixel=Some([0, 0, 255]) downloaded=false' \
+		'bench diagram web changed embed pictures=1 new=true' \
+		'bench diagram web removed banner=false allowed=false pixel=Some([255, 255, 255]) downloaded=false' \
+		'bench diagram web removed embed pictures=0 new=true' \
+		'bench diagram web added banner=false allowed=false pixel=Some([255, 0, 0]) downloaded=false' \
+		'bench diagram web added embed pictures=1 new=true'
 }
 
 # A page `accent --render-diagram` shrinks to a pixel a unit, its 1 wide line on whole pixels of

@@ -177,6 +177,13 @@ impl DiagramView {
         self.queue_draw();
     }
 
+    /// Read again the pictures `files` names by `srcs`, whose files changed, came or went, each
+    /// drawn as it was until it lands (`Cache::reread`).
+    pub fn reread(&self, files: &super::files::Files, srcs: &[String]) {
+        self.imp().cache.reread(files, srcs);
+        self.queue_draw();
+    }
+
     pub fn set_selection(&self, ids: &[CellId]) {
         *self.imp().selection.borrow_mut() = ids.to_vec();
         self.queue_draw();

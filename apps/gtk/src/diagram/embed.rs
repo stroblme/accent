@@ -2,8 +2,9 @@
 //! bounds in file colours, which the preview recolours through `look::show_diagram` and an
 //! export writes into the page.
 //!
-//! Read on a worker and draw on the GTK main thread. Cache by file version and page
-//! so note renders, theme changes and repeated embeds avoid redundant drawing.
+//! Read on a worker and draw on the GTK main thread. Cache by file version and page, until a
+//! picture the diagram names by a path changes, so note renders, theme changes and repeated
+//! embeds avoid redundant drawing.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -20,9 +21,13 @@ use crate::look::{self, Stamp};
 /// are drawn.
 type Embed = (PathBuf, Option<String>, bool);
 
+/// An embed's drawing: the version of the file it was drawn from, its SVG, and where it found the
+/// pictures it names by a path.
+type Drawing = (Stamp, Rc<str>, Option<Files>);
+
 thread_local! {
-    /// Every embed drawn, with the version of the file it was drawn from.
-    static DRAWN: RefCell<HashMap<Embed, (Stamp, Rc<str>)>> = RefCell::default();
+    /// Every embed drawn.
+    static DRAWN: RefCell<HashMap<Embed, Drawing>> = RefCell::default();
 }
 
 /// The diagram at `path` as an SVG of its page called `page`, its first without one; `None` for
@@ -40,8 +45,8 @@ pub async fn svg(
     let kept = DRAWN.with_borrow(|drawn| {
         drawn
             .get(&key)
-            .filter(|(at, _)| *at == stamp)
-            .map(|(_, svg)| svg.clone())
+            .filter(|(at, ..)| *at == stamp)
+            .map(|(_, svg, _)| svg.clone())
     });
     if kept.is_some() {
         return kept;
@@ -67,6 +72,20 @@ pub async fn svg(
     };
     let bytes = render::svg(&file, i, Area::Drawing, pictures).ok()?;
     let svg: Rc<str> = String::from_utf8(bytes).ok()?.into();
-    DRAWN.with_borrow_mut(|drawn| drawn.insert(key, (stamp, svg.clone())));
+    DRAWN.with_borrow_mut(|drawn| drawn.insert(key, (stamp, svg.clone(), files)));
     Some(svg)
+}
+
+/// Let go of every embed drawn with a picture the file `rel` may be now that it changed, came
+/// (`added`) or went (`Files::naming`): the keys of their diagrams, which the preview draws again.
+pub fn forget(rel: &str, added: bool) -> Vec<String> {
+    DRAWN.with_borrow_mut(|drawn| {
+        let mut keys = Vec::new();
+        drawn.retain(|_, (.., files)| {
+            let named = files.as_ref().filter(|f| !f.naming(rel, added).is_empty());
+            keys.extend(named.map(|f| f.key().to_string()));
+            named.is_none()
+        });
+        keys
+    })
 }
