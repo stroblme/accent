@@ -246,8 +246,8 @@ impl Editor {
     }
 
     /// [`resize`] on page `page`.
-    pub fn resize(&mut self, page: usize, id: &str, rect: Rect) -> Result<(), Error> {
-        self.edit(page, |p, _| resize(p, id, rect))
+    pub fn resize(&mut self, page: usize, id: &str, rect: Rect, alone: bool) -> Result<(), Error> {
+        self.edit(page, |p, _| resize(p, id, rect, alone))
     }
 
     /// [`turn_edge`] on page `page`.
@@ -1105,20 +1105,29 @@ pub fn add_edge(
     Ok(())
 }
 
-/// Give vertex `id` the absolute rectangle `rect`.
-pub fn resize(page: &mut Page, id: &str, rect: Rect) -> Result<(), Error> {
+/// Give vertex `id` the absolute rectangle `rect`, what it holds scaled with it as draw.io's
+/// handles and Arrange panel scale it ([`fit::scale_children`]), unless resized `alone`, as
+/// draw.io's handles resize it with Alt (`mxVertexHandler.isRecursiveResize`).
+pub fn resize(page: &mut Page, id: &str, rect: Rect, alone: bool) -> Result<(), Error> {
     check(page, [id])?;
-    page.absolute_rect(id)
+    let was = page
+        .absolute_rect(id)
         .ok_or(Error::Refused("only a shape can be resized"))?;
-    if page.cell(id).is_some_and(fit::is_transparent) {
+    let cell = page.cell(id).expect("checked above");
+    if fit::is_transparent(cell) {
         return Err(Error::Refused(
             "a group sized by what it holds is not resized",
         ));
     }
+    let scaled = !alone && fit::scales_children(page, cell);
     let origin = page.origin_of(id);
     if let Some(g) = page.cell_mut(id).and_then(|c| c.geometry.as_mut()) {
         (g.x, g.y) = (rect.x - origin.x, rect.y - origin.y);
         (g.width, g.height) = (rect.w, rect.h);
+    }
+    if scaled {
+        let ratio = |new: f64, old: f64| if old != 0.0 { new / old } else { 1.0 };
+        fit::scale_children(page, id, ratio(rect.w, was.w), ratio(rect.h, was.h));
     }
     Ok(())
 }

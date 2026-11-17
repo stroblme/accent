@@ -308,7 +308,8 @@ fn a_vertex_in_a_group_is_stored_relative() {
     let c = e.add_vertex(0, Some(&g), r, "", "").unwrap();
     assert_eq!(geometry(&e, &c).rect(), Rect::new(10.0, 20.0, 30.0, 40.0));
     assert_eq!(e.page(0).unwrap().absolute_rect(&c), Some(r));
-    e.resize(0, &c, Rect::new(120.0, 60.0, 50.0, 50.0)).unwrap();
+    e.resize(0, &c, Rect::new(120.0, 60.0, 50.0, 50.0), false)
+        .unwrap();
     assert_eq!(geometry(&e, &c).rect(), Rect::new(20.0, 10.0, 50.0, 50.0));
 }
 
@@ -815,7 +816,7 @@ fn failed_edits_leave_no_undo_step() {
     assert_eq!(geometry(&e, "a").x, 0.0);
     let r = e.set_style(2, &list(&["a"]), "rounded", None);
     assert!(matches!(r, Err(Error::NoPage(2))));
-    let r = e.resize(0, "e", Rect::default());
+    let r = e.resize(0, "e", Rect::default(), false);
     assert!(matches!(r, Err(Error::Refused(_))));
     let r = e.add_vertex(0, Some("nope"), Rect::default(), "", "");
     assert!(matches!(r, Err(Error::NoCell(_))));
@@ -986,7 +987,7 @@ fn a_group_fits_what_it_holds_as_it_moves_grows_and_shrinks() {
     assert_eq!(geometry(&e, "g").rect(), loose);
     assert_eq!(geometry(&e, "a").rect(), Rect::new(0.0, 0.0, 40.0, 40.0));
     // A member resized and one deleted take it in, and the last one deleted takes it away.
-    e.resize(0, "b", Rect::new(160.0, 50.0, 20.0, 20.0))
+    e.resize(0, "b", Rect::new(160.0, 50.0, 20.0, 20.0), false)
         .unwrap();
     assert_eq!(geometry(&e, "g").rect(), Rect::new(100.0, 50.0, 80.0, 40.0));
     e.delete(0, &list(&["a"])).unwrap();
@@ -1012,7 +1013,8 @@ fn nested_groups_fit_outward_and_a_container_only_grows() {
         ),
         Cell::new_vertex("c", "s", Rect::new(10.0, 30.0, 20.0, 20.0), "", ""),
     ]);
-    e.resize(0, "b", Rect::new(60.0, 0.0, 40.0, 80.0)).unwrap();
+    e.resize(0, "b", Rect::new(60.0, 0.0, 40.0, 80.0), false)
+        .unwrap();
     assert_eq!(geometry(&e, "g").rect(), Rect::new(60.0, 0.0, 40.0, 80.0));
     assert_eq!(geometry(&e, "G").rect(), Rect::new(0.0, 0.0, 100.0, 80.0));
     let drawn = Scene::default();
@@ -1063,7 +1065,7 @@ fn a_group_sized_by_what_it_holds_keeps_its_geometry_at_nothing() {
     );
     assert_eq!(geometry(&e, "a").rect(), Rect::new(10.0, 10.0, 40.0, 40.0));
     assert_eq!(boxed(&e), Some(padded.translate(10.0, 0.0)));
-    let resized = e.resize(0, "t", Rect::new(0.0, 0.0, 50.0, 50.0));
+    let resized = e.resize(0, "t", Rect::new(0.0, 0.0, 50.0, 50.0), false);
     assert!(resized.is_err(), "its size is what it holds");
     let copy = e.duplicate(0, &list(&["t"])).unwrap();
     assert_eq!(geometry(&e, &copy[0]).rect(), Rect::default());
@@ -1085,4 +1087,44 @@ fn a_group_sized_by_what_it_holds_keeps_its_geometry_at_nothing() {
     // With the last of what it holds the group goes, and the group it was the last of after it.
     e.delete(0, &list(&["a", "b"])).unwrap();
     assert_eq!(order(&e), ["0", "1"]);
+}
+
+#[test]
+fn a_shape_resized_scales_what_it_holds_as_draw_io_s_handles_do() {
+    let shape = |id, parent, r, style| Cell::new_vertex(id, parent, r, style, "");
+    let (from, to) = (Point::new(0.0, 40.0), Point::new(100.0, 40.0));
+    let mut line = Cell::new_edge("e", "g", (None, from), (None, to), "");
+    line.geometry.as_mut().unwrap().points = Some(vec![Point::new(50.0, 20.0)]);
+    let mut e = open([
+        shape("g", "1", Rect::new(100.0, 50.0, 100.0, 40.0), "group"),
+        shape("a", "g", Rect::new(0.0, 0.0, 40.0, 40.0), ""),
+        shape("b", "g", Rect::new(60.0, 0.0, 40.0, 40.0), "aspect=fixed;"),
+        line,
+        shape("s", "1", Rect::new(300.0, 0.0, 100.0, 100.0), "swimlane"),
+        shape("c", "s", Rect::new(10.0, 30.0, 20.0, 20.0), ""),
+    ]);
+    // Twice as wide: a shape and the line's points with it, one of fixed proportions by the
+    // smaller factor, which is 1.
+    let wide = Rect::new(100.0, 50.0, 200.0, 40.0);
+    e.resize(0, "g", wide, false).unwrap();
+    assert_eq!(geometry(&e, "g").rect(), wide);
+    assert_eq!(geometry(&e, "a").rect(), Rect::new(0.0, 0.0, 80.0, 40.0));
+    assert_eq!(geometry(&e, "b").rect(), Rect::new(120.0, 0.0, 40.0, 40.0));
+    let g = geometry(&e, "e");
+    assert_eq!(g.target_point, Some(Point::new(200.0, 40.0)));
+    assert_eq!(g.points, Some(vec![Point::new(100.0, 20.0)]));
+    assert!(e.undo(), "one step");
+    assert_eq!(geometry(&e, "a").rect(), Rect::new(0.0, 0.0, 40.0, 40.0));
+    // Alone with Alt, or with `recursiveResize=0`, what it holds stays.
+    e.resize(0, "g", wide, true).unwrap();
+    assert_eq!(geometry(&e, "a").rect(), Rect::new(0.0, 0.0, 40.0, 40.0));
+    e.undo();
+    e.set_style(0, &list(&["g"]), "recursiveResize", Some("0"))
+        .unwrap();
+    e.resize(0, "g", wide, false).unwrap();
+    assert_eq!(geometry(&e, "a").rect(), Rect::new(0.0, 0.0, 40.0, 40.0));
+    // A swimlane keeps its shapes as they are.
+    e.resize(0, "s", Rect::new(300.0, 0.0, 200.0, 200.0), false)
+        .unwrap();
+    assert_eq!(geometry(&e, "c").rect(), Rect::new(10.0, 30.0, 20.0, 20.0));
 }

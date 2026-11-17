@@ -52,9 +52,9 @@ impl DiagramView {
             Some(Edit::Move { ids, delta }) if ids.iter().any(|m| sheet.is_within(id, m)) => {
                 (r.translate(delta.x, delta.y), sheet.rotation(id))
             }
-            Some(Edit::Resize { id: resized, rect }) if resized == id => {
-                (*rect, sheet.rotation(id))
-            }
+            Some(Edit::Resize {
+                id: resized, rect, ..
+            }) if resized == id => (*rect, sheet.rotation(id)),
             Some(Edit::Rotate {
                 id: turned,
                 degrees,

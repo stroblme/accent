@@ -490,6 +490,7 @@ impl DiagramView {
                 Some(Edit::Resize {
                     id: id.clone(),
                     rect,
+                    alone: free,
                 })
             }
             Drag::Rotate { id, rect } => {

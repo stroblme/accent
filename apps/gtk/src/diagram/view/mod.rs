@@ -39,9 +39,11 @@ pub enum Edit {
         ids: Vec<CellId>,
         delta: Point,
     },
+    /// Shape `id` to `rect`, with `alone` (Alt) what it holds kept as it is rather than scaled.
     Resize {
         id: CellId,
         rect: Rect,
+        alone: bool,
     },
     /// A new shape or text box at `rect`.
     Add {

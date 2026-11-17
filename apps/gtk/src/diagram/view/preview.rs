@@ -129,7 +129,7 @@ fn apply(
             }
             Ok(())
         }
-        Edit::Resize { id, rect } => edit::resize(page, id, *rect),
+        Edit::Resize { id, rect, alone } => edit::resize(page, id, *rect, *alone),
         Edit::Points { id, points } => edit::set_points(page, id, points),
         Edit::LabelAt { id, at } => {
             let route = drawn.route(id).unwrap_or_default();

@@ -42,7 +42,7 @@ const GROUPS: &str = r#"<mxfile host="accent">
 /// `isPropagateSelectionCell` treats apart, the clicks out of a group whose bounds are its
 /// shapes' and back, Select All, and pastes inside a group and outside it. Then it prints how
 /// the groups fit what they hold as the keys move a shape out of one and delete what it holds,
-/// and move the group whose bounds are its shapes'.
+/// move the group whose bounds are its shapes', and a group's handle scales what it holds.
 pub(super) fn select(app: &Rc<App>, rel: &str) {
     std::fs::write(app.root().join(rel), GROUPS).expect("write the diagram");
     let (app, rel) = (app.clone(), rel.to_string());
@@ -186,6 +186,14 @@ pub(super) fn select(app: &Rc<App>, rel: &str) {
         super::super::git::xtest("key shift+Right; key shift+Right").await;
         let [tb, t1] = ["tb", "t1"].map(placed);
         println!("bench diagram select fit move tb tb={tb:?} t1={t1:?}");
+        // G dragged by its bottom-right handle half as large again, what it holds with it.
+        tab.select(vec!["G".into()]);
+        let corner = tab.frame_of("G").unwrap_or_default();
+        let (x, y) = (corner.right() + 1.0, corner.bottom() + 1.0);
+        let grown = (x + corner.w / 2.0, y + corner.h / 2.0);
+        super::super::git::xtest(&band((x, y), grown)).await;
+        let [g, g2, d2] = ["G", "g2", "d2"].map(placed);
+        println!("bench diagram select fit resize G G={g:?} g2={g2:?} d2={d2:?}");
         bench_quit(&app);
     });
 }

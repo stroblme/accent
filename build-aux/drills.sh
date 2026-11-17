@@ -464,7 +464,8 @@ drill_diagram_select() {
 		'bench diagram select fit move c g=Some("0,40,240,100") c=Some("0,40,80,60") d=Some("160,0,80,60")' \
 		'bench diagram select fit delete d g=Some("0,50,130,90") c=Some("0,30,80,60") d=None' \
 		'bench diagram select fit delete the rest g=None c=None d=None' \
-		'bench diagram select fit move tb tb=Some("0,0,0,0") t1=Some("320,280,80,60")'
+		'bench diagram select fit move tb tb=Some("0,0,0,0") t1=Some("320,280,80,60")' \
+		'bench diagram select fit resize G G=Some("40,160,660,90") g2=Some("360,0,300,90") d2=Some("180,0,120,90")'
 }
 
 # The style editor: Edit Style's tab of a cell's style, what is typed reaching the cell after the

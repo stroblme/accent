@@ -222,6 +222,7 @@ impl DiagramTab {
                     Edit::Resize {
                         id,
                         rect: r.translate(o.x, o.y),
+                        alone: false,
                     }
                 }
                 Placed::Turn(degrees) => Edit::Rotate { id, degrees },
@@ -273,7 +274,9 @@ impl DiagramTab {
             Edit::Move { ids, delta } if ids.contains(id) => {
                 Some(Placed::Frame(g.translate(delta.x, delta.y)))
             }
-            Edit::Resize { id: resized, rect } if resized == id => {
+            Edit::Resize {
+                id: resized, rect, ..
+            } if resized == id => {
                 let o = page.origin_of(id);
                 Some(Placed::Frame(rect.translate(-o.x, -o.y)))
             }
@@ -295,7 +298,7 @@ impl DiagramTab {
     fn set_geometry(self: &Rc<Self>, id: &str, rect: accent_drawio::Rect) {
         self.edit(|e, page| {
             let o = e.page(page)?.origin_of(id);
-            e.resize(page, id, rect.translate(o.x, o.y))
+            e.resize(page, id, rect.translate(o.x, o.y), false)
         });
     }
 

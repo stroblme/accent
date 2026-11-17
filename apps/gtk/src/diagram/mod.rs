@@ -832,7 +832,9 @@ impl DiagramTab {
             Edit::Follow(link) => self.follow(&link),
             Edit::Move { ids, delta } => self.move_cells(&ids, delta.x, delta.y),
             Edit::Copy { ids, delta } => self.copy_to(&ids, delta),
-            Edit::Resize { id, rect } => self.edit(|e, page| e.resize(page, &id, rect)),
+            Edit::Resize { id, rect, alone } => {
+                self.edit(|e, page| e.resize(page, &id, rect, alone))
+            }
             Edit::Add { tool, rect } => {
                 let style = self.new_style(&edit);
                 let mut added = None;

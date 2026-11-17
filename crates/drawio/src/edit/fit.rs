@@ -223,7 +223,9 @@ fn fit(p: &mut Page, id: &str, changed: &HashSet<CellId>) -> bool {
             Rect::new(0.0, 0.0, w, h)
         }
     };
-    if fitted == Rect::new(0.0, 0.0, g.width, g.height) {
+    // Within float dust of where it is, as a group scaled with what it holds lands.
+    let moved = [fitted.x, fitted.y, fitted.w - g.width, fitted.h - g.height];
+    if moved.iter().all(|v| v.abs() < 1e-6) {
         return false;
     }
     if let Some(geometry) = p.cell_mut(id).and_then(|c| c.geometry.as_mut()) {
@@ -237,6 +239,77 @@ fn fit(p: &mut Page, id: &str, changed: &HashSet<CellId>) -> bool {
         }
     }
     true
+}
+
+/// Whether resizing vertex `cell` scales what it holds with it, as draw.io's handles and Arrange
+/// panel do (`Graph.isRecursiveVertexResize`): a shape holding cells, but not a swimlane, one
+/// collapsed, one laid out by a `childLayout` or one with `recursiveResize=0`.
+pub(super) fn scales_children(p: &Page, cell: &Cell) -> bool {
+    let style = cell.style.resolve(false);
+    cell.vertex
+        && p.children(&cell.id).next().is_some()
+        && style.shape() != "swimlane"
+        && cell.attr("collapsed") != Some("1")
+        && style.get("recursiveResize") != Some("0")
+        && style.get("childLayout").is_none()
+}
+
+/// Scale what vertex `id` holds by `sx` across and `sy` down from its corner, as draw.io's
+/// `mxGraph.resizeChildCells` does (`mxGraph.scaleCell`, `mxGeometry.scale`): each shape's place
+/// and size, by the smaller factor for one with `aspect=fixed`, a line's waypoints and loose
+/// ends, and what each shape holds by its own change in turn. `resizeWidth` and `resizeHeight`
+/// scale a side or keep it, and a shape locked or with `movable=0` keeps its place, with
+/// `resizable=0` its size. What a group with `transparentBounds=1` holds is scaled with its
+/// group's other cells, the group keeping its 0,0,0,0, where draw.io leaves it as it is.
+pub(super) fn scale_children(p: &mut Page, id: &str, sx: f64, sy: f64) {
+    let held = p.children(id).flat_map(|c| moved_by(p, &c.id));
+    let held: Vec<CellId> = held.collect();
+    for child in held {
+        let Some(cell) = p.cell(&child) else { continue };
+        let Some(g) = cell.geometry.clone() else {
+            continue;
+        };
+        let style = cell.style.resolve(cell.edge);
+        let says = |key: &str, value: &str| style.get(key) == Some(value);
+        let locked = says("locked", "1");
+        let mut s = g.clone();
+        let ends = s.source_point.iter_mut().chain(&mut s.target_point);
+        for pt in ends.chain(s.points.iter_mut().flatten()) {
+            (pt.x, pt.y) = (pt.x * sx, pt.y * sy);
+        }
+        if !g.relative {
+            let (fx, fy) = match says("aspect", "fixed") {
+                true => (sx.min(sy), sx.min(sy)),
+                false => (sx, sy),
+            };
+            (s.x, s.y, s.width, s.height) = (g.x * sx, g.y * sy, g.width * fx, g.height * fy);
+        }
+        match style.get("resizeWidth") {
+            Some("1") => s.width = g.width * sx,
+            Some("0") => s.width = g.width,
+            _ => {}
+        }
+        match style.get("resizeHeight") {
+            Some("1") => s.height = g.height * sy,
+            Some("0") => s.height = g.height,
+            _ => {}
+        }
+        if locked || says("movable", "0") {
+            (s.x, s.y) = (g.x, g.y);
+        }
+        if locked || says("resizable", "0") {
+            (s.width, s.height) = (g.width, g.height);
+        }
+        let ratio = |new: f64, old: f64| if old != 0.0 { new / old } else { 1.0 };
+        let inner = (ratio(s.width, g.width), ratio(s.height, g.height));
+        let vertex = cell.vertex;
+        if let Some(c) = p.cell_mut(&child) {
+            c.geometry = Some(s);
+        }
+        if vertex && inner != (1.0, 1.0) {
+            scale_children(p, &child, inner.0, inner.1);
+        }
+    }
 }
 
 /// Whether a shape of `style` holds its shapes as a container (`Graph.isContainer`): a swimlane
