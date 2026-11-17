@@ -580,7 +580,31 @@ pub(super) fn props(app: &Rc<App>, rel: &str) {
                 arc().map(|r| r.text().to_string())
             );
         }
-        let ids = vec![folder];
+        // Off from a radius of 6.5 on the 60 side, the share is written to a ten-thousandth,
+        // which the row shows and the keyboard leaving it, Tab by XTEST, writes back unchanged.
+        let ids = vec![folder.clone()];
+        let fixed = [("absoluteArcSize", Some("1")), ("arcSize", Some("6.5"))];
+        tab.edit(|e, page| e.set_styles(page, &ids, &fixed));
+        if let Some(fixed) = row("Fixed Corner Size").and_downcast::<adw::SwitchRow>() {
+            fixed.set_active(false);
+        }
+        println!(
+            "bench diagram props folder off style={:?} arc={:?}",
+            style(&folder),
+            arc().map(|r| r.text().to_string())
+        );
+        let arc_text = arc().and_then(|r| find_widget(r.upcast_ref(), &|w| w.is::<gtk::Text>()));
+        if let Some(text) = arc_text {
+            text.grab_focus();
+            super::super::git::xtest("move 700 450; focus; key Tab").await;
+        }
+        glib::timeout_future(Duration::from_millis(600)).await;
+        println!(
+            "bench diagram props folder left style={:?} arc={:?}",
+            style(&folder),
+            arc().map(|r| r.text().to_string())
+        );
+        tab.key_target().grab_focus();
         tab.edit(|e, page| e.delete(page, &ids));
         tab.select(vec!["a".to_string()]);
         // Sketch writes draw.io's comic drawing onto a and takes it, and `comic`, off again.

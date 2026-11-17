@@ -308,12 +308,14 @@ fn spin(title: &str, range: (f64, f64, f64)) -> adw::SpinRow {
 }
 
 /// A row of the geometry or a corner's size: whole units a step, fractions kept, shown as the
-/// file writes them.
+/// file writes them to a hundredth of a step, so a folder's share stepped by hundredths shows
+/// four places and the text the row reads back as the keyboard leaves it is its value.
 fn coordinate(title: &str, low: f64) -> adw::SpinRow {
     let row = spin(title, (low, 1e6, 1.0));
     row.set_digits(2);
     row.connect_output(|row| {
-        row.set_text(&number((row.value() * 100.0).round() / 100.0));
+        let places = 100.0 / row.adjustment().step_increment();
+        row.set_text(&number((row.value() * places).round() / places));
         true
     });
     row
@@ -832,17 +834,20 @@ impl Props {
                 // The corner as the first cell's shape reads `arcSize`: a folder's a share of its
                 // shorter side, 0.1 when the style gives none and stepped by hundredths, or with
                 // `absoluteArcSize` its radius (`FolderShape`); any other's mxGraph's, 15 % of the
-                // shorter side (`RECTANGLE_ROUNDING_FACTOR`) or 20 units (`LINE_ARCSIZE`).
+                // shorter side (`RECTANGLE_ROUNDING_FACTOR`) or 20 units (`LINE_ARCSIZE`). The
+                // digits take the hundredth of a step the row shows (`coordinate`), which the
+                // spin button would otherwise refuse as text.
                 let fixed = style.flag("absoluteArcSize", false);
-                let (arc, step) = match (style.shape() == "folder", fixed) {
-                    (true, false) => (0.1, 0.01),
-                    (true, true) => (0.1, 1.0),
-                    (false, true) => (20.0, 1.0),
-                    (false, false) => (15.0, 1.0),
+                let (arc, step, digits) = match (style.shape() == "folder", fixed) {
+                    (true, false) => (0.1, 0.01, 4),
+                    (true, true) => (0.1, 1.0, 2),
+                    (false, true) => (20.0, 1.0, 2),
+                    (false, false) => (15.0, 1.0, 2),
                 };
                 let steps = self.arc_size.adjustment();
                 steps.set_step_increment(step);
                 steps.set_page_increment(10.0 * step);
+                self.arc_size.set_digits(digits);
                 self.arc_size.set_value(style.num("arcSize", arc));
                 self.effects.fill(style, effects);
                 self.divider.set_active(style.flag("swimlaneLine", true));
