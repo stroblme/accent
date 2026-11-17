@@ -79,7 +79,7 @@ fn near(lines: &[Vec<Point>], p: Point, reach: f64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scene::{Align, Font, Paint, Stroke, VAlign};
+    use crate::scene::{Align, Font, Paint, Snap, Stroke, VAlign};
     use crate::shapes::rect as outline;
     use crate::style::Color;
 
@@ -98,7 +98,10 @@ mod tests {
             }),
             opacity: 1.0,
             shadow: false,
-            snap: Some(width),
+            snap: Some(Snap {
+                width,
+                stroked: true,
+            }),
         }
     }
 
@@ -125,6 +128,7 @@ mod tests {
             background: None,
             border: None,
             opacity: 1.0,
+            snap: None,
         }
     }
 

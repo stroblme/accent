@@ -1,6 +1,6 @@
 // The label placement and `point_along` are derived from draw.io mxgraph/src/view/mxCellRenderer.js,
 // mxgraph/src/view/mxGraphView.js, mxgraph/src/shape/mxText.js, the text setting from
-// mxgraph/src/util/mxSvgCanvas2D.js and `screen_offset` from mxgraph/src/shape/mxShape.js
+// mxgraph/src/util/mxSvgCanvas2D.js and [`Snap::offset`] from mxgraph/src/shape/mxShape.js
 // (Apache-2.0, Copyright (c) 2006-2026 JGraph Holdings Ltd / draw.io AG), ported to Rust and
 // modified for accent; see crates/drawio/NOTICE.
 //! Toolkit-independent display lists in paint order and page coordinates.
@@ -187,10 +187,10 @@ pub enum Prim {
         opacity: f64,
         /// Paint [`SHADOW_COLOR`] under it at [`SHADOW_OFFSET`] first.
         shadow: bool,
-        /// The line width its whole shape is put on whole pixels by ([`screen_offset`]): its
-        /// cell's, stroked or not, or its stencil's own; `None` for a picture's background and
-        /// border, which stay where they are set (`mxShape.getSvgScreenOffset`, `mxImageShape`).
-        snap: Option<f64>,
+        /// What puts its whole shape on whole pixels ([`Snap`]): its cell's line, stroked or not,
+        /// or its stencil's own; `None` for a picture's background and border, which stay where
+        /// they are set (`mxShape.getSvgScreenOffset`, `mxImageShape`).
+        snap: Option<Snap>,
     },
     /// A label. With `wrap` the runs are wrapped to [`wrap_width`] of `rect.w`, else laid out
     /// unbounded; [`Prim::text_origin`] places the text by `align`/`valign` on `anchor`, and it is
@@ -212,6 +212,9 @@ pub enum Prim {
         background: Option<Color>,
         border: Option<Color>,
         opacity: f64,
+        /// A stencil's text moves with its lines ([`Snap`]); `None` for a label, which stays
+        /// where it is set (`mxText`).
+        snap: Option<Snap>,
     },
     /// A picture filling `rect` (keeping its aspect within it when `keep_aspect`), mirrored
     /// across its middle by `flip_h` and `flip_v`, then turned `rotation` degrees about the
@@ -226,6 +229,9 @@ pub enum Prim {
         flip_h: bool,
         flip_v: bool,
         opacity: f64,
+        /// A stencil's picture moves with its lines ([`Snap`]); `None` for a picture cell's,
+        /// which stays where it is set (`mxImageShape`).
+        snap: Option<Snap>,
     },
 }
 
@@ -343,15 +349,37 @@ impl Prim {
     }
 }
 
-/// How far right and down draw.io draws a shape `pixels` output pixels a unit whose line is
-/// `width` units wide, in output pixels: half a pixel when the line is an odd number of whole
-/// pixels wide (one at the least), which puts it on whole pixels, else none
-/// (`mxShape.getSvgScreenOffset`). Labels and pictures stay where they are set.
-pub fn screen_offset(width: f64, pixels: f64) -> f64 {
-    match (width * pixels).round().max(1.0) % 2.0 == 1.0 {
-        true => 0.5,
-        false => 0.0,
+/// What puts a shape on whole pixels, its text and pictures with it: its line's width, its
+/// cell's or its stencil's own, and whether its cell has a line at all.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Snap {
+    pub width: f64,
+    pub stroked: bool,
+}
+
+impl Snap {
+    /// How far right and down draw.io draws the shape at `pixels` output pixels a unit, in
+    /// output pixels: half a pixel when its line is an odd number of whole pixels wide (one at
+    /// the least), which puts it on whole pixels, else none (`mxShape.getSvgScreenOffset`).
+    /// draw.io's SVG export, `svg`, moves only a shape with a line
+    /// (`mxImageExport.getSvgShapeOffset`). Labels and pictures stay where they are set.
+    pub fn offset(self, pixels: f64, svg: bool) -> f64 {
+        let lined = self.stroked && self.width > 0.0;
+        let odd = (self.width * pixels).round().max(1.0) % 2.0 == 1.0;
+        match odd && (lined || !svg) {
+            true => 0.5,
+            false => 0.0,
+        }
     }
+}
+
+/// The thinnest line draw.io draws, in output pixels, a line 0 wide included (`Graph`'s
+/// `minSvgStrokeWidth`, `mxSvgCanvas2D.getCurrentStrokeWidth`).
+const THINNEST: f64 = 0.1;
+
+/// How wide draw.io draws a line `width` units wide at `pixels` output pixels a unit, in units.
+pub fn line_width(width: f64, pixels: f64) -> f64 {
+    width.max(THINNEST / pixels)
 }
 
 /// draw.io sets a label's lines 1.2 font sizes apart (`mxConstants.LINE_HEIGHT`).
@@ -555,6 +583,10 @@ impl<'a> Builder<'a> {
             Some(_) => Vec::new(),
             None => shapes::vertex(drawn, place.bounds, &style),
         };
+        let snap = Some(Snap {
+            width: style.num("strokeWidth", 1.0),
+            stroked: stroke.is_some(),
+        });
         let mut jiggle = Jiggle::of(&cell.id, &style);
         for (i, mut part) in parts.into_iter().enumerate() {
             let stroke = part_stroke(&style, stroke.as_ref(), &part);
@@ -575,7 +607,7 @@ impl<'a> Builder<'a> {
                 stroke,
                 opacity,
                 shadow: shadow && i == 0,
-                snap: Some(style.num("strokeWidth", 1.0)),
+                snap,
             });
         }
         if shape == "image" {
@@ -600,9 +632,7 @@ impl<'a> Builder<'a> {
     /// on what it paints, and across its box only where the style says `pointerEvents=1`
     /// (`mxStencil.drawShape`).
     // ponytail: text in a mirrored stencil is set the right way round, where draw.io mirrors its
-    // letters too; the legacy `stencilFlipH`/`stencilFlipV` keys are not read; and its text and
-    // pictures stay where they are set, where draw.io moves them with its lines
-    // (`screen_offset`).
+    // letters too; and the legacy `stencilFlipH`/`stencilFlipV` keys are not read.
     fn stencil(
         &mut self,
         cell: &Cell,
@@ -614,7 +644,10 @@ impl<'a> Builder<'a> {
     ) {
         let id = || cell.id.clone();
         let opacity = style.num("opacity", 100.0) / 100.0;
-        let snap = Some(stencil.snap_width(style));
+        let snap = Some(Snap {
+            width: stencil.snap_width(style),
+            stroked: style.color("strokeColor").is_some(),
+        });
         if style.get("pointerEvents") == Some("1") {
             let mut path = shapes::rect(place.bounds);
             geom::map_path(&mut path, |p| place.apply(p));
@@ -696,6 +729,7 @@ impl<'a> Builder<'a> {
                         background: None,
                         border: None,
                         opacity,
+                        snap,
                     });
                 }
                 Piece::Image {
@@ -725,6 +759,7 @@ impl<'a> Builder<'a> {
                         flip_v: flip_v != place.flip_v,
                         // At the fill's opacity too, as `mxSvgCanvas2D.image` draws it.
                         opacity: opacity * style.num("fillOpacity", 100.0) / 100.0,
+                        snap,
                     });
                 }
             }
@@ -773,6 +808,7 @@ impl<'a> Builder<'a> {
                 flip_h: place.flip_h,
                 flip_v: place.flip_v,
                 opacity: opacity * fill_alpha,
+                snap: None,
             });
         }
         if let Some(border) = style.color("imageBorder") {
@@ -820,7 +856,10 @@ impl<'a> Builder<'a> {
         let opacity = style.num("opacity", 100.0) / 100.0;
         let shadow = style.flag("shadow", false);
         let line = stroke(&style);
-        let snap = Some(style.num("strokeWidth", 1.0));
+        let snap = Some(Snap {
+            width: style.num("strokeWidth", 1.0),
+            stroked: line.is_some(),
+        });
         let mut jiggle = Jiggle::of(&cell.id, &style);
         if style.shape() == "flexArrow" {
             // A band, filled; its outline is stroked only if it has a stroke colour.
@@ -1087,6 +1126,7 @@ impl<'a> Builder<'a> {
             background: style.color("labelBackgroundColor"),
             border: style.color("labelBorderColor"),
             opacity,
+            snap: None,
         });
     }
 }
@@ -1412,14 +1452,41 @@ mod tests {
 
     #[test]
     fn an_odd_pixel_wide_line_is_drawn_half_a_pixel_over() {
-        use super::screen_offset;
+        let offset = |width, pixels| {
+            let stroked = Snap {
+                width,
+                stroked: true,
+            };
+            stroked.offset(pixels, false)
+        };
         // A 1 unit line at 100 % and at 300 %, at 200 %, and a 2 unit one at 50 %.
-        assert_eq!(screen_offset(1.0, 1.0), 0.5);
-        assert_eq!(screen_offset(1.0, 3.0), 0.5);
-        assert_eq!(screen_offset(1.0, 2.0), 0.0);
-        assert_eq!(screen_offset(2.0, 0.5), 0.5);
-        // A hairline is a pixel wide at the least.
-        assert_eq!(screen_offset(0.2, 1.0), 0.5);
+        assert_eq!(offset(1.0, 1.0), 0.5);
+        assert_eq!(offset(1.0, 3.0), 0.5);
+        assert_eq!(offset(1.0, 2.0), 0.0);
+        assert_eq!(offset(2.0, 0.5), 0.5);
+        // A hairline is a pixel wide at the least, a line 0 wide too.
+        assert_eq!(offset(0.2, 1.0), 0.5);
+        assert_eq!(offset(0.0, 1.0), 0.5);
+    }
+
+    #[test]
+    fn an_svg_moves_only_a_shape_with_a_line() {
+        let snap = |width, stroked| Snap { width, stroked };
+        // On screen any shape moves by its width, in an SVG only one with a line.
+        assert_eq!(snap(1.0, false).offset(1.0, false), 0.5);
+        assert_eq!(snap(1.0, false).offset(1.0, true), 0.0);
+        assert_eq!(snap(1.0, true).offset(1.0, true), 0.5);
+        assert_eq!(snap(0.0, true).offset(1.0, true), 0.0);
+        assert_eq!(snap(2.0, true).offset(1.0, true), 0.0);
+    }
+
+    #[test]
+    fn a_line_is_a_tenth_of_a_pixel_wide_at_the_least() {
+        use super::line_width;
+        assert_eq!(line_width(0.0, 1.0), 0.1);
+        assert_eq!(line_width(0.0, 2.0), 0.05);
+        assert_eq!(line_width(0.05, 1.0), 0.1);
+        assert_eq!(line_width(1.0, 1.0), 1.0);
     }
 
     #[test]
@@ -1928,7 +1995,9 @@ mod tests {
             )]);
             let s = scene(&p);
             let snap = |p: &Prim| match p {
-                Prim::Path { stroke, snap, .. } => Some((stroke.as_ref().map(|s| s.width), *snap)),
+                Prim::Path { stroke, snap, .. } => {
+                    Some((stroke.as_ref().map(|s| s.width), snap.map(|s| s.width)))
+                }
                 _ => None,
             };
             s.prims.iter().filter_map(snap).collect::<Vec<_>>()
@@ -1944,5 +2013,44 @@ mod tests {
         // An unstroked shape by the width it would be stroked with.
         let unstroked = "strokeColor=none;strokeWidth=2;";
         assert_eq!(snaps(unstroked, 20.0, 20.0), [(None, Some(2.0))]);
+    }
+
+    #[test]
+    fn a_stencil_s_text_and_pictures_move_with_its_lines() {
+        // A box with a letter and a picture in it, at a line width of its own, deflated into the
+        // style as `Graph.compress` writes it.
+        let xml = r#"<shape w="10" h="10" strokewidth="3"><foreground><rect x="0" y="0" w="10" h="10"/><fillstroke/><text str="A" x="5" y="5"/><image src="data:image/png,AA" x="0" y="0" w="5" h="5"/></foreground></shape>"#;
+        let packed =
+            crate::base64::encode(&miniz_oxide::deflate::compress_to_vec(xml.as_bytes(), 6));
+        let snaps = |style: &str| {
+            let style = format!("shape=stencil({packed});{style}");
+            let r = Rect::new(0.0, 0.0, 10.0, 10.0);
+            let p = page(vec![Cell::new_vertex("s", "1", r, &style, "")]);
+            let snap = |p: &Prim| match p {
+                Prim::Path { snap, .. } | Prim::Text { snap, .. } | Prim::Image { snap, .. } => {
+                    *snap
+                }
+            };
+            scene(&p).prims.iter().map(snap).collect::<Vec<_>>()
+        };
+        let own = Some(Snap {
+            width: 3.0,
+            stroked: true,
+        });
+        assert_eq!(snaps(""), [own; 3]);
+        // A cell with no line keeps its stencil's width but moves in no SVG.
+        let unstroked = own.map(|s| Snap {
+            stroked: false,
+            ..s
+        });
+        assert_eq!(snaps("strokeColor=none;"), [unstroked; 3]);
+        // A label stays where it is set.
+        let r = Rect::new(0.0, 0.0, 10.0, 10.0);
+        let p = page(vec![Cell::new_vertex("t", "1", r, "", "Label")]);
+        let label = scene(&p).prims.into_iter().find_map(|p| match p {
+            Prim::Text { snap, .. } => Some(snap),
+            _ => None,
+        });
+        assert_eq!(label, Some(None));
     }
 }

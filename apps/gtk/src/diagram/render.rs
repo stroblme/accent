@@ -32,6 +32,18 @@ pub enum Area {
     Drawing,
 }
 
+/// What a page goes out as, which says the pixels its lines are put on whole ones of
+/// (`Frame::pixels`), and whether as draw.io's SVG export puts them (`Cache::set_svg`).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Out {
+    /// A PDF or a printout, a pixel a unit, as draw.io's browser draws the page it prints.
+    Pdf,
+    /// An SVG, a pixel a unit.
+    Svg,
+    /// A PNG of so many pixels a unit.
+    Png(f64),
+}
+
 /// A page painted: the picture at [`DETAIL`], the part of it that goes out, and its paper.
 pub struct Drawn {
     node: Option<gsk::RenderNode>,
@@ -70,9 +82,8 @@ pub struct Pictures<'a> {
     pub files: Option<&'a Files>,
 }
 
-/// Page `i` of `file` with `pictures`, for an output of `pixels` a page unit (`Frame::pixels`).
-/// `None` for no such page.
-pub fn draw(file: &File, i: usize, area: Area, pictures: Pictures, pixels: f64) -> Option<Drawn> {
+/// Page `i` of `file` with `pictures`, to go `out`. `None` for no such page.
+pub fn draw(file: &File, i: usize, area: Area, pictures: Pictures, out: Out) -> Option<Drawn> {
     let page = file.pages.get(i)?;
     let scene = accent_drawio::scene_with(page, &super::shown(i, file.pages.len()));
     // Pango lays labels out through a widget; their sizes are absolute, so any one does.
@@ -82,6 +93,11 @@ pub fn draw(file: &File, i: usize, area: Area, pictures: Pictures, pixels: f64) 
     cache.set_web(pictures.web);
     cache.set_files(pictures.files.cloned());
     cache.set_vectors(true);
+    let pixels = match out {
+        Out::Pdf | Out::Svg => 1.0,
+        Out::Png(pixels) => pixels,
+    };
+    cache.set_svg(out == Out::Svg);
     let frame = Frame {
         scale: DETAIL,
         pixels,
@@ -139,7 +155,7 @@ fn painted(prims: &[Prim], cache: &Cache) -> Option<Rect> {
 pub fn pdf(file: &File, pictures: Pictures) -> Result<Vec<u8>, String> {
     let surface = cairo::PdfSurface::for_stream(1.0, 1.0, Vec::<u8>::new()).map_err(say)?;
     for i in 0..file.pages.len() {
-        let Some(drawn) = draw(file, i, Area::Sheet, pictures, 1.0) else {
+        let Some(drawn) = draw(file, i, Area::Sheet, pictures, Out::Pdf) else {
             continue;
         };
         let (w, h) = (drawn.area.w * PDF_POINT, drawn.area.h * PDF_POINT);
@@ -153,7 +169,7 @@ pub fn pdf(file: &File, pictures: Pictures) -> Result<Vec<u8>, String> {
 
 /// Page `i` of `file` as an SVG of `area`, a page unit to a pixel.
 pub fn svg(file: &File, i: usize, area: Area, pictures: Pictures) -> Result<Vec<u8>, String> {
-    let drawn = draw(file, i, area, pictures, 1.0).ok_or("there is no such page")?;
+    let drawn = draw(file, i, area, pictures, Out::Svg).ok_or("there is no such page")?;
     let mut surface =
         cairo::SvgSurface::for_stream(drawn.area.w, drawn.area.h, Vec::<u8>::new()).map_err(say)?;
     surface.set_document_unit(cairo::SvgUnit::Px);
@@ -171,8 +187,14 @@ pub fn png(
     pictures: Pictures,
     longest: Option<f64>,
 ) -> Result<Vec<u8>, String> {
-    let drawn = draw(file, i, Area::Drawing, pictures, PNG_SCALE).ok_or("there is no such page")?;
+    let at = |pixels| draw(file, i, Area::Drawing, pictures, Out::Png(pixels));
+    let mut drawn = at(PNG_SCALE).ok_or("there is no such page")?;
     let scale = png_scale((drawn.area.w, drawn.area.h), longest);
+    // Its area is known once drawn, and a page shrunk to fit is drawn again at the pixels it goes
+    // out at, which its lines are put on whole ones of.
+    if scale < PNG_SCALE {
+        drawn = at(scale).ok_or("there is no such page")?;
+    }
     let (w, h) = (drawn.area.w * scale, drawn.area.h * scale);
     let surface =
         cairo::ImageSurface::create(cairo::Format::ARgb32, w as i32, h as i32).map_err(say)?;

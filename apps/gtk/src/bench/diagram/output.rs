@@ -75,6 +75,34 @@ pub(super) fn export(app: &Rc<App>, rel: &str, dir: &Path) {
     });
 }
 
+/// A page whose drawing is 1568 units tall: a 1 wide box from (1, 1), and inside it one whose line
+/// is 0 wide from (50, 1).
+const TALL: &str = r#"<mxfile><diagram name="Tall" id="tall"><mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/>
+<mxCell id="a" style="fillColor=none;" vertex="1" parent="1"><mxGeometry x="1" y="1" width="100" height="1566" as="geometry"/></mxCell>
+<mxCell id="z" style="fillColor=none;strokeWidth=0;" vertex="1" parent="1"><mxGeometry x="50" y="1" width="40" height="100" as="geometry"/></mxCell>
+</root></mxGraphModel></diagram></mxfile>"#;
+
+/// `=render`: [`TALL`] as `accent --render-diagram` draws it, a pixel a unit to keep within 1568
+/// pixels: the red of the first three pixels across the half-way row, which the 1 wide line covers
+/// the middle one of, and whether the 0 wide line is drawn.
+pub(super) fn render(app: &Rc<App>) {
+    let file = accent_drawio::File::from_bytes(TALL.as_bytes()).expect("the tall page");
+    let png = crate::diagram::export::rendered(&file, 0).expect("a PNG");
+    let texture = gdk::Texture::from_bytes(&glib::Bytes::from_owned(png)).expect("decodes");
+    let mut downloader = gdk::TextureDownloader::new(&texture);
+    downloader.set_format(gdk::MemoryFormat::R8g8b8a8);
+    let (bytes, stride) = downloader.download_bytes();
+    let red = |x: usize, y: usize| bytes[y * stride + x * 4];
+    let line: Vec<u8> = (0..3).map(|x| red(x, 784)).collect();
+    println!(
+        "bench diagram render size={}x{} line={line:?} hairline={}",
+        texture.width(),
+        texture.height(),
+        red(50, 50) < 255
+    );
+    bench_quit(app);
+}
+
 /// What an export wrote: a PDF's page sizes in points, a picture's size and its commonest pixel,
 /// and the pictures and glyphs an SVG holds (a formula is glyphs, no picture).
 fn exported(path: &Path) -> String {

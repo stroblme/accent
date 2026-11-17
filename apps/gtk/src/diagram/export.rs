@@ -12,7 +12,7 @@ use gtk::prelude::*;
 use gtk::{gio, glib};
 
 use super::DiagramTab;
-use super::render::{self, Area, Drawn, Pictures};
+use super::render::{self, Area, Drawn, Out, Pictures};
 use crate::App;
 use crate::export::Export;
 
@@ -97,8 +97,13 @@ fn render_stdin(page: Option<OsString>) -> Result<(), String> {
     std::io::stdin().read_to_end(&mut xml).map_err(say)?;
     let file = File::from_bytes(&xml).map_err(say)?;
     gtk::init().map_err(|e| format!("there is no display to draw on ({e})"))?;
-    let png = render::png(&file, page, Pictures::default(), Some(RENDER_LONGEST))?;
+    let png = rendered(&file, page)?;
     std::io::stdout().write_all(&png).map_err(say)
+}
+
+/// Page `page` of `file` as `accent --render-diagram` draws it.
+pub(crate) fn rendered(file: &File, page: usize) -> Result<Vec<u8>, String> {
+    render::png(file, page, Pictures::default(), Some(RENDER_LONGEST))
 }
 
 fn say(e: impl std::fmt::Display) -> String {
@@ -141,7 +146,7 @@ pub fn print(app: &Rc<App>, tab: &Rc<DiagramTab>) {
 pub fn operation(file: &File, pictures: Pictures, name: &str) -> gtk::PrintOperation {
     let mut pages: Vec<Drawn> = Vec::new();
     for i in 0..file.pages.len() {
-        pages.extend(render::draw(file, i, Area::Sheet, pictures, 1.0));
+        pages.extend(render::draw(file, i, Area::Sheet, pictures, Out::Pdf));
     }
     let pages = Rc::new(pages);
     let op = gtk::PrintOperation::new();

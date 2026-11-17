@@ -403,6 +403,13 @@ drill_diagram_file_picture() {
 		'bench diagram web embed pictures=1'
 }
 
+# A page `accent --render-diagram` shrinks to a pixel a unit, its 1 wide line on whole pixels of
+# that and a line 0 wide drawn a tenth of a pixel wide, as draw.io draws them (DESIGN.md, Diagram).
+drill_diagram_render() {
+	launch 60 ACCENT_BENCH_DIAGRAM=render >"$dir/render"
+	has "$dir/render" 'bench diagram render size=102x1568 line=[255, 0, 255] hairline=true'
+}
+
 # What real clicks and bands select among a diagram's groups, as draw.io selects, and how the
 # groups fit what they hold (DESIGN.md, Diagram).
 drill_diagram_select() {

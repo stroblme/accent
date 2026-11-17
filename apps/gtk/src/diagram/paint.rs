@@ -9,7 +9,7 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use accent_core::recolour;
-use accent_drawio::scene::{line_height, screen_offset, wrap_width};
+use accent_drawio::scene::{Snap, line_height, line_width, wrap_width};
 use accent_drawio::{
     Align, Cap, Color, ImageSource, Join, Marks, Paint, PathCmd, Point, Prim, Rect, Run, Stroke,
 };
@@ -56,6 +56,8 @@ pub struct Cache {
     wants: RefCell<Vec<(Rc<Svg>, Want)>>,
     /// Whether SVG pictures are drawn as vectors, as an export draws them.
     vectors: Cell<bool>,
+    /// Whether shapes are put on whole pixels as draw.io's SVG export puts them (`Snap::offset`).
+    svg: Cell<bool>,
     /// The operators the display list's formulas declare, which each of them is read after
     /// (`accent_core::markdown::declarations`): the page is MathJax's page.
     declared: RefCell<Option<Rc<str>>>,
@@ -139,6 +141,7 @@ impl Cache {
             canvas: Cell::default(),
             wants: RefCell::default(),
             vectors: self.vectors.clone(),
+            svg: self.svg.clone(),
             declared: self.declared.clone(),
         }
     }
@@ -191,6 +194,17 @@ impl Cache {
     /// Draw SVG pictures as vectors, as an export does.
     pub fn set_vectors(&self, on: bool) {
         self.vectors.set(on);
+    }
+
+    /// Put shapes on whole pixels as draw.io's SVG export does, only those with a line.
+    pub fn set_svg(&self, on: bool) {
+        self.svg.set(on);
+    }
+
+    /// How far right and down `snap` puts its shape on `frame`'s whole pixels, in content units.
+    fn over(&self, snap: Option<Snap>, frame: &Frame) -> f64 {
+        let over = snap.map_or(0.0, |s| s.offset(frame.pixels, self.svg.get()));
+        over * frame.scale / frame.pixels
     }
 
     /// Draw pictures on the web from the download cache, or as their boxes.
@@ -551,11 +565,10 @@ pub fn prim(
             ..
         } => {
             // As far over as draw.io draws the shape, which keeps a one-pixel line on whole
-            // pixels (`screen_offset`), in content units.
-            let over = snap.map_or(0.0, |w| screen_offset(w, frame.pixels));
-            let over = over * frame.scale / frame.pixels;
+            // pixels.
+            let over = cache.over(*snap, frame) as f32;
             snapshot.save();
-            snapshot.translate(&graphene::Point::new(over as f32, over as f32));
+            snapshot.translate(&graphene::Point::new(over, over));
             outline(
                 snapshot,
                 &to_gsk(path, frame),
@@ -576,6 +589,7 @@ pub fn prim(
             background,
             border,
             opacity,
+            snap,
             ..
         } => {
             let look = Look {
@@ -613,7 +627,12 @@ pub fn prim(
                 downs: downs.iter().map(|down| down * frame.scale).collect(),
                 anchor: frame.to_content(*anchor),
             };
+            // A stencil's text moves with its lines, and is kept where it is set.
+            let over = cache.over(*snap, frame) as f32;
+            snapshot.save();
+            snapshot.translate(&graphene::Point::new(over, over));
             let block = label(snapshot, &laid, &placed, *rotation, font.color, look, tint);
+            snapshot.restore();
             cache.painted(index, frame, block, *anchor, *rotation);
         }
         Prim::Image {
@@ -624,9 +643,12 @@ pub fn prim(
             flip_h,
             flip_v,
             opacity,
+            snap,
             ..
         } => {
-            let r = frame.rect(rect);
+            // A stencil's picture moves with its lines, where an SVG's copy is drawn too.
+            let over = cache.over(*snap, frame);
+            let r = frame.rect(rect).translate(over, over);
             let picture = match source {
                 ImageSource::DataUri(uri) => cache.picture(index, uri, widget),
                 ImageSource::Url(src) if is_file(src) => cache.file_picture(index, src, widget),
@@ -754,10 +776,11 @@ pub fn to_gsk(path: &[PathCmd], frame: &Frame) -> gsk::Path {
     builder.to_path()
 }
 
-/// A stroke as draw.io's SVG draws one: its caps and joins, dashes in multiples of the width
-/// (the crate has already scaled them by it).
-pub fn stroke_of(s: &Stroke, scale: f64) -> gsk::Stroke {
-    let stroke = gsk::Stroke::new((s.width * scale) as f32);
+/// A stroke as draw.io's SVG draws one on `frame`: a tenth of a pixel wide at the least, its caps
+/// and joins, dashes in multiples of the width (the crate has already scaled them by it).
+pub fn stroke_of(s: &Stroke, frame: &Frame) -> gsk::Stroke {
+    let scale = frame.scale;
+    let stroke = gsk::Stroke::new((line_width(s.width, frame.pixels) * scale) as f32);
     match s.join {
         Join::Miter(limit) => {
             stroke.set_line_join(gsk::LineJoin::Miter);
@@ -801,9 +824,7 @@ pub fn outline(
             ));
             match (fill, stroke) {
                 (Some(_), _) => snapshot.append_fill(path, gsk::FillRule::Winding, &colour),
-                (None, Some(s)) => {
-                    snapshot.append_stroke(path, &stroke_of(s, frame.scale), &colour)
-                }
+                (None, Some(s)) => snapshot.append_stroke(path, &stroke_of(s, frame), &colour),
                 (None, None) => {}
             }
             snapshot.restore();
@@ -869,7 +890,7 @@ pub fn outline(
             None => {}
         }
         if let Some(s) = stroke {
-            snapshot.append_stroke(path, &stroke_of(s, frame.scale), &tint.rgba(s.color));
+            snapshot.append_stroke(path, &stroke_of(s, frame), &tint.rgba(s.color));
         }
     });
 }
