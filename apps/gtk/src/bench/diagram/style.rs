@@ -1,7 +1,8 @@
 //! The style editor on the sample: Edit Style opens a tab of the cell's style an item a line,
 //! what is typed there reaches the cell once typing pauses, a change elsewhere shows in the tab,
 //! Edit Style again comes back to it, completion offers keys and values, the star sets and clears
-//! the Default Style, and the tab closes with its cell.
+//! the Default Style, Save writes no file and the session keeps no tab, and the tab closes with
+//! its cell and, what was typed handed over first, with its diagram.
 
 use super::*;
 
@@ -61,11 +62,19 @@ pub(super) fn style(app: &Rc<App>, rel: &str) {
             return bench_quit(&app);
         };
         println!(
-            "bench diagram style opened title={:?} front={} text={:?}",
+            "bench diagram style opened title={:?} front={} language={} text={:?}",
             editor.page.title(),
             app.active().is_some_and(|t| Rc::ptr_eq(&t, &editor)),
+            crate::lang::language_id(&editor),
             editor.text()
         );
+        // A picture of the editor, and below of the Style row, for looking at.
+        let shot = std::env::var("ACCENT_BENCH_DIAGRAM_SHOT").ok();
+        if let Some(path) = &shot {
+            glib::timeout_future(Duration::from_millis(300)).await;
+            let shot = shoot(app.window.upcast_ref(), Path::new(path));
+            println!("bench diagram shot {shot}");
+        }
 
         // Completion: a key at the start of a line, a value after its `=`.
         let session = crate::completion::session(&editor);
@@ -131,6 +140,17 @@ pub(super) fn style(app: &Rc<App>, rel: &str) {
         app.reveal_page(&tab.page);
         tab.select(vec!["a".to_string()]);
         glib::timeout_future(Duration::from_millis(100)).await;
+        // The Style group alone, laid out whole however far the pane is scrolled.
+        let group = find_widget(&pane, &|w| {
+            w.downcast_ref::<adw::PreferencesGroup>()
+                .is_some_and(|g| g.title() == "Style")
+        });
+        if let (Some(path), Some(group)) = (&shot, group) {
+            app.show_pane("properties");
+            glib::timeout_future(Duration::from_millis(300)).await;
+            let path = path.replace(".png", "-style.png");
+            println!("bench diagram shot {}", shoot(&group, Path::new(&path)));
+        }
         if let Some(b) = button("Set Default Style") {
             b.emit_clicked();
         }
@@ -150,6 +170,62 @@ pub(super) fn style(app: &Rc<App>, rel: &str) {
         tab.delete();
         glib::timeout_future(Duration::from_millis(300)).await;
         println!("bench diagram style deleted editors={}", editors().len());
+
+        // The cell back, its editor again: `=` typed key by key opens the values, Save writes no
+        // file, and the session keeps no tab.
+        tab.undo();
+        tab.select(vec!["a".to_string()]);
+        glib::timeout_future(Duration::from_millis(100)).await;
+        edit.emit_clicked();
+        glib::timeout_future(Duration::from_millis(300)).await;
+        let Some(editor) = editors().into_iter().next() else {
+            println!("bench diagram style no_editor");
+            return bench_quit(&app);
+        };
+        editor.view.grab_focus();
+        editor.buffer.place_cursor(&editor.buffer.end_iter());
+        for c in "\nshape=".chars() {
+            crate::bench::complete::bench_char(&editor, c);
+            crate::bench::complete::bench_idle().await;
+        }
+        glib::timeout_future(Duration::from_millis(200)).await;
+        // Values, which only `=` asks for: the popup's showing is the window manager's to grant.
+        let session = crate::completion::session(&editor);
+        let rows = session.map(|s| s.rows().0).unwrap_or_default();
+        println!(
+            "bench diagram style typed \"shape=\" rows={:?}",
+            &rows[..rows.len().min(2)]
+        );
+        let mut from = editor.buffer.end_iter();
+        from.backward_chars("\nshape=".chars().count() as i32);
+        editor
+            .buffer
+            .delete(&mut from, &mut editor.buffer.end_iter());
+        glib::timeout_future(Duration::from_millis(700)).await;
+        app.save_active();
+        glib::timeout_future(Duration::from_millis(300)).await;
+        let written = std::fs::read_dir(app.root()).map_or(0, |dir| {
+            dir.flatten()
+                .filter(|e| e.file_name().to_string_lossy().starts_with("accent-style"))
+                .count()
+        });
+        let kept = format!("{:?}", app.current_session()).contains("accent-style");
+        println!(
+            "bench diagram style saved a={:?} files={written} session={kept}",
+            style("a")
+        );
+
+        // Typed, then the diagram closed before the pause: handed over and written with it.
+        let mut end = editor.buffer.end_iter();
+        editor.buffer.insert(&mut end, "\nglass=1");
+        app.close_page(&tab.page);
+        glib::timeout_future(Duration::from_millis(1000)).await;
+        let disk = std::fs::read_to_string(app.root().join(&rel)).unwrap_or_default();
+        println!(
+            "bench diagram style closed editors={} written={}",
+            editors().len(),
+            disk.contains("glass=1;")
+        );
         bench_quit(&app);
     });
 }

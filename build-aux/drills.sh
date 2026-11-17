@@ -501,13 +501,14 @@ drill_diagram_select() {
 }
 
 # The style editor: Edit Style's tab of a cell's style, what is typed reaching the cell after the
-# pause, the diagram's Undo showing in the tab, completion, the star's state and the tab closing
-# with its cell (DESIGN.md, Diagram).
+# pause, the diagram's Undo showing in the tab, completion, the star's state, Save and the session
+# leaving no trace of it, and the tab closing with its cell and with its diagram (DESIGN.md,
+# Diagram).
 drill_diagram_style() {
 	launch 60 ACCENT_BENCH_DIAGRAM=style:style.drawio >"$dir/style"
 	has "$dir/style" \
 		'bench diagram style star Some(("non-starred-symbolic", "Set Default Style for rectangles"))' \
-		'bench diagram style opened title="A (style.drawio)" front=true text="rounded=1\nwhiteSpace=wrap\nhtml=1\nfillColor=#dae8fc\nstrokeColor=#6c8ebf"' \
+		'bench diagram style opened title="A (style.drawio)" front=true language=drawio-style text="rounded=1\nwhiteSpace=wrap\nhtml=1\nfillColor=#dae8fc\nstrokeColor=#6c8ebf"' \
 		'bench diagram style complete "fil" rows=["fillColor", "fillOpacity"]' \
 		'bench diagram style complete "shape=ell" rows=["ellipse", "doubleEllipse"]' \
 		'bench diagram style untouched a=Some("rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;") history=(false, false)' \
@@ -518,7 +519,10 @@ drill_diagram_style() {
 		'bench diagram style set Some(("starred-symbolic", "Clear Default Style for rectangles"))' \
 		'bench diagram style cleared Some(("non-starred-symbolic", "Set Default Style for rectangles"))' \
 		'bench diagram style undo_clear Some(("starred-symbolic", "Clear Default Style for rectangles"))' \
-		'bench diagram style deleted editors=0'
+		'bench diagram style deleted editors=0' \
+		'bench diagram style typed "shape=" rows=["label", "rectangle"]' \
+		'bench diagram style saved a=Some("rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;shadow=1;") files=0 session=false' \
+		'bench diagram style closed editors=0 written=true'
 }
 
 # Ctrl+V with a browser's HTML on the clipboard, and Paste as Plain Text, in a note (beside its code

@@ -104,10 +104,10 @@ impl DiagramTab {
         self.edit(|e, _| e.set_style_string(index, &place.cell, &written));
     }
 
-    /// The style editors open on this diagram, those whose tab has closed let go of.
-    fn style_links(&self) -> Vec<(Rc<Tab>, Place)> {
+    /// The style editors still `open` on this diagram, the others let go of.
+    fn style_links(&self, open: impl Fn(&Tab) -> bool) -> Vec<(Rc<Tab>, Place)> {
         let mut links = self.styles.borrow_mut();
-        links.retain(|link| link.tab.strong_count() > 0);
+        links.retain(|link| link.tab.upgrade().is_some_and(|tab| open(&tab)));
         links
             .iter()
             .filter_map(|link| Some((link.tab.upgrade()?, link.cell.clone())))
@@ -128,8 +128,8 @@ impl App {
         let Some((place, name, style)) = diagram.style_target() else {
             return;
         };
-        let open = diagram
-            .style_links()
+        let open = self
+            .styles_of(diagram)
             .into_iter()
             .find(|(_, at)| *at == place);
         if let Some((tab, _)) = open {
@@ -138,6 +138,9 @@ impl App {
         let Some(pane) = self.pane_of(&diagram.page) else {
             return;
         };
+        // Kept, as a note with a preview is: a click down the Files tree would otherwise replace
+        // the diagram, and its editor with it.
+        self.promote(&diagram.page);
         let pages = pane.pages();
         let at = pages.iter().position(|p| *p == diagram.page).unwrap_or(0);
         let pinned = pages.iter().filter(|p| self.is_pinned(p)).count();
@@ -176,6 +179,12 @@ impl App {
         self.show_style(&tab);
     }
 
+    /// `diagram`'s style editors, as long as their tabs are in this window: a closed tab may
+    /// outlive its page for a moment.
+    fn styles_of(&self, diagram: &DiagramTab) -> Vec<(Rc<Tab>, Place)> {
+        diagram.style_links(|tab| self.doc_for_page(&tab.page).is_some())
+    }
+
     /// Bring a style editor to the front of its pane, the keyboard in it.
     fn show_style(self: &Rc<Self>, tab: &Rc<Tab>) {
         self.reveal_page(&tab.page);
@@ -188,7 +197,7 @@ impl App {
     /// what was typed there is still on its way or already reads as it, and closes once its cell
     /// has gone.
     pub(crate) fn sync_styles(self: &Rc<Self>, diagram: &Rc<DiagramTab>) {
-        for (tab, place) in diagram.style_links() {
+        for (tab, place) in self.styles_of(diagram) {
             let Some((name, style)) = diagram.style_of(&place) else {
                 // After this change has run its course: a close is an edit of the window.
                 let app = Rc::downgrade(self);
@@ -213,7 +222,7 @@ impl App {
 
     /// `diagram` is closing: its style editors hand over what is still typed, then close.
     pub(crate) fn close_styles(self: &Rc<Self>, diagram: &DiagramTab) {
-        for (tab, _) in diagram.style_links() {
+        for (tab, _) in self.styles_of(diagram) {
             tab.apply_scratch();
             self.close_page(&tab.page);
         }
