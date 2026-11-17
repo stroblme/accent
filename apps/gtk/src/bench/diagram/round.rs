@@ -106,15 +106,24 @@ fn edit_round(app: &Rc<App>, tab: &Rc<crate::diagram::DiagramTab>) {
     tab.finish_label();
     // The label editor over a shape and over a top-aligned text cell, against the cell on
     // screen: how far it reaches past the cell's top and bottom edges, and how tall its text is
-    // laid out in it.
-    for id in ["a", "m"] {
-        tab.select(vec![id.to_string()]);
-        tab.edit_label();
-        // Laid out at its font, which a provider brings in on a frame of its own.
+    // laid out in it. Meanwhile the canvas leaves the label to the editor, so what it no longer
+    // draws lies in the cell, and once it is finished the canvas is as it was.
+    // Some frames: the canvas has no picture between a change and the frame that draws it, and
+    // the editor is laid out at its font, which a provider brings in on a frame of its own.
+    let frames = || {
         for _ in 0..20 {
             bench_pump();
             std::thread::sleep(Duration::from_millis(10));
         }
+    };
+    for id in ["a", "m"] {
+        tab.select(vec![id.to_string()]);
+        let canvas = tab.key_target();
+        frames();
+        let before = picture(&canvas);
+        tab.edit_label();
+        frames();
+        let during = picture(&canvas);
         let cell = tab.frame_of(id).map(|r| tab.to_widget(&r));
         if let (Some(cell), Some((at, content, px, _))) = (cell, tab.label_at()) {
             let rect =
@@ -129,6 +138,15 @@ fn edit_round(app: &Rc<App>, tab: &Rc<crate::diagram::DiagramTab>) {
             );
         }
         tab.finish_label();
+        frames();
+        let hidden = differ(before.as_ref(), during.as_ref());
+        let after = differ(before.as_ref(), picture(&canvas).as_ref());
+        println!(
+            "bench diagram label {id} hidden={} in_cell={} after={}",
+            hidden.is_some(),
+            hidden.zip(cell).is_some_and(|(h, c)| c.contains_rect(&h)),
+            after.is_some()
+        );
     }
     println!(
         "bench diagram properties shown={} showing={} sidebar_floor={}",
@@ -150,4 +168,23 @@ fn edit_round(app: &Rc<App>, tab: &Rc<crate::diagram::DiagramTab>) {
         );
         bench_quit(&app);
     });
+}
+
+/// The box round the pixels two pictures of one widget differ in, in its coordinates, if any.
+fn differ(a: Option<&gdk::Texture>, b: Option<&gdk::Texture>) -> Option<accent_drawio::Rect> {
+    let bytes = |t: &gdk::Texture| {
+        let mut downloader = gdk::TextureDownloader::new(t);
+        downloader.set_format(gdk::MemoryFormat::R8g8b8a8);
+        downloader.download_bytes()
+    };
+    let ((a, stride), (b, _)) = (bytes(a?), bytes(b?));
+    let differing = a.as_chunks::<4>().0.iter().zip(b.as_chunks::<4>().0);
+    let points = differing
+        .enumerate()
+        .filter(|(_, (p, q))| p != q)
+        .map(|(i, _)| {
+            let (x, y) = (i * 4 % stride / 4, i * 4 / stride);
+            accent_drawio::Point::new(x as f64, y as f64)
+        });
+    accent_drawio::geom::bounds_of(points)
 }

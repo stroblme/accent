@@ -11,7 +11,7 @@ mod preview;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use accent_drawio::{CellId, Color, Point, Rect};
+use accent_drawio::{CellId, Color, Point, Prim, Rect};
 use adw::prelude::*;
 use gtk::subclass::prelude::*;
 use gtk::{glib, graphene, gsk};
@@ -207,6 +207,13 @@ impl DiagramView {
     /// Show the page's grid at all times, not only while something is placed (Show Grid).
     pub fn set_show_grid(&self, on: bool) {
         self.imp().show_grid.set(on);
+        self.queue_draw();
+    }
+
+    /// Leave the label of `cell` to the editor open over it, undrawn until `None`, so a label
+    /// larger than the editor does not show round it.
+    pub fn set_editing(&self, cell: Option<CellId>) {
+        self.imp().editing.replace(cell);
         self.queue_draw();
     }
 
@@ -552,6 +559,8 @@ mod imp {
         pub panning: Cell<bool>,
         pub read_only: Cell<bool>,
         pub show_grid: Cell<bool>,
+        /// The cell whose label is being edited, which the canvas leaves to the editor.
+        pub editing: RefCell<Option<CellId>>,
         pub(super) drag: RefCell<Option<Drag>>,
         pub(super) preview: RefCell<Option<Preview>>,
         /// Whether the drag under way has gone past [`DRAG_SLOP`].
@@ -598,6 +607,7 @@ mod imp {
                 panning: Cell::new(false),
                 read_only: Cell::new(false),
                 show_grid: Cell::new(false),
+                editing: RefCell::new(None),
                 drag: RefCell::new(None),
                 preview: RefCell::new(None),
                 moved: Cell::new(false),
@@ -883,8 +893,15 @@ mod imp {
                     .frame(obj.upcast_ref(), Rect::new(sx, sy, w, h)),
             );
             cache.declare(prims);
+            // The label being edited: the last text its cell draws, after any its stencil does.
+            let editing = self.editing.borrow();
+            let hidden = editing.as_ref().and_then(|id| {
+                prims
+                    .iter()
+                    .rposition(|p| matches!(p, Prim::Text { cell, .. } if cell == id))
+            });
             for (i, prim) in prims.iter().enumerate() {
-                if bounds[i].intersects(&visible) {
+                if bounds[i].intersects(&visible) && Some(i) != hidden {
                     paint::prim(snapshot, obj.upcast_ref(), i, prim, &frame, cache, tint);
                 }
             }

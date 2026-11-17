@@ -596,6 +596,7 @@ impl DiagramTab {
             align,
             valign,
         };
+        self.view.set_editing(Some(id.clone()));
         let editor = LabelEditor::open(&self.overlay, id, &markdown, place, size, look);
         *self.label.borrow_mut() = Some(editor.clone());
         self.place_label();
@@ -639,6 +640,7 @@ impl DiagramTab {
         let Some(editor) = self.label.borrow_mut().take() else {
             return;
         };
+        self.view.set_editing(None);
         let typed = editor.changed();
         editor.close(&self.overlay);
         if let Some(markdown) = typed {
