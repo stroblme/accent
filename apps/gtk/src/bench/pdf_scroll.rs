@@ -1,5 +1,5 @@
 //! PDF frame pacing under real wheel input and continuous adjustment motion, then Alt+wheel
-//! paging and Ctrl+wheel zoom.
+//! paging, `n` at the end and Ctrl+wheel zoom.
 
 use super::*;
 
@@ -105,6 +105,7 @@ pub(super) fn run(app: &Rc<App>, rel: &str) {
         clock.disconnect(update);
         clock.disconnect(paint);
         alt(&app, &pdf, &reader, &scroller).await;
+        next_key(&app, &pdf, &reader, &scroller).await;
         ctrl(&app, &pdf, &reader, &scroller).await;
         bench_quit(&app);
     });
@@ -154,6 +155,41 @@ async fn alt(
             "bench pdf scroll alt {name} page={} on_top={on_top} moved={}",
             page + 1,
             value != from
+        );
+    }
+}
+
+/// `n` at 100 % from the second last page's top, and from the last page's bottom, which it
+/// leaves where it is, each printing the page it left the reader on and whether the view moved
+/// (DESIGN.md, Keyboard).
+async fn next_key(
+    app: &Rc<App>,
+    pdf: &Rc<pdftab::PdfTab>,
+    reader: &pdfview::PdfView,
+    scroller: &gtk::ScrolledWindow,
+) {
+    pdf.set_zoom(pdfview::PdfZoom::Scale(1.0));
+    let adj = scroller.vadjustment();
+    let middle = graphene::Point::new(
+        scroller.width() as f32 / 2.0,
+        scroller.height() as f32 / 2.0,
+    );
+    let at = scroller.compute_point(&app.window, &middle).unwrap();
+    let (sx, sy) = app.window.surface_transform();
+    let pointer = format!("move {:.0} {:.0}", at.x() as f64 + sx, at.y() as f64 + sy);
+    let last = pdf.page_count() - 1;
+    for (name, bottom) in [("before the end", false), ("at the end", true)] {
+        reader.goto_page(last - usize::from(!bottom), None);
+        if bottom {
+            adj.set_value(adj.upper() - adj.page_size());
+        }
+        reader.grab_focus();
+        let from = adj.value();
+        super::git::xtest(&format!("{pointer}; focus; key n; sleep 0.3")).await;
+        println!(
+            "bench pdf scroll key n {name} page={} moved={}",
+            reader.current_page() + 1,
+            adj.value() != from
         );
     }
 }

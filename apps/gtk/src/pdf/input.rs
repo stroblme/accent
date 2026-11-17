@@ -415,8 +415,6 @@ impl PdfTab {
                 let steps = crate::zoom::wheel_steps(&alt, dy, wheel.unit());
                 for _ in 0..steps.unsigned_abs() {
                     match steps > 0 {
-                        // Not back up to the last page's top from further down it.
-                        true if tab.view.current_page() + 1 >= tab.page_count() => {}
                         true => tab.next_page(),
                         false => tab.previous_page(),
                     }

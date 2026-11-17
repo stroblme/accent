@@ -2144,7 +2144,8 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 ### PDF
 
 - Copy `Ctrl+C`; next and previous page `Space` / `Shift+Space`, `n` / `p`, `Right` / `Left` and `Alt+scroll` a page a notch, as on a diagram (Diagram); `Up` / `Down` scroll a step and are not paging.
-  `Alt+scroll` pages the PDF under the pointer, which need not be the focused pane's, and stops on the last page.
+  `Alt+scroll` pages the PDF under the pointer, which need not be the focused pane's.
+  Paging on stops at the last page, however far down it the reader is.
 - Next Page and Previous Page are palette commands with no accelerator, fired by those keys as the tab's own: each is a typing key, and an application accelerator is dispatched at the window ahead of whatever has the keyboard, so `Space` in the table would be taken from the editor, the terminal and every entry.
 - Back and Forward are the window's (History): a PDF keeps no stack of its own.
   Only jumps go in — a link, an outline row, a page typed into Go to Line, a search's first step; paging is reading, and a history of single steps would have nothing to go back to.

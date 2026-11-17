@@ -625,8 +625,13 @@ impl PdfTab {
         self.view.goto_page(page, None);
     }
 
+    /// The next page's top, and nothing on the last page, where it would take the reader back up
+    /// to its top from further down it.
     pub fn next_page(&self) {
-        self.show_page((self.view.current_page() + 1).min(self.page_count().saturating_sub(1)));
+        let next = self.view.current_page() + 1;
+        if next < self.page_count() {
+            self.show_page(next);
+        }
     }
 
     pub fn previous_page(&self) {

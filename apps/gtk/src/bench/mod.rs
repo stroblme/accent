@@ -266,8 +266,8 @@ use user_commands::bench_commands;
 ///   `bookmarks:<rel_path>[,<rel_diagram>]` (outline following),
 ///   `render:<rel_path>` (tiles/thumbnail bursts; hundreds of heavy pages),
 ///   `zoom:<rel_path>[,<shot_directory>]` (immediate zoom quality and time to sharp tiles),
-///   `scroll:<rel_path>` (wheel input and continuous PDF frame pacing, then Alt+wheel paging and
-///   Ctrl+wheel zoom),
+///   `scroll:<rel_path>` (wheel input and continuous PDF frame pacing, then Alt+wheel paging, `n`
+///   at the end and Ctrl+wheel zoom),
 ///   `broken:<rel_path or absolute path>` (truncation/recovery; scratch file),
 ///   `deep:<rel_path>[,<percent>]` (800% default; a few text pages),
 ///   `synctex:<rel_path>` (source/PDF round trip; scratch LaTeX `-synctex=1`
