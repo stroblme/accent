@@ -148,6 +148,9 @@ pub struct FileRow {
     /// reader can look at it and never edited from here. A row the index does not hold because
     /// git ignores its folder is **not** one of these — that folder is the reader's own.
     pub dependency: bool,
+    /// True for a symlink whose target is not there (`crate::walk::Unindexed::Dangling`), listed so
+    /// its folder's listing is whole and marked, since nothing opens it.
+    pub dangling: bool,
 }
 
 /// One hit of [`Index::search`]: an occurrence of the query in a file, not a file that holds it.

@@ -343,7 +343,7 @@ pub fn unindexed(root: &Path, rel: &str) -> Option<Unindexed> {
     is_unindexed(root, rel, &mut dir_ignores(root))
 }
 
-/// Why a directory is absent from the index.
+/// Why a directory, or a link to nothing, is absent from the index.
 ///
 /// [`Unindexed::Dependency`] identifies generated dependency trees such as `node_modules`;
 /// [`Unindexed::Ignored`] identifies folders explicitly excluded by git rules.
@@ -351,6 +351,8 @@ pub fn unindexed(root: &Path, rel: &str) -> Option<Unindexed> {
 pub enum Unindexed {
     Dependency,
     Ignored,
+    /// A symlink whose target is not there ([`unindexed_children`]), which the index never holds.
+    Dangling,
 }
 
 /// Why [`scan`] does not enter `rel`, or `None` if it does:
@@ -422,7 +424,17 @@ pub fn unindexed_children(
             // A link is followed, so a package linked into `node_modules` — which npm does by the
             // hundred — reads as the directory it points at rather than as an unopenable file. A
             // link that loops costs nothing: this is one level, opened by hand.
-            _ => std::fs::metadata(&path).is_ok_and(|m| m.is_dir()),
+            _ => match std::fs::metadata(&path) {
+                Ok(meta) => meta.is_dir(),
+                // A link to nothing, or to itself, is listed too, so a folder's listing is whole:
+                // an editor's lock (Emacs's `.#note.md`) is one, a link whose file moved another.
+                // Inside a dependency tree it stays one of that tree's rows.
+                Err(_) if link && inside != Some(Unindexed::Dependency) => {
+                    out.push((rel_path, classify(&name), Unindexed::Dangling));
+                    continue;
+                }
+                Err(_) => false,
+            },
         };
         // Outside a skipped tree, a child the index does not hold is only listed when it is one
         // of the trees the walk refuses. A directory link the index holds no row for is one the
@@ -443,7 +455,8 @@ pub fn unindexed_children(
                 Unindexed::Dependency
             }
             (Some(Unindexed::Ignored), _) | (_, Some(Unindexed::Ignored)) => Unindexed::Ignored,
-            (None, None) => continue,
+            // Neither names a tree the walk refuses (`Dangling` never does): the index lists it.
+            _ => continue,
         };
         out.push((
             rel_path,
@@ -1492,6 +1505,29 @@ mod tests {
         // Inside one, everything is: nothing under it is indexed at all.
         assert_eq!(names("node_modules"), ["node_modules/pkg"]);
         assert_eq!(names("node_modules/pkg"), ["node_modules/pkg/index.js"]);
+    }
+
+    /// A link to nothing is listed beside the files the index holds, marked, unless it is one of a
+    /// dependency tree's rows.
+    #[test]
+    fn unindexed_children_lists_a_dangling_link() {
+        let vault = skipped_vault();
+        let link = |rel: &str| std::os::unix::fs::symlink("gone.md", vault.path().join(rel));
+        link(".#note.md").unwrap();
+        link("node_modules/pkg/bin.js").unwrap();
+        let why = |rel| {
+            unindexed_children(vault.path(), rel, &HashSet::new(), false)
+                .unwrap()
+                .into_iter()
+                .map(|(rel, _, why)| (rel, why))
+                .filter(|(rel, _)| rel.ends_with(".#note.md") || rel.ends_with("bin.js"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(why(""), [(".#note.md".into(), Unindexed::Dangling)]);
+        assert_eq!(
+            why("node_modules/pkg"),
+            [("node_modules/pkg/bin.js".into(), Unindexed::Dependency)]
+        );
     }
 
     /// The tree's whole question: a gitignored folder is the reader's own, a dependency tree is

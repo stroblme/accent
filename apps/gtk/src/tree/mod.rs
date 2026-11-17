@@ -55,7 +55,8 @@ type Marks = BTreeMap<String, bool>;
 /// One row of the tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
-    /// `d` for a directory, `f` for a file — see `listing::encode`.
+    /// `d` for a directory, `f` for a file, [`DANGLING`] for a link to nothing — see
+    /// `listing::encode`.
     pub kind: char,
     /// Vault-relative path.
     pub rel: String,
@@ -68,6 +69,10 @@ pub struct Row {
     /// gitignored folders remain editable; being unindexed affects search only. Implies `!indexed`.
     pub dependency: bool,
 }
+
+/// A row's kind for a symlink whose target is not there: listed dimmed under a glyph that says it
+/// cannot be used, and opening it says why.
+pub const DANGLING: char = 'b';
 
 impl Row {
     pub fn is_dir(&self) -> bool {
@@ -1434,9 +1439,10 @@ fn bind_row(
         .first_child()
         .and_downcast::<gtk::Image>()
         .expect("icon");
-    icon.set_icon_name(Some(match item.is_dir() {
-        true => FOLDER_ICON,
-        false => icon_for(&item.rel),
+    icon.set_icon_name(Some(match item.kind {
+        'd' => FOLDER_ICON,
+        DANGLING => "action-unavailable-symbolic",
+        _ => icon_for(&item.rel),
     }));
     let label = icon
         .next_sibling()

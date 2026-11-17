@@ -5,12 +5,14 @@ use super::*;
 
 /// Encode rows as `GtkStringObject`s containing `"<kind><state><rel_path>"`.
 ///
-/// This avoids a custom GObject subclass for the current small state. `kind` is `d` or `f`;
-/// `state` is indexed `i`, gitignored `g` or dependency-tree `x` ([`Row::dependency`]).
-fn encode(kind: FileKind, rel: &str, indexed: bool, dependency: bool) -> String {
-    // What a file is — its icon, what it opens as — is read off its name, so a directory is the
-    // one thing the row has to carry.
+/// This avoids a custom GObject subclass for the current small state. `kind` is `d`, `f` or a
+/// link to nothing [`DANGLING`]; `state` is indexed `i`, gitignored `g` or dependency-tree `x`
+/// ([`Row::dependency`]).
+fn encode(kind: FileKind, rel: &str, indexed: bool, dependency: bool, dangling: bool) -> String {
+    // What a file is — its icon, what it opens as — is read off its name, so a directory and a
+    // link that leads nowhere are the things the row has to carry.
     let c = match kind {
+        _ if dangling => DANGLING,
         FileKind::Dir => 'd',
         _ => 'f',
     };
@@ -134,8 +136,10 @@ fn splice(
         .into_iter()
         // `id == 0` is `Vault::list_dir` saying this row came off the disk rather than out of
         // the index.
-        .filter(|r| !hidden(r.kind, &r.rel_path, r.id != 0, show_hidden))
-        .map(|r| encode(r.kind, &r.rel_path, r.id != 0, r.dependency))
+        // A link to nothing hides as a file the index holds does: it is no skipped tree, and an
+        // editor's lock (`.#note.md`) comes and goes as a note is edited.
+        .filter(|r| !hidden(r.kind, &r.rel_path, r.id != 0 || r.dangling, show_hidden))
+        .map(|r| encode(r.kind, &r.rel_path, r.id != 0, r.dependency, r.dangling))
         .collect();
     let Some((at, removed, added)) = changed_span(&current(store), &items) else {
         return;
@@ -284,7 +288,8 @@ mod tests {
 
     #[test]
     fn a_row_carries_whether_the_index_holds_it() {
-        let row = |kind, rel, indexed, dep| decode_str(&encode(kind, rel, indexed, dep)).unwrap();
+        let row =
+            |kind, rel, indexed, dep| decode_str(&encode(kind, rel, indexed, dep, false)).unwrap();
         let note = row(FileKind::Markdown, "Notes/A.md", true, false);
         assert_eq!(note.kind, 'f');
         assert_eq!(note.rel, "Notes/A.md");
@@ -302,6 +307,9 @@ mod tests {
         let ignored = row(FileKind::Dir, "mlruns", false, false);
         assert!(!ignored.indexed);
         assert!(!ignored.dependency);
+        // A link to nothing says so, whatever its name makes it.
+        let dangling = decode_str(&encode(FileKind::Markdown, "a.md", false, false, true)).unwrap();
+        assert!(dangling.kind == DANGLING && !dangling.is_dir());
     }
 
     #[test]

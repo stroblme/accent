@@ -609,7 +609,8 @@ impl Server {
                 .list_dir(&rel)
                 .map_err(fail)?
                 .into_iter()
-                .filter(|f| s.shown(&f.rel_path))
+                // A link to nothing is the file tree's to mark, and nothing here reads it.
+                .filter(|f| s.shown(&f.rel_path) && !f.dangling)
                 .map(|f| {
                     let indexed = f.id != 0;
                     let mut row = json!({"path": f.rel_path, "kind": kind_name(f.kind)});

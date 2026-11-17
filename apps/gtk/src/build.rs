@@ -487,11 +487,16 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
         // The row's kind used to decide what opened. `open_path` reads the name itself, so the
         // tree no longer has to agree with it about what a file is. A row opens as a preview:
         // one click is looking, not keeping. A double click keeps the tab its first click opened,
-        // as a double click on the tab does, or will keep it once it lands.
+        // as a double click on the tab does, or will keep it once it lands. A link to nothing has
+        // nothing to open, and its first click says so.
         glib::clone!(
             #[weak]
             app,
-            move |_kind, rel: &str, double| match (double, app.doc_for(rel)) {
+            move |kind, rel: &str, double| match (double, app.doc_for(rel)) {
+                (false, _) if kind == tree::DANGLING => {
+                    app.cannot(&format!("open {rel}"), "the file it links to is missing")
+                }
+                _ if kind == tree::DANGLING => {}
                 (true, Some(doc)) => app.promote(doc.page()),
                 (true, None) if let Some(page) = app.editing(rel) => app.promote(&page),
                 (true, None) => app.pending.keep(rel),

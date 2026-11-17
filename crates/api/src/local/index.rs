@@ -393,6 +393,7 @@ pub(crate) fn list_dir(index: &Index, root: &Path, rel: &str) -> Result<Vec<File
         size: 0,
         mtime_ns: 0,
         dependency: why == walk::Unindexed::Dependency,
+        dangling: why == walk::Unindexed::Dangling,
     }));
     // `Index::list_files` orders directories first and then by path, case-insensitively; the
     // merged listing has to come out the same way or the disk rows would land in a block of
