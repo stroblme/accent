@@ -115,6 +115,75 @@ fn a_file_a_walk_finds_changed_is_reported_as_changed() {
     assert_eq!(changed, ["Note.md"]);
 }
 
+/// A file that appears in the vault is reported as added once the opening walk has ended, which
+/// reports none: written straight, through a temporary renamed into place, by this vault, or in a
+/// folder moved in. An edit, or a move within the vault, brings no new file. Real watcher events.
+#[test]
+fn a_new_file_is_reported_as_added_and_an_edit_or_a_move_is_not() {
+    let root = tempfile::tempdir().unwrap();
+    for rel in ["Old.md", "Folder/In.md"] {
+        let path = root.path().join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "old\n").unwrap();
+    }
+    let cache = tempfile::tempdir().unwrap();
+    let (vault, events) = crate::Vault::open_at(
+        root.path(),
+        &cache.path().join("index.db"),
+        VaultConfig::default(),
+    )
+    .unwrap();
+    // Every `FilesAdded` until `last` arrives, and for a moment after it.
+    let added_until = |last: &dyn Fn(&Event) -> bool| {
+        let mut added = Vec::new();
+        let mut deadline = Instant::now() + BUDGET;
+        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+            match events.recv_timeout(left) {
+                Ok(Event::FilesAdded(rels)) => added.extend(rels),
+                Ok(e) if last(&e) => deadline = Instant::now() + Duration::from_millis(800),
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        added
+    };
+    let walked =
+        |dir: &'static str| move |e: &Event| matches!(e, Event::Reconciled(s) if s.dir == dir);
+    assert_eq!(added_until(&walked("")), Vec::<String>::new());
+    let path = |rel: &str| root.path().join(rel);
+
+    std::fs::write(path("Old.md"), "edited\n").unwrap();
+    let changed = |e: &Event| matches!(e, Event::FileChanged(p) if p == "Old.md");
+    assert_eq!(added_until(&changed), Vec::<String>::new(), "an edit");
+    // FSEvents tells a rename as a removal and a creation, which reads as a new file.
+    if cfg!(target_os = "linux") {
+        std::fs::rename(path("Old.md"), path("Renamed.md")).unwrap();
+        let renamed = |e: &Event| matches!(e, Event::FileRenamed { .. });
+        assert_eq!(added_until(&renamed), Vec::<String>::new(), "a move");
+    }
+    let moves = [("Folder".to_string(), "Moved".to_string())];
+    vault
+        .rename(&vault.plan_moves(&moves).unwrap(), false)
+        .unwrap();
+    assert_eq!(
+        added_until(&walked("Moved")),
+        Vec::<String>::new(),
+        "a move of ours"
+    );
+
+    std::fs::write(path("New.md"), "new\n").unwrap();
+    std::fs::write(path("Atomic.md.tmp"), "new\n").unwrap();
+    std::fs::rename(path("Atomic.md.tmp"), path("Atomic.md")).unwrap();
+    vault.write_file("Pasted.png", b"png").unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::create_dir(outside.path().join("Box")).unwrap();
+    std::fs::write(outside.path().join("Box/In.md"), "in\n").unwrap();
+    std::fs::rename(outside.path().join("Box"), path("Box")).unwrap();
+    let mut added = added_until(&walked("Box"));
+    added.sort();
+    assert_eq!(added, ["Atomic.md", "Box/In.md", "New.md", "Pasted.png"]);
+}
+
 /// Depends on real inotify events.
 #[test]
 fn external_write_emits_file_changed_and_becomes_searchable() {

@@ -1662,6 +1662,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - In a note, `[[` offers notes and `![[` every file; both write a note by its stem and anything else by its whole name, or by its path where the name would resolve to another file first.
 - **Files rank as Go to File ranks them** in `[[`, `![[` and a link's `(` (user decision 2026-11-09).
   The files the window used lately lead their tier, the latest first, and before anything is typed the files changed last follow them, so an empty `[[` lists what was just worked on.
+  A file that appears in the vault while it is open counts as used from then on, whoever made it, so a citation's downloaded PDF, a pasted picture or a note a sync, a pull or an agent wrote is the first one offered (user decision 2026-11-17).
+  The watcher reports it as added (`Event::FilesAdded`), and a move, an edit or a conflict copy is none, nor is whatever the vault's opening walk finds, while a file deleted leaves the list.
   The note being written is never offered, here or in an org file's `[[`, since a link to itself is rarely wanted.
   The popup keeps the provider's order inside a path's tier, where a name starting with what was typed counts as the path starting with it.
 - `[[` also offers the notes in the folders git ignores, after the indexed ones and marked ignored, and a link to one opens it with no dangling hint (Architecture, Gitignored folders).

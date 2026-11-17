@@ -36,7 +36,15 @@ impl App {
                 self.read(&key, &path, Opened::Kept);
             }
         }
-        accent_core::config::rename_in(&mut self.recent_files.borrow_mut(), from, to);
+        {
+            // A file renamed over one already listed, a temporary file written into place, keeps
+            // that file's place.
+            let mut recent = self.recent_files.borrow_mut();
+            if recent.iter().any(|rel| rel == to) {
+                recent.retain(|rel| rel != from);
+            }
+            accent_core::config::rename_in(&mut recent, from, to);
+        }
         self.nav.borrow_mut().rename(from, to);
         self.debugger.renamed(from, to);
         self.relinks_renamed(from, to);
@@ -402,7 +410,9 @@ impl App {
                 }
             }
             Event::FileChanged(rel) => self.changed_on_disk(&rel),
+            Event::FilesAdded(rels) => self.files_added(&rels),
             Event::FileRemoved(rel) => {
+                self.file_gone(&rel);
                 self.reshow_preview_image(&rel);
                 self.relinks_removed(&rel);
                 // A remote file's cached copy goes with it, so a new file given the name opens as

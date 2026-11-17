@@ -88,12 +88,10 @@ impl Local {
                 break;
             }
             // Both ends, so the index and the tree do not wait for inotify.
-            for rel in [from, to] {
-                self.post(Msg::Update {
-                    rel: rel.clone(),
-                    own: true,
-                });
-            }
+            self.post(Msg::Moved {
+                from: from.clone(),
+                to: to.clone(),
+            });
             report.moved.push((from.clone(), to.clone()));
         }
         if !update {

@@ -250,7 +250,7 @@ impl Index {
                             stats.stopped = true;
                             break;
                         }
-                        let touched = stats.touched;
+                        let (touched, added) = (stats.touched, stats.added);
                         let f = &scan.files[job];
                         bodies += content.text.as_ref().map_or(0, String::len) as u64;
                         upsert(&tx, f, content, &mut stats)?;
@@ -259,6 +259,9 @@ impl Index {
                         }
                         if f.kind != FileKind::Dir {
                             stats.changed.push(f.rel_path.clone());
+                            if stats.added > added {
+                                stats.added_files.push(f.rel_path.clone());
+                            }
                         }
                         done += 1;
                         if bodies >= ALLOWANCE {

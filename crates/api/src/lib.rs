@@ -82,6 +82,10 @@ pub enum Event {
     UnindexedChanged(Vec<String>),
     /// Someone else changed this note's content. Never fires for our own saves.
     FileChanged(String),
+    /// Files that appeared in the vault while it was open, whoever made them, this vault included,
+    /// in the order the index took them in: what the window counts as used. Never a file a move
+    /// brought, nor one the vault's opening walk found.
+    FilesAdded(Vec<String>),
     FileRemoved(String),
     FileRenamed {
         from: String,

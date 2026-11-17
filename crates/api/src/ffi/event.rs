@@ -74,8 +74,9 @@ pub(crate) fn narrow(e: crate::Event) -> Option<Event> {
         crate::Event::WorkerGone => Event::WorkerGone,
         // Git, the remote connection, language servers and their background jobs, debug sessions,
         // kernels and the watch on unindexed folders: none of them run on a phone, so nothing
-        // here ever has to match them.
+        // here ever has to match them. A file added is not counted as used on a phone yet.
         crate::Event::GitChanged
+        | crate::Event::FilesAdded(_)
         | crate::Event::UnindexedChanged(_)
         | crate::Event::Connecting { .. }
         | crate::Event::Connected

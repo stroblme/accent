@@ -342,6 +342,36 @@ impl App {
         self.share_used();
     }
 
+    /// Count files that appeared in the vault as used, the last of them first: a PDF a citation
+    /// downloaded, a picture pasted, a note a sync or an agent wrote. A conflict copy is never a
+    /// file to open and stays out.
+    pub fn files_added(self: &Rc<Self>, rels: &[String]) {
+        let shown = rels
+            .iter()
+            .filter(|rel| accent_api::conflict_original_rel(rel).is_none());
+        {
+            let mut recent = self.recent_files.borrow_mut();
+            for rel in shown {
+                accent_core::config::touch(&mut recent, rel, RECENT_FILES);
+            }
+        }
+        self.save_session_soon();
+        self.share_used();
+    }
+
+    /// Forget `rel`, and what was under it, among the files used: a temporary file counted as
+    /// added and deleted since would otherwise hold a place there.
+    pub fn file_gone(self: &Rc<Self>, rel: &str) {
+        let before = self.recent_files.borrow().len();
+        self.recent_files
+            .borrow_mut()
+            .retain(|used| !accent_core::path::is_under(used, rel));
+        if self.recent_files.borrow().len() < before {
+            self.save_session_soon();
+            self.share_used();
+        }
+    }
+
     /// Tell the vault the files this window used last, which `[[` and `#` completion rank first
     /// as Go to File does: off the main loop, since a remote vault takes a round trip.
     fn share_used(&self) {

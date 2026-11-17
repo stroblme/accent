@@ -247,6 +247,8 @@ fn an_event_on_the_far_side_arrives_as_a_notification() {
         w.wait(|e| matches!(e, Event::DirsChanged(dirs) if dirs.iter().any(|d| d.is_empty()))),
         "the vault's own worker has to reach the client"
     );
+    // As new to the window as a note a citation download or an agent writes on the host.
+    assert!(w.wait(|e| matches!(e, Event::FilesAdded(rels) if rels == &["c.md"])));
 }
 
 /// A language request runs where the files are, and what the provider has to say about the

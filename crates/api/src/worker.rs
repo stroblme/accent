@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use crate::Result;
 
 use accent_core::index::{Change, Index};
-use accent_core::path::parent_dir;
+use accent_core::path::{is_under, parent_dir};
 use accent_core::walk::{self, FileKind, ScanOptions};
 use accent_core::watch::{VaultEvent, Watcher};
 
@@ -57,6 +57,7 @@ pub(crate) fn spawn(
         own: HashMap::new(),
         links: HashMap::new(),
         stop,
+        walked: false,
         paused: false,
         next_walk: Instant::now(),
         due: None,
@@ -101,6 +102,13 @@ pub(crate) enum Msg {
     Update {
         rel: String,
         own: bool,
+    },
+    /// A file or a folder this vault moved ([`Local::rename`](crate::local::Local::rename)),
+    /// taken in as an own [`Update`](Self::Update) of each end: what arrives at `to` is no new
+    /// file ([`Event::FilesAdded`]).
+    Moved {
+        from: String,
+        to: String,
     },
     /// The etag left by a vault save, used to distinguish its watcher echo
     /// from external edits regardless of event order. See [`Worker::mine`].
@@ -171,6 +179,9 @@ struct Worker {
     /// Set by [`Local::stop_indexing`](crate::local::Local::stop_indexing) and by the vault's
     /// `Drop` from another thread, and read inside the walk: the inbox cannot be reached from there.
     stop: Arc<AtomicU8>,
+    /// Whether a walk of the whole vault has finished since the worker started. Before one, a row
+    /// added is a file the index had not reached yet rather than a new one ([`Event::FilesAdded`]).
+    walked: bool,
     /// Whether indexing is paused; only [`Msg::Resume`] restarts it in this session.
     /// Not persisted: reopening the vault resumes by diffing the partial index.
     paused: bool,
@@ -199,6 +210,11 @@ struct Batch {
     made: Vec<String>,
     /// A PDF's row was written, so its text is unread.
     pdfs: bool,
+    /// Files with a row of their own for the first time, neither rewritten nor moved here: see
+    /// [`Event::FilesAdded`].
+    added: Vec<String>,
+    /// Where a move put a file or a folder the index held: nothing arriving there is new.
+    moved: BTreeSet<String>,
 }
 
 impl Worker {
@@ -211,7 +227,7 @@ impl Worker {
         // missed until the rebuild below. Build the watch set from the scan result instead of
         // the cache if that ever bites.
         self.rebuild_watcher();
-        self.reconcile("");
+        self.reconcile("", &BTreeSet::new());
 
         loop {
             // One `recv` plus the rest of the burst: a Syncthing pull of 500 files is one batch,
@@ -366,15 +382,23 @@ impl Worker {
                 });
             } else if dir.is_empty() {
                 // The walk replaces the index wholesale, but the moves in this batch are still
-                // news: a tab open on a path that was renamed under it has to follow.
+                // news: a tab open on a path that was renamed under it has to follow, and what
+                // they brought is no new file.
+                let mut moved = BTreeSet::new();
                 for msg in &batch {
                     if let Msg::Fs(VaultEvent::Renamed { from, to }) = msg
                         && let (Some(from), Some(to)) = (self.rel(from), self.rel(to))
                     {
+                        if matches!(self.index.get_file(&from), Ok(Some(_))) {
+                            moved.insert(to.clone());
+                        }
                         self.emit(Event::FileRenamed { from, to });
                     }
+                    if let Msg::Moved { to, .. } = msg {
+                        moved.insert(to.clone());
+                    }
                 }
-                self.reconcile("");
+                self.reconcile("", &moved);
                 return;
             } else {
                 // A folder's walk leaves the rest of the vault to the batch, applied first.
@@ -393,15 +417,11 @@ impl Worker {
                 | Msg::KeepOpened(_)
                 | Msg::SetExcluded(..)
                 | Msg::Settled(_) => {}
-                Msg::Update { rel, own } => {
-                    self.update(&rel, own, &mut batched);
-                    // Any other write of this vault's own is known by what it left on disk.
-                    if own {
-                        match Etag::of(&self.root.join(&rel)) {
-                            Ok(etag) => self.own.insert(rel, etag),
-                            Err(_) => self.own.remove(&rel),
-                        };
-                    }
+                Msg::Update { rel, own } => self.posted(rel, own, &mut batched),
+                Msg::Moved { from, to } => {
+                    batched.moved.insert(to.clone());
+                    self.posted(from, true, &mut batched);
+                    self.posted(to, true, &mut batched);
                 }
                 Msg::Saved {
                     rel,
@@ -431,11 +451,26 @@ impl Worker {
         if !batched.dirs.is_empty() {
             self.emit(Event::DirsChanged(batched.dirs.into_iter().collect()));
         }
+        if self.walked && !batched.added.is_empty() {
+            self.emit(Event::FilesAdded(batched.added));
+        }
         if batched.pdfs {
             self.wake_pdf_text();
         }
         if let Some(dir) = walk_after {
-            self.reconcile(&dir);
+            self.reconcile(&dir, &batched.moved);
+        }
+    }
+
+    /// Take in a path the public API wrote or removed ([`Msg::Update`]).
+    fn posted(&mut self, rel: String, own: bool, b: &mut Batch) {
+        self.update(&rel, own, b);
+        // Any other write of this vault's own is known by what it left on disk.
+        if own {
+            match Etag::of(&self.root.join(&rel)) {
+                Ok(etag) => self.own.insert(rel, etag),
+                Err(_) => self.own.remove(&rel),
+            };
         }
     }
 
@@ -468,7 +503,9 @@ impl Worker {
             Msg::Resume | Msg::Fs(VaultEvent::Rescan) => Some(String::new()),
             Msg::Fs(VaultEvent::Changed(p)) => folder(p),
             Msg::Fs(VaultEvent::Renamed { to, .. }) => folder(to),
-            Msg::Update { rel, .. } | Msg::Saved { rel, .. } => folder(&self.root.join(rel)),
+            Msg::Update { rel, .. } | Msg::Saved { rel, .. } | Msg::Moved { to: rel, .. } => {
+                folder(&self.root.join(rel))
+            }
             _ => None,
         }
     }
@@ -492,6 +529,10 @@ impl Worker {
             },
             // Our own save of one, which the watcher reports as well; whichever arrives first walks.
             Msg::Update { rel, .. } | Msg::Saved { rel, .. } => dir(rel),
+            Msg::Moved { from, to } => match (dir(from), dir(to)) {
+                (Some(from), Some(to)) => Some(common_dir(&from, &to).to_string()),
+                (from, to) => from.or(to),
+            },
             _ => None,
         }
     }
@@ -499,8 +540,9 @@ impl Worker {
     /// Rescan `dir` (`""` for the vault), then refresh watches for changed directories
     /// and symlinks. [`Event::Reconciled`] means both indexing and watching are ready.
     /// During long scans, process git events, watch changes and exclusions between
-    /// batches; defer other messages to [`Worker::run`] in arrival order.
-    fn reconcile(&mut self, dir: &str) {
+    /// batches; defer other messages to [`Worker::run`] in arrival order. The files it adds are
+    /// new ([`Event::FilesAdded`]) unless they lie under `moved`, where a move put them.
+    fn reconcile(&mut self, dir: &str, moved: &BTreeSet<String>) {
         // Whatever asked for a walk of this folder or of one inside it is answered by this one.
         if self
             .due
@@ -596,6 +638,15 @@ impl Worker {
                 for rel in std::mem::take(&mut stats.changed) {
                     self.emit_changed(rel, &aliases);
                 }
+                // The vault's opening walk finds what the index had not reached yet, new or not.
+                let added: Vec<String> = std::mem::take(&mut stats.added_files)
+                    .into_iter()
+                    .filter(|rel| !moved.iter().any(|to| is_under(rel, to)))
+                    .collect();
+                if self.walked && !added.is_empty() {
+                    self.emit(Event::FilesAdded(added));
+                }
+                self.walked |= stats.dir.is_empty() && !stats.stopped;
                 // Emitted for a stopped walk too, carrying `stopped`: it is what tells the window
                 // it is looking at a partial index rather than a finished one.
                 self.emit(Event::Reconciled(stats));
@@ -785,6 +836,11 @@ impl Worker {
             }
             VaultEvent::Renamed { from, to } => {
                 if let (Some(from), Some(to)) = (self.rel(&from), self.rel(&to)) {
+                    // A temporary file nobody indexed, renamed into place, is a file written; one
+                    // the index held is a move.
+                    if matches!(self.index.get_file(&from), Ok(Some(_))) {
+                        b.moved.insert(to.clone());
+                    }
                     if let Err(e) = self.index.remove_file_batched(&from) {
                         self.fail(&format!("removing {from}"), e);
                     }
@@ -844,6 +900,12 @@ impl Worker {
                 if kind == FileKind::Dir {
                     b.rewatch = true;
                     b.made.push(rel.to_string());
+                }
+                let new = kind != FileKind::Dir
+                    && !b.removed.contains(rel)
+                    && !b.moved.iter().any(|to| is_under(rel, to));
+                if new {
+                    b.added.push(rel.to_string());
                 }
                 // A path this batch removed and is seeing again was rewritten, not created:
                 // whoever has it open has to reload it.
