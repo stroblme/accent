@@ -11,8 +11,9 @@ use crate::style::{EDGE_LOOK, LOOK, Style, TEXT_LOOK};
 
 mod fit;
 
+pub(crate) use fit::moved_by;
 pub use fit::{bounds, fit_groups};
-use fit::{group_bounds, moved_by, shift};
+use fit::{group_bounds, shift};
 
 /// Where [`Editor::reorder`] moves cells among their siblings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1409,7 +1410,9 @@ pub fn flip(page: &mut Page, ids: &[CellId], horizontal: bool, drawn: &Scene) ->
             false => b.y + b.h / 2.0,
         });
         if let Some(middle) = middle {
-            let inside: Vec<CellId> = page.children(id).map(|c| c.id.clone()).collect();
+            // What a group sized by what it holds holds is mirrored, the group staying 0,0,0,0.
+            let inside = page.children(id).flat_map(|c| moved_by(page, &c.id));
+            let inside: Vec<CellId> = inside.collect();
             for child in &inside {
                 mirror(cell_mut(page, child)?, horizontal, middle);
             }

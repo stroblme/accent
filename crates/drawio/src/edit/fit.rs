@@ -103,7 +103,7 @@ fn padding(style: &Resolved) -> [f64; 4] {
 
 /// The cells whose geometry a move of cell `id` translates: itself, or for a group with
 /// `transparentBounds=1`, whose geometry stays at 0,0,0,0, what it holds (`Graph.translateCell`).
-pub(super) fn moved_by(p: &Page, id: &str) -> Vec<CellId> {
+pub(crate) fn moved_by(p: &Page, id: &str) -> Vec<CellId> {
     let (mut out, mut seen, mut next) = (Vec::new(), HashSet::new(), vec![id.to_string()]);
     while let Some(id) = next.pop() {
         match p.cell(&id) {
@@ -133,8 +133,8 @@ pub(super) fn shift(p: &mut Page, id: &str, dx: f64, dy: f64) {
 /// so nothing moves on the page; any other shape only grows right and down to hold a member that
 /// changed (`mxGraph.extendParent`), unless collapsed or `expand=0`; a group with
 /// `transparentBounds=1` stays as it is. A group that draws nothing goes with the last of what it
-/// held (`Graph.cellsRemoved`), and so may the one it was in. A table and its rows lay out their
-/// cells themselves.
+/// held (`Graph.cellsRemoved`), and so may the one it was in. A table, a stack and what they lay
+/// out (`childLayout`) are left to their layout.
 pub fn fit_groups(before: &Page, after: &mut Page) {
     let old: HashMap<&str, &Cell> = before.cells.iter().map(|c| (c.id.as_str(), c)).collect();
     let mut changed: HashSet<CellId> = HashSet::new();
@@ -184,7 +184,10 @@ fn fit(p: &mut Page, id: &str, changed: &HashSet<CellId>) -> bool {
     let none = |key: &str| style.get(key).is_none_or(|v| v == "none");
     let bare = none("fillColor") && none("strokeColor") && style.get("image").is_none();
     let transparent = is_transparent(cell);
-    let laid_out = style.get("childLayout").is_some() || style.shape() == "tableRow";
+    // A table, a stack and what they lay out are placed by the layout.
+    let parent = cell.parent.as_deref().and_then(|id| p.cell(id));
+    let in_layout = parent.is_some_and(|c| c.style.resolve(false).get("childLayout").is_some());
+    let laid_out = in_layout || style.get("childLayout").is_some();
     if laid_out || cell.attr("collapsed") == Some("1") {
         return false;
     }

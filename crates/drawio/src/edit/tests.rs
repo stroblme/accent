@@ -1018,6 +1018,16 @@ fn nested_groups_fit_outward_and_a_container_only_grows() {
         grown,
         "neither shrunk nor grown left"
     );
+    // A lane is left to the pool that stacks it.
+    let pool = "swimlane;childLayout=stackLayout;";
+    let mut e = open([
+        Cell::new_vertex("P", "1", Rect::new(0.0, 0.0, 100.0, 100.0), pool, ""),
+        Cell::new_vertex("L", "P", Rect::new(0.0, 20.0, 100.0, 80.0), "swimlane", ""),
+        Cell::new_vertex("c", "L", Rect::new(10.0, 30.0, 20.0, 20.0), "", ""),
+    ]);
+    e.move_cells(0, &list(&["c"]), 100.0, 0.0, &drawn).unwrap();
+    let lane = Rect::new(0.0, 20.0, 100.0, 80.0);
+    assert_eq!(geometry(&e, "L").rect(), lane);
 }
 
 #[test]
@@ -1050,8 +1060,22 @@ fn a_group_sized_by_what_it_holds_keeps_its_geometry_at_nothing() {
     assert!(resized.is_err(), "its size is what it holds");
     let copy = e.duplicate(0, &list(&["t"])).unwrap();
     assert_eq!(geometry(&e, &copy[0]).rect(), Rect::default());
-    // With the last of what it holds the group goes, and the group it was the last of after it.
     e.delete(0, &copy).unwrap();
+    // Copied out of G, pasted onto the layer and flipped, it keeps it too.
+    let page = e.page(0).unwrap();
+    let xml = crate::clipboard::copy(page, &list(&["t"]), &scene(page));
+    let from = crate::clipboard::pages_in(&xml);
+    let pasted = e.paste(0, None, &from, 0.0, 0.0).unwrap();
+    assert_eq!(geometry(&e, &pasted[0]).rect(), Rect::default());
+    let page = e.page(0).unwrap();
+    let held: Vec<CellId> = page.children(&pasted[0]).map(|c| c.id.clone()).collect();
+    assert_eq!(at(&e, &held[0]), Rect::new(110.0, 50.0, 40.0, 40.0));
+    e.flip(0, &pasted, true, &Scene::default()).unwrap();
+    assert_eq!(geometry(&e, &pasted[0]).rect(), Rect::default());
+    let flipped = [at(&e, &held[0]), at(&e, &held[1])];
+    assert_eq!((flipped[0].x, flipped[1].x), (170.0, 110.0), "mirrored");
+    e.delete(0, &pasted).unwrap();
+    // With the last of what it holds the group goes, and the group it was the last of after it.
     e.delete(0, &list(&["a", "b"])).unwrap();
     assert_eq!(order(&e), ["0", "1"]);
 }

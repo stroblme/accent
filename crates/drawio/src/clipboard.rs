@@ -20,6 +20,11 @@ use crate::xml;
 pub fn copy(page: &Page, ids: &[CellId], drawn: &Scene) -> String {
     let top = crate::edit::topmost(page, ids);
     let under = crate::edit::with_subtrees(page, top.iter().cloned());
+    // What is placed from the page: the topmost cells, a group sized by what it holds by that,
+    // as its geometry stays 0,0,0,0.
+    let placed: std::collections::HashSet<CellId> = (top.iter())
+        .flat_map(|id| crate::edit::moved_by(page, id))
+        .collect();
     let cells: Vec<&Cell> = page
         .cells
         .iter()
@@ -43,7 +48,9 @@ pub fn copy(page: &Page, ids: &[CellId], drawn: &Scene) -> String {
             true => Some("1".to_string()),
             false => mapped(&cell.parent),
         };
-        if is_top && let Some(g) = &mut copy.geometry {
+        if placed.contains(&cell.id)
+            && let Some(g) = &mut copy.geometry
+        {
             let origin = page.origin_of(&cell.id);
             let route = drawn.route(&cell.id).unwrap_or_default();
             let ends = [
