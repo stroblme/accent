@@ -78,6 +78,7 @@
     <file compressed="true">language-specs/typescript-jsx.lang</file>
     <file compressed="true">language-specs/typst.lang</file>
     <file compressed="true">language-specs/accent-search.lang</file>
+    <file compressed="true">language-specs/drawio-style.lang</file>
     <!-- GtkSourceView's four style schemes with no draw-spaces colour (`theme::scheme_id`). -->
     <file compressed="true">styles/accent-Adwaita.xml</file>
     <file compressed="true">styles/accent-Adwaita-dark.xml</file>

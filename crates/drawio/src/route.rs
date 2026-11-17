@@ -882,6 +882,16 @@ mod tests {
     use crate::style::Style;
     use crate::style::presets::{EdgeKind, constrained, edge};
 
+    #[test]
+    fn every_edge_style_the_style_editor_offers_is_routed() {
+        for name in crate::style::keys::EDGE_STYLES
+            .iter()
+            .filter(|s| **s != "none")
+        {
+            assert!(EdgeStyle::named(name).is_some(), "{name}");
+        }
+    }
+
     fn rect(x: f64, y: f64) -> Terminal {
         Terminal {
             bounds: Rect::new(x, y, 80.0, 40.0),

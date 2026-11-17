@@ -126,17 +126,82 @@ pub fn open(
     let path = crate::doc::host_file_path(key)
         .map(PathBuf::from)
         .unwrap_or_else(|| root.join(key));
-    let (zoom, column_width, ghost_text) = (prefs.zoom, prefs.column_width, prefs.ghost_text);
-
     // A language for code, none for a note (our own spans do that) and none for a CSV, whose
     // `csv.lang` would colour numbers and strings underneath the column tags and fight them.
     let language = match flavour {
         Flavour::Code => guess_language(&path, &text.text),
         Flavour::Note(_) | Flavour::Csv(_) => None,
     };
-    let (view, buffer) = build(flavour, language, &text.text);
+    let body = Body {
+        key,
+        path,
+        text: &text.text,
+        crlf: text.crlf,
+        lossy: text.lossy,
+        save: SaveState::at(text.etag, text.digest()),
+        scratch: None,
+    };
+    let tab = assemble(body, flavour, language, |column| held.fill(column), prefs);
+    tab.page.set_title(crate::doc::file_name(key));
+    crate::doc::set_file_icon(&tab.page, key);
+    // The title is only the file name, so where the note really lives is a hover away.
+    let tooltip = match crate::doc::host_file_path(key) {
+        Some(path) => format!("{path} (remote host)"),
+        None => crate::fileops::display_path(root, key),
+    };
+    tab.page.set_tooltip(&tooltip);
+    tab
+}
+
+/// A tab over no file, keyed `key`, holding `text` in `language`, with `scratch` standing in for
+/// its file: its name, and what takes its text where a save would write it. `page` puts the tab's
+/// column into a pane. Its edits go to `scratch` [`APPLY`] after the last keystroke.
+pub fn scratch(
+    key: &str,
+    scratch: Scratch,
+    text: &str,
+    language: Option<sourceview5::Language>,
+    page: impl FnOnce(&gtk::Box) -> adw::TabPage,
+    prefs: &Prefs,
+) -> Rc<Tab> {
+    let body = Body {
+        key,
+        path: PathBuf::new(),
+        text,
+        crlf: false,
+        lossy: false,
+        save: SaveState::default(),
+        scratch: Some(scratch),
+    };
+    let tab = assemble(body, Flavour::Code, language, page, prefs);
+    tab.page.set_title(&tab.tab_title());
+    tab
+}
+
+/// What a tab is built from: its key and path, its text as read, and what stands in for a file
+/// where it has none.
+struct Body<'a> {
+    key: &'a str,
+    path: PathBuf,
+    text: &'a str,
+    crlf: bool,
+    lossy: bool,
+    save: SaveState,
+    scratch: Option<Scratch>,
+}
+
+/// The tab of `body` in `flavour` and `language`, its column put into a pane by `page`.
+fn assemble(
+    body: Body,
+    flavour: Flavour,
+    language: Option<sourceview5::Language>,
+    page: impl FnOnce(&gtk::Box) -> adw::TabPage,
+    prefs: &Prefs,
+) -> Rc<Tab> {
+    let (zoom, column_width, ghost_text) = (prefs.zoom, prefs.column_width, prefs.ghost_text);
+    let (view, buffer) = build(flavour, language, body.text);
     // Not valid UTF-8: what is on screen is lossy, so it must not be written back.
-    if text.lossy {
+    if body.lossy {
         view.set_editable(false);
     }
     let (numbers, marks, diagnostics, folds) = gutters(&view, &buffer, flavour);
@@ -164,19 +229,16 @@ pub fn open(
     let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
     column.append(&banner);
     column.append(&document);
-    let page = held.fill(&column);
-    page.set_title(crate::doc::file_name(key));
-    crate::doc::set_file_icon(&page, key);
-    // The title is only the file name, so where the note really lives is a hover away.
-    let tooltip = match crate::doc::host_file_path(key) {
-        Some(path) => format!("{path} (remote host)"),
-        None => crate::fileops::display_path(root, key),
+    let page = page(&column);
+    // A scratch's owner takes its text sooner than a file is written: the reader is watching it
+    // land.
+    let autosave = match body.scratch {
+        Some(_) => APPLY,
+        None => AUTOSAVE,
     };
-    page.set_tooltip(&tooltip);
-
     let tab = Rc::new(Tab {
-        rel: RefCell::new(key.to_string()),
-        path: RefCell::new(path),
+        rel: RefCell::new(body.key.to_string()),
+        path: RefCell::new(body.path),
         view: view.clone(),
         buffer: buffer.clone(),
         content: column.clone(),
@@ -197,11 +259,11 @@ pub fn open(
         head: RefCell::new(None),
         marks: marks.clone(),
         flavour: syntax,
-        crlf: Cell::new(text.crlf),
-        lossy: Cell::new(text.lossy),
+        crlf: Cell::new(body.crlf),
+        lossy: Cell::new(body.lossy),
         page,
         banner: banner.clone(),
-        save: SaveState::at(text.etag, text.digest()),
+        save: body.save,
         alerts: RefCell::new(Vec::new()),
         unread: RefCell::default(),
         find,
@@ -227,7 +289,7 @@ pub fn open(
         paste_link,
         debounce: crate::widgets::Debounce::new(DEBOUNCE),
         csv: highlight::Csv::tracking(&buffer),
-        autosave: crate::widgets::Debounce::new(AUTOSAVE),
+        autosave: crate::widgets::Debounce::new(autosave),
         cursor: crate::widgets::Debounce::new(CURSOR),
         turn: Cell::new((false, false)),
         moved: Cell::new(false),
@@ -238,6 +300,7 @@ pub fn open(
         on_cursor: Default::default(),
         on_follow: Default::default(),
         lang: lang::State::default(),
+        scratch: body.scratch,
     });
     // One controller for the keys the popup, the signature, the ghost text, the extra carets and
     // the markdown helpers all want; `keys` is where their order is written down.
@@ -248,7 +311,7 @@ pub fn open(
     tab.set_minimap(prefs.minimap);
     tab.set_line_numbers(prefs.line_numbers);
     tab.set_indent_width(prefs.indent_width);
-    if text.lossy {
+    if body.lossy {
         tab.show_alert(Alert::ReadOnly);
     }
 

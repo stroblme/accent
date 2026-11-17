@@ -352,7 +352,7 @@ impl App {
     }
 
     /// The preferences every text tab is built with.
-    fn prefs(&self) -> Prefs {
+    pub(crate) fn prefs(&self) -> Prefs {
         let config = self.config.borrow();
         Prefs {
             spellcheck: config.spellcheck,
@@ -1443,7 +1443,8 @@ impl App {
     /// code from outside it, a dependency its server may have named (`lang::join`). Remote host
     /// dependencies use their own key; ordinary loose tabs read this machine's disk.
     pub(crate) fn language_vault(&self, tab: &Tab) -> Option<Arc<Vault>> {
-        let vault = self.vault()?;
+        // A text over no file has no document there: its completion is its owner's.
+        let vault = self.vault().filter(|_| !tab.is_scratch())?;
         let loose_code = tab.flavour() == Flavour::Code && !vault.is_remote();
         (!doc::is_loose_key(&tab.rel()) || loose_code || doc::host_file_path(&tab.rel()).is_some())
             .then(|| vault.clone())
@@ -1461,7 +1462,7 @@ impl App {
     }
 
     /// Wire a freshly opened tab into the window.
-    fn adopt(self: &Rc<Self>, tab: Rc<Tab>, how: Opened) {
+    pub(crate) fn adopt(self: &Rc<Self>, tab: Rc<Tab>, how: Opened) {
         // Ctrl+scroll zooms the document, as it zooms a PDF page, through the same step and the
         // same readout. On the view rather than on the window: a window-level controller would
         // have to work out which tab the pointer is over and would race the PDF's own, while this
@@ -1675,7 +1676,9 @@ impl App {
         if doc::host_file_path(&tab.rel()).is_none() {
             self.fetch_head(&tab);
         }
-        self.watch_folder_of(&tab.rel());
+        if !tab.is_scratch() {
+            self.watch_folder_of(&tab.rel());
+        }
         self.docs.borrow_mut().push(Doc::Text(tab.clone()));
         self.landed(&page, how);
         // Taken out first: the borrow of an `if let`'s scrutinee lasts through its body, and the

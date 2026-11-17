@@ -96,10 +96,13 @@ impl Doc {
         }
     }
 
-    /// Whether the document has no file: diffs, shells and previews cannot be renamed or recorded
-    /// as recent notes.
+    /// Whether the document has no file: diffs, shells, previews and a text over no file (a
+    /// diagram cell's style) cannot be renamed or recorded as recent notes.
     pub fn is_transient(&self) -> bool {
-        matches!(self, Doc::Diff(_) | Doc::Terminal(_) | Doc::Rendered(_))
+        match self {
+            Doc::Text(tab) => tab.is_scratch(),
+            doc => matches!(doc, Doc::Diff(_) | Doc::Terminal(_) | Doc::Rendered(_)),
+        }
     }
 
     /// The file the tab stands for: its own, or the one a terminal editor in it edits; none for
@@ -113,11 +116,12 @@ impl Doc {
     }
 
     /// Whether the session keeps it: a debugged program's terminal and the Debug Console are a
-    /// debug session's alone, and are not put back.
+    /// debug session's alone, and a text over no file its owner's, and none is put back.
     pub fn is_kept(&self) -> bool {
         !self
             .terminal()
             .is_some_and(|term| term.is_program() || term.is_console())
+            && !self.tab().is_some_and(|tab| tab.is_scratch())
     }
 
     pub fn page(&self) -> &adw::TabPage {

@@ -436,6 +436,27 @@ drill_diagram_select() {
 		'bench diagram select fit move tb tb=Some("0,0,0,0") t1=Some("320,280,80,60")'
 }
 
+# The style editor: Edit Style's tab of a cell's style, what is typed reaching the cell after the
+# pause, the diagram's Undo showing in the tab, completion, the star's state and the tab closing
+# with its cell (DESIGN.md, Diagram).
+drill_diagram_style() {
+	launch 60 ACCENT_BENCH_DIAGRAM=style:style.drawio >"$dir/style"
+	has "$dir/style" \
+		'bench diagram style star Some(("non-starred-symbolic", "Set Default Style for rectangles"))' \
+		'bench diagram style opened title="A (style.drawio)" front=true text="rounded=1\nwhiteSpace=wrap\nhtml=1\nfillColor=#dae8fc\nstrokeColor=#6c8ebf"' \
+		'bench diagram style complete "fil" rows=["fillColor", "fillOpacity"]' \
+		'bench diagram style complete "shape=ell" rows=["ellipse", "doubleEllipse"]' \
+		'bench diagram style untouched a=Some("rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;") history=(false, false)' \
+		'bench diagram style typing a=Some("rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;")' \
+		'bench diagram style applied a=Some("rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;shadow=1;") history=(true, false)' \
+		'bench diagram style undone text="rounded=1\nwhiteSpace=wrap\nhtml=1\nfillColor=#dae8fc\nstrokeColor=#6c8ebf"' \
+		'bench diagram style again editors=1 front=true' \
+		'bench diagram style set Some(("starred-symbolic", "Clear Default Style for rectangles"))' \
+		'bench diagram style cleared Some(("non-starred-symbolic", "Set Default Style for rectangles"))' \
+		'bench diagram style undo_clear Some(("starred-symbolic", "Clear Default Style for rectangles"))' \
+		'bench diagram style deleted editors=0'
+}
+
 # Ctrl+V with a browser's HTML on the clipboard, and Paste as Plain Text, in a note (beside its code
 # block, table and front matter too), an org note, a code tab, a note renamed between markdown and
 # org, a notebook's cells and a diagram.

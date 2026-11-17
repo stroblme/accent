@@ -36,8 +36,9 @@ impl App {
     /// Tab and window closes use their own write-then-ask path: a refused closing write must
     /// keep the buffer available rather than lose unsaved text.
     pub fn save_tab(self: &Rc<Self>, tab: &Rc<Tab>, explicit: bool) {
-        // A read-only tab, a lossy reading or an installed file, has nothing to write.
-        if !tab.view.is_editable() {
+        // A read-only tab, a lossy reading or an installed file, has nothing to write, and a tab
+        // over no file hands its text to its owner instead.
+        if !tab.view.is_editable() || tab.apply_scratch() {
             return;
         }
         if !editor::may_save(tab.save.modified.get(), tab.save.disk_changed.get()) {
@@ -369,6 +370,9 @@ impl App {
     /// Write using the tab's etag after landing in-flight saves, skipping a now-clean buffer.
     /// Used before closing or moving a dirty file.
     pub fn flush_tab(self: &Rc<Self>, tab: &Rc<Tab>) -> Result<(), Error> {
+        if tab.apply_scratch() {
+            return Ok(());
+        }
         self.land_save(tab, false);
         if !tab.save.modified.get() {
             return Ok(());
@@ -633,6 +637,7 @@ impl App {
         // font that only closing the editor lets go of.
         if let Some(Doc::Diagram(d)) = self.doc_for_page(page) {
             d.finish_label();
+            self.close_styles(&d);
             if let Err(e) = self.flush_model(&d) {
                 tracing::debug!("a closing diagram was not written: {e}");
             }

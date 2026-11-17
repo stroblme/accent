@@ -21,6 +21,7 @@ mod props;
 mod render;
 mod sharp;
 mod strip;
+mod style;
 mod tools;
 mod view;
 mod web;
@@ -41,6 +42,7 @@ use gtk::{gio, glib};
 use crate::editor::{SaveState, Saves};
 use crate::widgets::{Debounce, Hook};
 use geometry::{Sheet, Zoom};
+pub(crate) use style::LANGUAGE as STYLE_LANGUAGE;
 pub use tools::Tool;
 use tools::{Pick, Picks};
 use view::{DiagramView, Edit};
@@ -130,6 +132,10 @@ pub struct DiagramTab {
     on_matches: TabHook,
     /// A link to the web was followed: the window opens it.
     on_uri: TextHook,
+    /// The style editors open on this diagram's cells (`style`).
+    styles: RefCell<Vec<style::Link>>,
+    /// Edit Style on the Properties pane: the window opens the style editor.
+    on_style: TabHook,
 }
 
 /// The tab `held` up for `key`, showing `file` as it was read, at its etag and digest, where the
@@ -224,6 +230,8 @@ pub fn open(
         on_toast: Hook::default(),
         on_matches: Hook::default(),
         on_uri: Hook::default(),
+        styles: RefCell::default(),
+        on_style: Hook::default(),
     });
     tab.strip.set_pages(tab.editor.borrow().file());
     tab.organize.connect_goto(glib::clone!(
@@ -1478,6 +1486,11 @@ impl DiagramTab {
     /// The ring's outer orbit changed how the tools draw.
     pub fn connect_options(&self, f: impl Fn(&Rc<DiagramTab>) + 'static) {
         self.on_options.set(Rc::new(f));
+    }
+
+    /// Edit Style on the Properties pane's Style row.
+    pub fn connect_edit_style(&self, f: impl Fn(&Rc<DiagramTab>) + 'static) {
+        self.on_style.set(Rc::new(f));
     }
 
     /// What to tell the reader in a toast.

@@ -1617,7 +1617,7 @@ impl App {
 
     /// Give a tab the committed text its gutter draws against.
     fn fetch_head(&self, tab: &Rc<Tab>) {
-        let Some(git) = self.git.get() else {
+        let Some(git) = self.git.get().filter(|_| !tab.is_scratch()) else {
             return;
         };
         let weak = Rc::downgrade(tab);

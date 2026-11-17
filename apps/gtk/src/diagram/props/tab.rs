@@ -52,10 +52,8 @@ impl DiagramTab {
             let default_tool = match cells.as_slice() {
                 [cell] => Tool::of(cell).map(|tool| {
                     let key = tool.default_attr().expect("a creation tool");
-                    (
-                        tool,
-                        accent_drawio::model::attr(&editor.file().attrs, key).is_some(),
-                    )
+                    let default = accent_drawio::model::attr(&editor.file().attrs, key);
+                    (tool, default == Some(cell.style.to_string().as_str()))
                 }),
                 _ => None,
             };
@@ -122,6 +120,7 @@ impl DiagramTab {
                     self.edit(|e, page| e.set_style_string(page, id, &style));
                 }
             }
+            // The cell's style becomes the default, or the default goes where it is that style.
             Change::DefaultStyle => {
                 let captured = {
                     let editor = self.editor.borrow();
@@ -130,16 +129,20 @@ impl DiagramTab {
                     page.and_then(|p| p.cell(id)).and_then(|cell| {
                         let key = Tool::of(cell)?.default_attr()?;
                         let style = cell.style.to_string();
-                        (accent_drawio::model::attr(&editor.file().attrs, key)
-                            != Some(style.as_str()))
-                        .then_some((key, style))
+                        let is_default = accent_drawio::model::attr(&editor.file().attrs, key)
+                            == Some(style.as_str());
+                        Some((key, (!is_default).then_some(style)))
                     })
                 };
                 if let Some((key, style)) = captured {
-                    self.editor.borrow_mut().set_file_attr(key, &style);
+                    match style {
+                        Some(style) => self.editor.borrow_mut().set_file_attr(key, &style),
+                        None => self.editor.borrow_mut().clear_file_attr(key),
+                    }
                     self.changed();
                 }
             }
+            Change::EditStyle => self.on_style.emit(self),
             Change::PageAttr(key, value) => {
                 self.edit(|e, page| e.set_page_attr(page, key, value.as_deref()));
             }

@@ -1111,9 +1111,13 @@ fn typed(editor: &dyn Editor, typed: Option<char>) {
         .support()
         .map(|s| s.completion_triggers.clone())
         .unwrap_or_default();
-    // A Lean abbreviation opens on its backslash, which the server does not ask for.
+    // A Lean abbreviation opens on its backslash, which the server does not ask for, and a
+    // diagram style's value on its key's `=`.
     if language == abbrev::LANGUAGE {
         triggers.push('\\');
+    }
+    if language == crate::diagram::STYLE_LANGUAGE {
+        triggers.push('=');
     }
     // A word shortened is no reason to open, unless a trigger leads it.
     let min_word = match (typed, accent_api::language::is_prose(&language)) {

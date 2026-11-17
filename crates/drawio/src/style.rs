@@ -4,6 +4,8 @@
 use std::collections::HashMap;
 use std::fmt;
 
+pub mod keys;
+
 /// The style as written in the file: `key=value` pairs and bare named styles (`text`, `ellipse`,
 /// `group`) in their original order, unknown keys included.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -51,6 +53,36 @@ impl Style {
 
     pub fn is_empty(&self) -> bool {
         self.items.is_empty() && !self.leading_semicolon
+    }
+
+    /// The style one item a line, `key=value` or a bare name, in its order: what the style editor
+    /// shows. A style that inherits no defaults starts with a line of its own `;`.
+    pub fn lines(&self) -> String {
+        let items = self.items.iter().map(|(k, v)| match v {
+            Some(v) => format!("{k}={v}"),
+            None => k.clone(),
+        });
+        let lead = self.leading_semicolon.then(|| ";".to_string());
+        lead.into_iter().chain(items).collect::<Vec<_>>().join("\n")
+    }
+
+    /// [`lines`](Self::lines) read back: each line trimmed, and around its first `=`, empty
+    /// lines left out. A `;` on a line parts items as in a style string, which holds no `;` of
+    /// its own, so a data URI's `;base64` is dropped as draw.io drops it.
+    pub fn from_lines(text: &str) -> Style {
+        let lines = text.lines().filter(|line| !line.trim().is_empty());
+        let lines = lines.map(|line| match line.split_once('=') {
+            Some((k, v)) => {
+                let v = v.trim();
+                let v = match v.starts_with("data:") {
+                    true => v.replacen(";base64,", ",", 1),
+                    false => v.to_string(),
+                };
+                format!("{}={v}", k.trim())
+            }
+            None => line.trim().to_string(),
+        });
+        Style::parse(&lines.collect::<Vec<_>>().join(";"))
     }
 
     /// Whether the style carries the named style `name` (`text`, `ellipse`) as a bare token.
@@ -694,6 +726,37 @@ mod tests {
             assert_eq!(Style::parse(s).to_string(), s);
         }
         assert_eq!(Style::parse("a=1;b").to_string(), "a=1;b;");
+    }
+
+    #[test]
+    fn the_style_editor_shows_an_item_a_line_and_reads_it_back() {
+        for s in [
+            "text;html=1;strokeColor=none;fillColor=none;align=left;",
+            ";strokeColor=#ff0000;",
+            "shape=image;image=data:image/png,iVBORw0KGgo=;",
+            "ellipse;whiteSpace=wrap;",
+            "",
+        ] {
+            let style = Style::parse(s);
+            assert_eq!(Style::from_lines(&style.lines()), style, "{s}");
+        }
+        assert_eq!(
+            Style::parse("ellipse;fillColor=#fff;").lines(),
+            "ellipse\nfillColor=#fff"
+        );
+        assert_eq!(Style::parse(";a=1;").lines(), ";\na=1");
+        // Empty lines and spaces go; a value keeps its `=` and its inner spaces.
+        let typed = "\n  rounded = 1 \n\ntext\nlabel=a=b\nfontFamily = Times New Roman\r\n";
+        assert_eq!(
+            Style::from_lines(typed).to_string(),
+            "rounded=1;text;label=a=b;fontFamily=Times New Roman;"
+        );
+        // A style string pasted onto a line parts as a style string does.
+        assert_eq!(Style::from_lines("a=1;b=2").to_string(), "a=1;b=2;");
+        assert_eq!(
+            Style::from_lines("image=data:image/png;base64,iVBOR=").to_string(),
+            "image=data:image/png,iVBOR=;"
+        );
     }
 
     #[test]

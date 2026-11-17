@@ -75,6 +75,13 @@ fn file_style_default_is_saved_and_undoable() {
         crate::model::attr(&e.file().attrs, "accentStyleRect"),
         Some("rounded=1;fillColor=#ff0000;")
     );
+    e.clear_file_attr("accentStyleRect");
+    assert_eq!(crate::model::attr(&e.file().attrs, "accentStyleRect"), None);
+    assert!(e.undo());
+    assert_eq!(
+        crate::model::attr(&e.file().attrs, "accentStyleRect"),
+        Some("rounded=1;fillColor=#ff0000;")
+    );
 }
 
 #[test]

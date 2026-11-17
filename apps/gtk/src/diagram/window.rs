@@ -190,11 +190,12 @@ impl App {
             }
         });
         tab.connect_selection(on(|_, _| {}));
-        // An edit keeps a preview, as typing keeps a note's.
+        // An edit keeps a preview, as typing keeps a note's, and shows in the style editors.
         tab.connect_history(on(|app, tab| {
             if tab.history().0 {
                 app.promote(&tab.page);
             }
+            app.sync_styles(tab);
             if app.is_active_diagram(tab) {
                 app.sync_diagram_tools();
                 app.sync_history();
@@ -202,6 +203,7 @@ impl App {
             }
         }));
         tab.connect_autosave(on(|app, tab| app.save_model(tab, false)));
+        tab.connect_edit_style(on(|app, tab| app.edit_style(tab)));
         tab.connect_image(on(|app, tab| app.pick_image(tab)));
         tab.connect_banner(on(|app, tab| app.resolve_model(tab)));
         // Load: remembered for the file, and the note in the preview drawn again with them.

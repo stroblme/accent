@@ -104,61 +104,62 @@ const RECTANGLE_ROUNDING_FACTOR: f64 = 0.15;
 /// Control points this far towards the corner put a cubic's midpoint on the quarter circle.
 const KAPPA: f64 = 4.0 / 3.0 * (std::f64::consts::SQRT_2 - 1.0);
 
-/// Whether [`vertex`] supports `shape`: mxGraph's registry and draw.io's General
-/// palette (`mxCellRenderer`, `Sidebar.addGeneralPalette`). Of the others the scene draws a
-/// stencil as its program says ([`Stencil::of`]) and a placeholder for the rest, the shapes
-/// draw.io draws in code.
+/// The shapes [`vertex`] draws: mxGraph's registry and draw.io's General palette
+/// (`mxCellRenderer`, `Sidebar.addGeneralPalette`). Of the others the scene draws a stencil as its
+/// program says ([`Stencil::of`]) and a placeholder for the rest, the shapes draw.io draws in code.
 // ponytail: mxGraph's `arrow` and `arrowConnector`, edge shapes older than `flexArrow`, are not
 // ported; such an edge is drawn as a plain connector.
+pub const KNOWN: &[&str] = &[
+    "label",
+    "rectangle",
+    "rect",
+    "ellipse",
+    "doubleEllipse",
+    "rhombus",
+    "triangle",
+    "hexagon",
+    "cloud",
+    "actor",
+    "cylinder",
+    "line",
+    "swimlane",
+    "text",
+    "image",
+    "connector",
+    "flexArrow",
+    "note",
+    "cylinder3",
+    "curlyBracket",
+    "process",
+    "process2",
+    "parallelogram",
+    "trapezoid",
+    "step",
+    "document",
+    "internalStorage",
+    "cube",
+    "tape",
+    "card",
+    "callout",
+    "wedgeCallout",
+    "umlActor",
+    "or",
+    "xor",
+    "dataStorage",
+    "message",
+    "partialRectangle",
+    "folder",
+    "component",
+    "plus",
+    "startState",
+    "endState",
+    "offPageConnector",
+    "waypoint",
+];
+
+/// Whether [`vertex`] supports `shape`: one of [`KNOWN`].
 pub fn is_known(shape: &str) -> bool {
-    matches!(
-        shape,
-        "label"
-            | "rectangle"
-            | "rect"
-            | "ellipse"
-            | "doubleEllipse"
-            | "rhombus"
-            | "triangle"
-            | "hexagon"
-            | "cloud"
-            | "actor"
-            | "cylinder"
-            | "line"
-            | "swimlane"
-            | "text"
-            | "image"
-            | "connector"
-            | "flexArrow"
-            | "note"
-            | "cylinder3"
-            | "curlyBracket"
-            | "process"
-            | "process2"
-            | "parallelogram"
-            | "trapezoid"
-            | "step"
-            | "document"
-            | "internalStorage"
-            | "cube"
-            | "tape"
-            | "card"
-            | "callout"
-            | "wedgeCallout"
-            | "umlActor"
-            | "or"
-            | "xor"
-            | "dataStorage"
-            | "message"
-            | "partialRectangle"
-            | "folder"
-            | "component"
-            | "plus"
-            | "startState"
-            | "endState"
-            | "offPageConnector"
-            | "waypoint"
-    )
+    KNOWN.contains(&shape)
 }
 
 /// The parts of vertex `shape` drawn into `bounds` facing east, background first; the scene

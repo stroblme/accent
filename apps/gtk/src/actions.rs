@@ -677,7 +677,7 @@ impl App {
                 let target = self
                     .selected_row()
                     .map(|row| (row.is_dir(), row.rel))
-                    .or_else(|| self.active().map(|tab| (false, tab.rel())));
+                    .or_else(|| self.file_tab().map(|tab| (false, tab.rel())));
                 if let (Some((is_dir, rel)), Some(ops)) = (target, self.need_ops("rename a file")) {
                     fileops::rename(ops, &rel, is_dir);
                 }
@@ -689,7 +689,7 @@ impl App {
                 let target = self
                     .selected_row()
                     .map(|row| row.rel)
-                    .or_else(|| self.active().map(|tab| tab.rel()));
+                    .or_else(|| self.file_tab().map(|tab| tab.rel()));
                 if let (Some(rel), Some(ops)) = (target, self.need_ops("move a file to the trash"))
                 {
                     fileops::trash(ops, &rel);
@@ -757,6 +757,12 @@ impl App {
         self.save_tab_now(tab);
         let left = accent_core::conflict::blocks(&tab.text()).len();
         git.mark_resolved(&tab.rel(), !tab.save.modified.get(), left);
+    }
+
+    /// The active text tab, where it is a file: what Rename and Move to Trash take with no row
+    /// selected.
+    fn file_tab(&self) -> Option<Rc<Tab>> {
+        self.active().filter(|tab| !tab.is_scratch())
     }
 
     /// Run `f` on the active text tab. Over anything else the action is a no-op, which is what

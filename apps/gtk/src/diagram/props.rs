@@ -41,7 +41,8 @@ pub enum Target {
         /// The one shape selected: its place and size in its parent, as the file has them, and
         /// whether it is pinned where it is (locked, or on a locked layer).
         geometry: Option<(Rect, bool)>,
-        /// A creation tool this cell can set the default for, and whether it already has one.
+        /// A creation tool this cell can set the default for, and whether the cell's style is
+        /// that default.
         default_tool: Option<(Tool, bool)>,
     },
     Page {
@@ -59,7 +60,11 @@ pub enum Change {
     EdgeStyle(Vec<(&'static str, Option<String>)>),
     /// The whole style string of the one selected cell.
     Raw(String),
+    /// The one selected cell's style as its tool's Default Style, or the default cleared where
+    /// the style is it already.
     DefaultStyle,
+    /// The one selected cell's style in an editor tab of its own.
+    EditStyle,
     PageAttr(&'static str, Option<String>),
     PageName(String),
     /// The one selected shape's place and size in its parent.
@@ -251,6 +256,7 @@ pub struct Props {
     dragging: Cell<bool>,
     raw: adw::EntryRow,
     default_style: gtk::Button,
+    edit_style: gtk::Button,
     page_name: adw::EntryRow,
     background: Rc<ColourRow>,
     page_width: adw::SpinRow,
@@ -413,9 +419,12 @@ impl Props {
 
         let raw = entry_row("Style");
         raw.add_css_class("monospace");
-        let default_style = icon_button("starred-symbolic", "Set Default Style");
+        let default_style = icon_button("non-starred-symbolic", "Set Default Style");
         default_style.set_valign(gtk::Align::Center);
         raw.add_suffix(&default_style);
+        let edit_style = icon_button("document-edit-symbolic", "Edit Style");
+        edit_style.set_valign(gtk::Align::Center);
+        raw.add_suffix(&edit_style);
         raw_group.add(&raw);
         let clips = [
             (Clip::Position, &position, "Position"),
@@ -497,6 +506,7 @@ impl Props {
             dragging: Cell::new(false),
             raw,
             default_style,
+            edit_style,
             page_name,
             background,
             page_width,
@@ -679,6 +689,9 @@ impl Props {
         let send_default = send.clone();
         self.default_style
             .connect_clicked(move |_| send_default(Change::DefaultStyle));
+        let send_edit = send.clone();
+        self.edit_style
+            .connect_clicked(move |_| send_edit(Change::EditStyle));
         self.typed(&self.page_name, "page name", move |text| {
             send(Change::PageName(text))
         });
@@ -844,7 +857,7 @@ impl Props {
                 self.raw.set_visible(*count == 1);
                 self.raw.set_text(if *count == 1 { raw } else { "" });
                 self.default_style.set_visible(default_tool.is_some());
-                if let Some((tool, existing)) = default_tool {
+                if let Some((tool, is_default)) = default_tool {
                     let kind = match tool {
                         Tool::Rect => "rectangles",
                         Tool::Ellipse => "ellipses",
@@ -852,7 +865,12 @@ impl Props {
                         Tool::Connector => "connectors",
                         Tool::Select | Tool::Image => unreachable!(),
                     };
-                    let action = if *existing { "Update" } else { "Set" };
+                    // Filled while the cell's style is the default, which a press then clears.
+                    let (icon, action) = match is_default {
+                        true => ("starred-symbolic", "Clear"),
+                        false => ("non-starred-symbolic", "Set"),
+                    };
+                    self.default_style.set_icon_name(icon);
                     self.default_style
                         .set_tooltip_text(Some(&format!("{action} Default Style for {kind}")));
                 }

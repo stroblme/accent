@@ -86,7 +86,7 @@ pub fn edit_labels(file: &mut File, mut edit: impl FnMut(&str) -> Option<String>
 }
 
 /// A label on one line, as [`Label::text`] has it.
-fn line(cell: &Cell) -> String {
+pub fn line(cell: &Cell) -> String {
     let text = match cell.is_html() {
         true => label::html_to_runs(cell.label(), false)
             .iter()

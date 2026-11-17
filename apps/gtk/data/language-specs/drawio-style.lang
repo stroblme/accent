@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  A draw.io style an item a line, the language of the diagram style editor (accent_drawio's
+  `Style::lines`): a key before its `=` and the value after it, a bare named style (`ellipse`) on
+  a line of its own, and the `;` that keeps a style from inheriting the defaults.
+-->
+<language id="drawio-style" name="Draw.io Style" version="2.0" _section="Other" hidden="true">
+  <styles>
+    <style id="key" name="Key" map-to="def:type"/>
+    <style id="operator" name="Equals" map-to="def:operator"/>
+    <style id="value" name="Value" map-to="def:string"/>
+    <style id="named" name="Named Style" map-to="def:keyword"/>
+  </styles>
+
+  <definitions>
+    <context id="drawio-style">
+      <include>
+        <context id="pair">
+          <match>^\s*([^=\s][^=]*?)\s*(=)\s*(.*)$</match>
+          <include>
+            <context sub-pattern="1" style-ref="key"/>
+            <context sub-pattern="2" style-ref="operator"/>
+            <context sub-pattern="3" style-ref="value"/>
+          </include>
+        </context>
+        <context id="named" style-ref="named">
+          <match>^\s*[^=\s;]+\s*$</match>
+        </context>
+        <context id="inherits-nothing" style-ref="operator">
+          <match>^\s*;\s*$</match>
+        </context>
+      </include>
+    </context>
+  </definitions>
+</language>

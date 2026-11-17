@@ -99,6 +99,15 @@ impl Editor {
         }
     }
 
+    /// Remove a file-level attribute as one undo step.
+    pub fn clear_file_attr(&mut self, key: &str) {
+        let before = self.file.attrs.clone();
+        self.file.attrs.retain(|(k, _)| k != key);
+        if self.file.attrs != before {
+            self.record(Snapshot::FileAttrs(before));
+        }
+    }
+
     pub fn page(&self, i: usize) -> Result<&Page, Error> {
         self.file.page(i)
     }

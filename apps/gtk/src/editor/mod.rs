@@ -59,8 +59,8 @@ pub(crate) use lines::{
 };
 #[cfg(feature = "bench")]
 pub(crate) use lines::{newline_below, paste_primary};
-pub use open::open;
 pub(crate) use open::{Clamped, LINE_SPACING, build, clamped, interact, interact_with};
+pub use open::{open, scratch};
 pub(crate) use page::COLUMN_FLOOR;
 pub use page::default_font;
 use page::{GUTTER, line_numbers};
@@ -89,6 +89,9 @@ const DEBOUNCE: Duration = Duration::from_millis(150);
 const INSTANT: i32 = 16 * 1024;
 /// DESIGN.md, Motion: save 1 s after the last edit. A diagram and a PDF's drawing share it.
 pub(crate) const AUTOSAVE: Duration = Duration::from_secs(1);
+/// How long a [`Scratch`] tab waits after the last keystroke before its owner takes the text: a
+/// diagram cell's style, applied while the reader watches (DESIGN.md, Diagram).
+const APPLY: Duration = Duration::from_millis(400);
 /// The cursor callback drives the preview's scroll sync; 100 ms is below what the eye follows.
 const CURSOR: Duration = Duration::from_millis(100);
 type TabHook = crate::widgets::Hook<dyn Fn(&Rc<Tab>)>;
@@ -260,6 +263,14 @@ impl Flavour {
     }
 }
 
+/// What stands in for the file of a tab over none: the name its tab shows, and what takes its text
+/// where a save would write it (a diagram cell's style). Such a tab is no file to the window: not
+/// kept by the session, never written, and closed without asking, its text taken first.
+pub struct Scratch {
+    pub name: RefCell<String>,
+    pub apply: Box<dyn Fn(&str)>,
+}
+
 /// Named construction preferences, avoiding a growing positional argument list.
 pub struct Prefs {
     pub spellcheck: bool,
@@ -402,6 +413,8 @@ pub struct Tab {
     /// This tab's document on the vault's language layer: what it can answer, what it last
     /// answered, and the refresh that is still in flight. Empty for a tab outside every vault.
     pub lang: lang::State,
+    /// What stands in for the file, for a tab over none ([`scratch`]).
+    scratch: Option<Scratch>,
 }
 
 /// Reload position: caret and top-line viewport offset, retaining the
@@ -469,6 +482,32 @@ pub fn watch_file(path: &Path, f: impl Fn() + 'static) -> Option<gio::FileMonito
 impl Tab {
     pub fn rel(&self) -> String {
         self.rel.borrow().clone()
+    }
+
+    /// Whether the tab is over no file ([`Scratch`]).
+    pub fn is_scratch(&self) -> bool {
+        self.scratch.is_some()
+    }
+
+    /// Hand a scratch tab's text to its owner where a save would write it, if it holds any not
+    /// handed over yet; `false` for a tab over a file, which the caller saves.
+    pub fn apply_scratch(&self) -> bool {
+        let Some(scratch) = &self.scratch else {
+            return false;
+        };
+        self.autosave.cancel();
+        if self.save.modified.replace(false) {
+            (scratch.apply)(&self.text());
+        }
+        true
+    }
+
+    /// Rename a scratch tab, as what it stands for has changed.
+    pub fn set_scratch_name(&self, name: &str) {
+        if let Some(scratch) = &self.scratch {
+            scratch.name.replace(name.to_string());
+            self.page.set_title(&self.tab_title());
+        }
     }
 
     /// Vault language key: the host path for a remote dependency, otherwise this tab's key.
@@ -977,12 +1016,16 @@ impl Tab {
 
     fn tab_title(&self) -> String {
         let rel = self.rel();
-        let name = crate::doc::file_name(&rel);
+        let name = match &self.scratch {
+            Some(scratch) => scratch.name.borrow().clone(),
+            None => crate::doc::file_name(&rel).to_string(),
+        };
         let name = match self.comparing.borrow().as_ref() {
             Some(comparing) => format!("{name} ({})", comparing.label),
-            None => name.to_string(),
+            None => name,
         };
-        match self.save.modified.get() {
+        // A scratch's edits are its owner's a moment later, so it is never shown unsaved.
+        match self.save.modified.get() && self.scratch.is_none() {
             true => format!("• {name}"),
             false => name,
         }
