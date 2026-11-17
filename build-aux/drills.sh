@@ -47,6 +47,18 @@ drill_keys() {
 	expect keys
 }
 
+# A note's picture written from outside after the note opened takes the place of its missing sign.
+drill_picture_arrives() {
+	printf '![a](a.png)\n' >"$vault/note.md"
+	cp "$repo/docs/guide/social-preview.png" "$vault/b.png"
+	launch 60 ACCENT_BENCH_PREVIEW_LOOK=change:note.md,a.png,b.png >"$dir/arrives"
+	if ! grep -q '^bench preview_look before .*/a.png loaded=false ' "$dir/arrives" ||
+		! grep -q '^bench preview_look changed .*/a.png loaded=true ' "$dir/arrives"; then
+		cat "$dir/arrives"
+		return 1
+	fi
+}
+
 drill_close() {
 	echo "# Note" >"$vault/note.md"
 	launch 60 ACCENT_BENCH_CLOSE=1

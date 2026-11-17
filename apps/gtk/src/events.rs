@@ -427,8 +427,13 @@ impl App {
                 }
             }
             Event::FileChanged(rel) => self.changed_on_disk(&rel),
-            // Its pictures were looked at above.
-            Event::FilesAdded(_) => {}
+            // A note's picture that was missing is shown once its file comes, a checkout's or a
+            // sync's too, whatever counts as used.
+            Event::FilesAdded(rels) => {
+                for rel in &rels {
+                    self.reshow_preview_image(rel);
+                }
+            }
             Event::FilesUsed(rels) => self.files_used(&rels),
             Event::FileRemoved(rel) => {
                 self.file_gone(&rel);
@@ -473,7 +478,9 @@ impl App {
                 self.refill_breakpoints();
             }
             Event::FileRenamed { from, to } => {
+                // The new name too: a download's `.part` renamed into place is a picture come.
                 self.reshow_preview_image(&from);
+                self.reshow_preview_image(&to);
                 self.follow_rename(&from, &to);
             }
             Event::Conflict { original, .. } => self.sync_conflict_banner(&original, None),
