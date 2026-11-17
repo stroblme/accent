@@ -1435,7 +1435,8 @@ thread_local! {
 // pressed), faded in over 12 px so a long title runs out under it, 6 px short of the number. Each
 // layer fades from its own colour at no alpha, since a fade from `transparent` passes through
 // black, a dark band on a dark theme. Only its label is dimmed: a dimmed backing would let the
-// title show through.
+// title show through. It fades in, and goes at once as the pointer leaves, with the row's tint,
+// which libadwaita does not fade: a fade out would leave a tinted patch behind the pointer.
 /// Register embedded icons and GtkSourceView language specifications and style schemes.
 ///
 /// GResources make icons available before installation while retaining normal theme lookup
@@ -1475,7 +1476,8 @@ fn install_chrome_css() {
                background-image {ms}ms ease; }} \
              .accent-toasts {{ transition: transform {lift}ms {easing}; }} \
              .file-tree > row > treeexpander {{ transition: box-shadow {flash}ms ease-out; }} \
-             .git-actions, .accent-row-number {{ transition: opacity {lift}ms {easing}; }} \
+             .git-actions, .navigation-sidebar > row:hover .accent-row-number {{ \
+               transition: opacity {lift}ms {easing}; }} \
              treeexpander.accent-turning > expander, image.accent-chevron.accent-turning, \
              expander-widget > box > title > expander {{ \
                transition: -gtk-icon-transform {lift}ms {easing}; }} ",

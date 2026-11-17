@@ -448,6 +448,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   The followed row comes back as the pointer leaves.
 - The row under the pointer shows its page dim at its right end, a bookmark's or a diagram page's, or its line, a heading's or a symbol's (user decision 2026-11-17).
   It lies over the end of the title on a backing of the row's own tint, so the title keeps its room and nothing moves as the number comes and goes.
+  It fades in, and goes at once with the row's tint as the pointer leaves.
   A notebook's headings and a PDF's comments show none, since a heading's place there is a cell and a comment sits under its page's row.
 
 **Code**
@@ -1294,7 +1295,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Both write through the vault, on the host for a remote one, off the main loop.
 - **The thumbnail strip organises pages:** dragging a thumbnail moves its page, an accent bar marks the destination gap, and the strip scrolls near an edge.
   The thumbnail under the pointer carries round buttons, opaque as the ring's are, with Copy Page in its top-left corner, Delete Page in its top-right (absent where it would take every page, as a PDF keeps one) and Insert Page Here on the gap below.
-  Its page number shows in its bottom-left corner on a pill as opaque as the buttons, the pill's round end on the corner's arc (user decision 2026-11-17).
+  Its page number shows in its bottom-left corner while it is under the pointer (user decision 2026-11-17), on a pill as opaque as the buttons with its round end on the corner's arc.
   A wheel over them scrolls the strip as it does beside them.
   A thumbnail's corners are as round as those buttons, 17 px, and each corner button is centred on its corner's arc, so it fills the corner (user decision 2026-11-09).
   A press on one of them, as a page dropped into a gap, hands the keyboard to the page, so `Ctrl+Z` right after it takes the edit back.

@@ -487,16 +487,16 @@ drill_outline_hover() {
 		'bench outline hover hover.pdf thumb page=2 number=Some("2") corner=true' \
 		'bench outline hover hover.pdf row="Introduction" hovered=true number=Some("2") drawn=true matched=true kept=true' \
 		"bench outline hover hover.pdf row=$long hovered=true number=Some(\"3\") drawn=true matched=true kept=true" \
-		'bench outline hover hover.pdf away thumb=Some(None) row="Introduction" drawn=Some(false)' \
+		'bench outline hover hover.pdf away thumb=Some(None) row="Introduction" drawn=Some(false) left_matched=Some(true)' \
 		'bench outline hover hover.drawio thumb page=2 number=Some("2") corner=true' \
 		'bench outline hover hover.drawio row="First" hovered=true number=Some("1") drawn=true matched=true kept=true' \
 		"bench outline hover hover.drawio row=$long hovered=true number=Some(\"2\") drawn=true matched=true kept=true" \
-		'bench outline hover hover.drawio away thumb=Some(None) row="First" drawn=Some(false)' \
+		'bench outline hover hover.drawio away thumb=Some(None) row="First" drawn=Some(false) left_matched=Some(true)' \
 		'bench outline hover hover.md row="Short" hovered=true number=Some("5") drawn=true matched=true kept=true' \
 		"bench outline hover hover.md row=$long hovered=true number=Some(\"9\") drawn=true matched=true kept=true" \
 		'bench outline hover parked row="Short" hovered=true number=Some("6") drawn=true matched=true' \
 		"bench outline hover spliced numbers=[(\"Added\", Some(\"1\")), (\"Hover\", Some(\"3\")), (\"Short\", Some(\"7\")), ($long, Some(\"11\"))]" \
-		'bench outline hover hover.md away thumb=None row="Short" drawn=Some(false)'
+		'bench outline hover hover.md away thumb=None row="Short" drawn=Some(false) left_matched=Some(true)'
 }
 
 # The vault's root in each sort, with a folder left open staying open. Each file's creation time

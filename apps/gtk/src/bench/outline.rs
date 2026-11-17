@@ -414,16 +414,33 @@ fn bench_outline_hover(app: &Rc<App>) {
             if rel == "hover.md" {
                 hover_parked(&app, short).await;
             }
-            xtest("move 5 5").await;
+            // Off the row from on it, a frame later: the number goes with the row's tint.
+            let on = row_aim(&app, short).unwrap_or_default();
+            xtest(&format!("move {on}")).await;
+            xtest_now("move 5 5").await;
+            glib::timeout_future(Duration::from_millis(60)).await;
+            let left = row_facts(&app, short, Some(&format!("{rel}-left"))).map(|f| f.matched);
+            glib::timeout_future(Duration::from_millis(600)).await;
             let thumb = strip_number(&app).map(|s| s.number);
             let f = row_facts(&app, short, None);
             println!(
-                "bench outline hover {rel} away thumb={thumb:?} row={short:?} drawn={:?}",
+                "bench outline hover {rel} away thumb={thumb:?} row={short:?} drawn={:?} \
+                 left_matched={left:?}",
                 f.map(|f| f.drawn)
             );
         }
         bench_quit(&app);
     });
+}
+
+/// [`xtest`] without its settling wait, for a frame right after `steps`.
+async fn xtest_now(steps: &str) {
+    let script = concat!(env!("CARGO_MANIFEST_DIR"), "/../../build-aux/xtest.py");
+    let display = std::env::var("DISPLAY").unwrap_or_default();
+    let argv = ["python3", script, &display, steps].map(std::ffi::OsStr::new);
+    if let Ok(run) = gio::Subprocess::newv(&argv, gio::SubprocessFlags::NONE) {
+        let _ = run.wait_future().await;
+    }
 }
 
 /// The second page's thumbnail, scrolled to the middle of the strip, under the pointer: the
@@ -558,13 +575,17 @@ struct RowFacts {
 fn row_facts(app: &Rc<App>, title: &str, shot: Option<&str>) -> Option<RowFacts> {
     let row = outline_row_widget(app, title)?;
     let overlay = row.first_child().and_downcast::<gtk::Overlay>()?;
-    let text = overlay.child()?.last_child()?;
+    let text = overlay.child()?.last_child().and_downcast::<gtk::Label>()?;
     let backing = overlay.last_child()?;
     let numeral = backing.first_child().and_downcast::<gtk::Label>()?;
     let window = app.window.upcast_ref::<gtk::Widget>();
-    let (w, h) = (f64::from(window.width()), f64::from(window.height()));
+    // Pictured at its own size, its border and all, which puts the window's points `origin` off
+    // the picture's.
+    let paintable = gtk::WidgetPaintable::new(Some(window));
+    let (w, h) = (paintable.intrinsic_width(), paintable.intrinsic_height());
     let snapshot = gtk::Snapshot::new();
-    gtk::WidgetPaintable::new(Some(window)).snapshot(&snapshot, w, h);
+    paintable.snapshot(&snapshot, f64::from(w), f64::from(h));
+    let origin = window.compute_bounds(window)?;
     let texture = window
         .native()?
         .renderer()?
@@ -576,28 +597,52 @@ fn row_facts(app: &Rc<App>, title: &str, shot: Option<&str>) -> Option<RowFacts>
     let mut downloader = gdk::TextureDownloader::new(&texture);
     downloader.set_format(gdk::MemoryFormat::R8g8b8a8);
     let (bytes, stride) = downloader.download_bytes();
-    let pixel = |widget: &gtk::Widget, x: f32, y: f32| {
-        let at = widget.compute_point(window, &graphene::Point::new(x, y))?;
-        let i = at.y() as usize * stride + at.x() as usize * 4;
+    // A widget's own points start inside its padding; its bounds take that padding in.
+    let texel = |x: f32, y: f32| {
+        let (x, y) = (x - origin.x(), y - origin.y());
+        let i = y as usize * stride + x as usize * 4;
         bytes.get(i..i + 3).map(|p| [p[0], p[1], p[2]])
     };
+    let pixel = |widget: &gtk::Widget, x: f32, y: f32| {
+        let at = widget.compute_point(window, &graphene::Point::new(x, y))?;
+        texel(at.x(), at.y())
+    };
+    let bounds = |widget: &gtk::Widget| widget.compute_bounds(window);
     let apart = |a: [u8; 3], b: [u8; 3], by: u8| a.iter().zip(b).any(|(a, b)| a.abs_diff(b) > by);
-    // Above the digits, where only the backing is; and in the row's own padding at that height.
-    let backed = pixel(numeral.upcast_ref(), numeral.width() as f32 / 2.0, 1.0)?;
-    let top = numeral
-        .compute_point(&row, &graphene::Point::new(0.0, 1.0))?
-        .y();
-    let beside = pixel(&row, row.width() as f32 - 4.0, top)?;
+    // The row's own colour at a height of the number, in the row's padding beside it.
+    let (row_at, numeral_at, backing_at) = (
+        bounds(&row)?,
+        bounds(numeral.upcast_ref())?,
+        bounds(&backing)?,
+    );
+    let beside = |y: f32| texel(row_at.x() + row_at.width() - 4.0, numeral_at.y() + y);
+    let backed = beside(1.0)?;
     let drawn = (0..numeral.width()).any(|x| {
         (0..numeral.height()).any(|y| {
             pixel(numeral.upcast_ref(), x as f32, y as f32).is_some_and(|p| apart(p, backed, 60))
+        })
+    });
+    // Left of the number the backing is the row's colour through the middle half of the row, where
+    // a title's letters are, clear of the row's rounded corners: the whole of it, fade and all,
+    // over a title that ends before it, and the last 3 px over one running on under it.
+    let ends =
+        bounds(text.upcast_ref())?.x() + text.measure(gtk::Orientation::Horizontal, -1).1 as f32;
+    let from = match ends < backing_at.x() {
+        true => backing_at.x(),
+        false => numeral_at.x() - 3.0,
+    };
+    let matched = (numeral.height() / 4..numeral.height() * 3 / 4).all(|y| {
+        let (y, own) = (y as f32, beside(y as f32));
+        (from as i32..numeral_at.x() as i32).all(|x| {
+            let p = texel(x as f32, numeral_at.y() + y);
+            p.zip(own).is_some_and(|(p, own)| !apart(p, own, 2))
         })
     });
     Some(RowFacts {
         hovered: row.state_flags().contains(gtk::StateFlags::PRELIGHT),
         number: backing.is_visible().then(|| numeral.text().to_string()),
         drawn,
-        matched: !apart(backed, beside, 2),
+        matched,
         width: text.width(),
     })
 }
