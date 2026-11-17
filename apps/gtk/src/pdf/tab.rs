@@ -871,8 +871,7 @@ impl PdfTab {
         self.ring.connect_moved(f);
     }
 
-    /// Whether the ring is out, for the drills.
-    #[cfg(feature = "bench")]
+    /// Whether the ring is on the page, out and not put away by a presentation.
     pub fn ring_visible(&self) -> bool {
         self.ring.widget().is_visible()
     }

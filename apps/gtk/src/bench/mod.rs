@@ -283,6 +283,9 @@ use user_commands::bench_commands;
 ///   its Undo and Redo, and the file broken and mended; writes the file),
 ///   `ring:<rel_path>` (the ring under the pen's eraser end, told by hand, and its swatches
 ///   under Light, Dark and Solarized, pictured into `$TMPDIR`),
+///   `ring-panes` (a ring in the pane that is not the active one, beside a PDF and beside a
+///   diagram, pressed through XTEST: none greyed, and the tool picked on its own tab alone;
+///   writes `ring-a.pdf`, `ring-b.pdf` and `ring.drawio`),
 ///   `text:<rel_path>` (the Text tool through XTEST: text typed and finished each way, typed
 ///   again, moved, erased and emptied, with Undo, against the file; writes the file),
 ///   `select:<rel_path>[,<n>]` (the Select tool through XTEST: a lasso, moves, copy, cut, paste,
@@ -769,6 +772,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rel) = rel.strip_prefix("ring:") {
                 return pdf_draw::bench_pdf_ring(&app, rel);
+            }
+            if rel == "ring-panes" {
+                return pdf_draw::bench_ring_panes(&app);
             }
             if let Some(rel) = rel.strip_prefix("text:") {
                 return pdf_text::bench_pdf_text(&app, rel);

@@ -225,6 +225,7 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
             if app.keyboard_pane().is_none_or(|k| Rc::ptr_eq(&k, &pane)) {
                 app.set_active_pane(&pane);
             }
+            app.pdf_fronted(&pane);
             app.sync_active();
             // Under F5 the tab come to the front is the one presented, keyboard and all.
             if app.presenting.get().is_some() {

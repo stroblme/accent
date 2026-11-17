@@ -344,8 +344,7 @@ impl PdfRing {
         }
     }
 
-    /// The ring's widget, for the drills.
-    #[cfg(feature = "bench")]
+    /// The ring's widget.
     pub fn widget(&self) -> &gtk::Widget {
         self.ring.widget()
     }

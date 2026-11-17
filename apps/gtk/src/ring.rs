@@ -73,8 +73,13 @@ impl<T: Tool> Ring<T> {
             let button = gtk::ToggleButton::builder()
                 .icon_name(*icon)
                 .tooltip_text(crate::actions::label_of(action))
-                .action_name(action)
                 .build();
+            button.connect_clicked(move |button| {
+                // The click flipped the look before this; the tool the action leaves in hand
+                // is the one checked (`Ring::set_tool`).
+                button.set_active(!button.is_active());
+                run(button, action);
+            });
             button.add_css_class("circular");
             button.add_css_class("opaque");
             button.add_css_class("accent-floating");
@@ -117,9 +122,10 @@ impl<T: Tool> Ring<T> {
         let button = gtk::Button::builder()
             .child(&glyph(icon))
             .tooltip_text(crate::actions::label_of(action))
-            .action_name(action)
             .visible(false)
             .build();
+        let action = action.to_string();
+        button.connect_clicked(move |button| run(button, &action));
         button.add_css_class("circular");
         button.add_css_class("opaque");
         button.add_css_class("accent-floating");
@@ -334,6 +340,14 @@ fn place(root: &RingBox, button: &impl IsA<gtk::Widget>, cx: f64, cy: f64, size:
     button.set_size_request(size, size);
     let half = f64::from(size) / 2.0;
     root.put(button, cx - half, cy - half);
+}
+
+/// Run a tool's or a command's window action from its button. A click fires the action rather than
+/// the button being one of its actionables, which would grey the button whenever another pane's
+/// tab is in front, since the action follows the tab in front. The press brings the ring's pane to
+/// the front first (`wire_pane`), so the action acts on the ring's own tab.
+fn run(button: &impl IsA<gtk::Widget>, action: &str) {
+    let _ = button.activate_action(action, None);
 }
 
 /// A tool button's diameter. Big enough to hit while drawing, and above libadwaita's 34 px

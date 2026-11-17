@@ -68,6 +68,148 @@ pub(super) fn bench_pdf_ring(app: &Rc<App>, rel: &str) {
     });
 }
 
+/// A ring in the pane that is not the active one, pressed through XTEST: none of its buttons
+/// greyed, and a press picks the tool on its own tab alone, against what its ring shows, its pane
+/// taking the keyboard, beside another PDF and beside a diagram. Writes `ring-a.pdf`, `ring-b.pdf`
+/// and `ring.drawio` into the vault.
+pub(super) fn bench_ring_panes(app: &Rc<App>) {
+    scratch_only(app, "ACCENT_BENCH_PDF=ring-panes");
+    let root = app.root();
+    let pdf = accent_core::pdf::blank_pdf((595.0, 842.0)).unwrap_or_default();
+    let diagram = b"<mxfile><diagram id=\"p\" name=\"Page-1\"><mxGraphModel><root>\
+        <mxCell id=\"0\"/><mxCell id=\"1\" parent=\"0\"/><mxCell id=\"box\" vertex=\"1\" \
+        parent=\"1\"><mxGeometry x=\"40\" y=\"40\" width=\"80\" height=\"40\" as=\"geometry\"/>\
+        </mxCell></root></mxGraphModel></diagram></mxfile>";
+    for (rel, bytes) in [
+        ("ring-a.pdf", &pdf[..]),
+        ("ring-b.pdf", &pdf[..]),
+        ("ring.drawio", &diagram[..]),
+    ] {
+        std::fs::write(root.join(rel), bytes).expect("bench fixture");
+    }
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        let Some(a) = opened(&app, "ring-a.pdf").await else {
+            return bench_quit(&app);
+        };
+        app.set_drawing(true);
+        let Some(b) = opened(&app, "ring-b.pdf")
+            .await
+            .filter(|b| !Rc::ptr_eq(b, &a))
+        else {
+            return bench_quit(&app);
+        };
+        app.set_drawing(true);
+        app.pdf_mode(pdfview::Mode::Highlighter);
+        app.split_page(&app.pane(), Side::Right, &b.page);
+        glib::timeout_future(Duration::from_millis(500)).await;
+        app.reveal_page(&a.page);
+        // The window's last tool is A's, which B's ring does not show.
+        app.pdf_mode(pdfview::Mode::Line);
+        super::git::xtest("move 700 400; focus").await;
+        let (a_ring, b_ring) = (a.ring().widget().clone(), b.ring().widget().clone());
+        println!("bench ring panes pdfs {}", greyed(&b_ring));
+        // The window's tool, then the one B shows in hand, then one neither has.
+        for (case, label) in [("window's", "Line"), ("shown", "Line"), ("other", "Circle")] {
+            app.reveal_page(&a.page);
+            glib::timeout_future(Duration::from_millis(300)).await;
+            let pressed = press(&app, &b_ring, label).await;
+            println!(
+                "bench ring panes pdfs {case} {label} pressed={pressed} a={:?} b={:?} {}",
+                a.mode(),
+                b.mode(),
+                active(&app, &b.page)
+            );
+        }
+        // A diagram in B's pane, beside A.
+        app.reveal_page(&b.page);
+        app.open_path("ring.drawio");
+        let found = || app.doc_for("ring.drawio")?.diagram().cloned();
+        let Some(d) = until("ring panes", "diagram", 10_000, found).await else {
+            return bench_quit(&app);
+        };
+        glib::timeout_future(Duration::from_millis(500)).await;
+        app.reveal_page(&a.page);
+        glib::timeout_future(Duration::from_millis(300)).await;
+        let ring = |page: &adw::TabPage| {
+            find_widget(&page.child(), &|w| {
+                w.is::<crate::ring::RingBox>() && w.is_visible()
+            })
+        };
+        let Some(d_ring) = ring(&d.page) else {
+            return bench_quit(&app);
+        };
+        // Select's commands, with a box held.
+        d.select(vec!["box".to_string()]);
+        // Laid out, so the commands it puts out are where the press aims.
+        glib::timeout_future(Duration::from_millis(300)).await;
+        println!("bench ring panes diagram held {}", greyed(&d_ring));
+        let pressed = press(&app, &d_ring, "Delete Selection").await;
+        println!(
+            "bench ring panes diagram Delete Selection pressed={pressed} a={:?} deleted={} {}",
+            a.mode(),
+            d.frame_of("box").is_none(),
+            active(&app, &d.page)
+        );
+        app.reveal_page(&a.page);
+        glib::timeout_future(Duration::from_millis(300)).await;
+        println!("bench ring panes diagram {}", greyed(&d_ring));
+        let pressed = press(&app, &d_ring, "Add Rectangle").await;
+        println!(
+            "bench ring panes diagram Add Rectangle pressed={pressed} a={:?} tool={:?} {}",
+            a.mode(),
+            d.tool(),
+            active(&app, &d.page)
+        );
+        println!("bench ring panes beside diagram {}", greyed(&a_ring));
+        let pressed = press(&app, &a_ring, "Highlighter").await;
+        println!(
+            "bench ring panes beside diagram Highlighter pressed={pressed} a={:?} tool={:?} {}",
+            a.mode(),
+            d.tool(),
+            active(&app, &a.page)
+        );
+        bench_quit(&app);
+    });
+}
+
+/// How many of the buttons `ring` shows are greyed.
+fn greyed(ring: &gtk::Widget) -> String {
+    let (mut shown, mut greyed) = (0, 0);
+    let mut child = ring.first_child();
+    while let Some(c) = child {
+        if c.is::<gtk::Button>() && c.is_visible() {
+            shown += 1;
+            greyed += usize::from(!c.is_sensitive());
+        }
+        child = c.next_sibling();
+    }
+    format!("greyed={greyed} of={shown}")
+}
+
+/// A real press on the button of `ring` that `label` names.
+async fn press(app: &Rc<App>, ring: &gtk::Widget, label: &str) -> bool {
+    let button = find_widget(ring, &|w| {
+        w.is::<gtk::Button>() && w.is_visible() && w.tooltip_text().as_deref() == Some(label)
+    });
+    let Some(at) = button.and_then(|b| super::diagram::middle_on_screen(app, &b)) else {
+        return false;
+    };
+    super::git::xtest(&format!("move {at}; down; up")).await;
+    true
+}
+
+/// Whether the pane holding `page` is the active one and has the keyboard.
+fn active(app: &Rc<App>, page: &adw::TabPage) -> String {
+    let pane = app.pane_of(page);
+    let on = |p: Option<Rc<Pane>>| p.zip(pane.as_ref()).is_some_and(|(p, q)| Rc::ptr_eq(&p, q));
+    format!(
+        "active={} keyboard={}",
+        on(Some(app.pane())),
+        on(app.keyboard_pane())
+    )
+}
+
 /// The pen drawing 24 strokes on `rel` through XTEST, a motion every 10 ms, while the PDF text pass
 /// reads what the vault holds unread and each save of `rel` again (with `,stop` it is stopped
 /// first): how long the reading view went without a frame, and without a motion while the button

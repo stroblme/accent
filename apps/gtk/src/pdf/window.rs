@@ -810,11 +810,16 @@ impl App {
             // Presenting puts the tools away and the tool in hand down, so nothing draws on what
             // is presented; the tab still knows they were out.
             let showing = pdf.drawing() && self.presenting.get().is_none();
-            pdf.show_ring(showing, self.ring_at.get());
-            pdf.set_mode(match showing {
+            // A ring already on the page keeps the tool it shows, so a press on one in another
+            // pane, which brings that pane to the front first, picks against what it showed; a
+            // ring coming out takes the window's last tool.
+            let tool = match showing {
+                true if pdf.ring_visible() => pdf.mode(),
                 true => self.tool.get(),
                 false => pdfview::Mode::Read,
-            });
+            };
+            pdf.show_ring(showing, self.ring_at.get());
+            pdf.set_mode(tool);
         }
         let diagram = self.active_diagram();
         if let Some(d) = &diagram {
@@ -831,6 +836,18 @@ impl App {
         });
         self.sync_diagram_tools();
         self.sync_history();
+    }
+
+    /// A PDF brought to the front of `pane` with its tools out takes the window's last tool, which
+    /// follows the reader from tab to tab; one already in front keeps the tool its ring shows
+    /// when its pane becomes the active one (`App::sync_drawing`).
+    pub fn pdf_fronted(&self, pane: &Pane) {
+        if let Some(pdf) = self.pdf_of(pane)
+            && pdf.drawing()
+            && self.presenting.get().is_none()
+        {
+            pdf.set_mode(self.tool.get());
+        }
     }
 
     /// Show Undo and Redo together when the active PDF or diagram has history, disabling
