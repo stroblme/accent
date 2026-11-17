@@ -285,7 +285,8 @@ use user_commands::bench_commands;
 ///   under Light, Dark and Solarized, pictured into `$TMPDIR`),
 ///   `ring-panes` (a ring in the pane that is not the active one, beside a PDF and beside a
 ///   diagram, pressed through XTEST: none greyed, and the tool picked on its own tab alone;
-///   writes `ring-a.pdf`, `ring-b.pdf` and `ring.drawio`),
+///   then every pane's ring out after Reload Window; writes `ring-a.pdf`, `ring-b.pdf` and
+///   `ring.drawio`),
 ///   `text:<rel_path>` (the Text tool through XTEST: text typed and finished each way, typed
 ///   again, moved, erased and emptied, with Undo, against the file; writes the file),
 ///   `select:<rel_path>[,<n>]` (the Select tool through XTEST: a lasso, moves, copy, cut, paste,

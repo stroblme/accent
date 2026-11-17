@@ -804,27 +804,36 @@ impl App {
         self.config_changed();
     }
 
-    /// Put the active PDF's or diagram's tools where this window last left a ring.
+    /// Put every pane's PDF or diagram tools out or away as its tab has them, where this window
+    /// last left a ring, so a pane that is not the active one shows its ring as the active one
+    /// does, after a restore too.
     pub fn sync_drawing(&self) {
-        if let Some(pdf) = self.active_pdf() {
-            // Presenting puts the tools away and the tool in hand down, so nothing draws on what
-            // is presented; the tab still knows they were out.
-            let showing = pdf.drawing() && self.presenting.get().is_none();
-            // A ring already on the page keeps the tool it shows, so a press on one in another
-            // pane, which brings that pane to the front first, picks against what it showed; a
-            // ring coming out takes the window's last tool.
-            let tool = match showing {
-                true if pdf.ring_visible() => pdf.mode(),
-                true => self.tool.get(),
-                false => pdfview::Mode::Read,
-            };
-            pdf.show_ring(showing, self.ring_at.get());
-            pdf.set_mode(tool);
+        // A presentation shows the active pane alone, and the others keep their rings for its end.
+        let presenting = self.presenting.get().is_some();
+        let active = self.pane();
+        let panes = self.panes.borrow().clone();
+        let shown = |p: &&Rc<Pane>| !presenting || Rc::ptr_eq(p, &active);
+        for pane in panes.iter().filter(shown) {
+            if let Some(pdf) = self.pdf_of(pane) {
+                // Presenting puts the tools away and the tool in hand down, so nothing draws on
+                // what is presented; the tab still knows they were out.
+                let showing = pdf.drawing() && !presenting;
+                // A ring already on the page keeps the tool it shows, so a press on one in another
+                // pane, which brings that pane to the front first, picks against what it showed;
+                // a ring coming out takes the window's last tool.
+                let tool = match showing {
+                    true if pdf.ring_visible() => pdf.mode(),
+                    true => self.tool.get(),
+                    false => pdfview::Mode::Read,
+                };
+                pdf.show_ring(showing, self.ring_at.get());
+                pdf.set_mode(tool);
+            }
+            if let Some(d) = self.diagram_of(pane) {
+                d.show_ring(d.ring_shown(), self.ring_at.get());
+            }
         }
         let diagram = self.active_diagram();
-        if let Some(d) = &diagram {
-            d.show_ring(d.ring_shown(), self.ring_at.get());
-        }
         self.sync_export();
         self.sync_recolour();
         // Only a PDF or a diagram can be drawn on, so the button goes with the tab.

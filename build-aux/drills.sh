@@ -158,10 +158,11 @@ drill_pdf_search() {
 }
 
 # A drawing ring in the pane that is not the active one takes a real press, beside a PDF and beside
-# a diagram, and picks the tool on its own tab alone against what that ring shows (DESIGN.md, PDF).
+# a diagram, and picks the tool on its own tab alone against what that ring shows, and every pane's
+# ring is out again after Reload Window (DESIGN.md, PDF).
 drill_ring_panes() {
 	test -e "$pdfium" || { echo "SKIPPED the ring panes drill: no libpdfium"; return 0; }
-	launch 60 ACCENT_BENCH_PDF=ring-panes >"$dir/ring-panes"
+	launch 90 ACCENT_BENCH_PDF=ring-panes >"$dir/ring-panes"
 	has "$dir/ring-panes" \
 		'bench ring panes pdfs greyed=0 of=18' \
 		"bench ring panes pdfs window's Line pressed=true a=Line b=Line active=true keyboard=true" \
@@ -172,7 +173,9 @@ drill_ring_panes() {
 		'bench ring panes diagram greyed=0 of=7' \
 		'bench ring panes diagram Add Rectangle pressed=true a=Line tool=Rect active=true keyboard=true' \
 		'bench ring panes beside diagram greyed=0 of=18' \
-		'bench ring panes beside diagram Highlighter pressed=true a=Highlighter tool=Rect active=true keyboard=true'
+		'bench ring panes beside diagram Highlighter pressed=true a=Highlighter tool=Rect active=true keyboard=true' \
+		'bench ring panes split ring-a.pdf*=true ring-b.pdf=true ring.drawio=true' \
+		'bench ring panes restored ring-a.pdf*=true ring-b.pdf=true ring.drawio=true'
 }
 
 # Its shells are real, so under a scratch HOME, running `true`, `false`, `pwd` and `sleep`.

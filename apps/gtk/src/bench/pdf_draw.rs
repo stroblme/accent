@@ -70,9 +70,13 @@ pub(super) fn bench_pdf_ring(app: &Rc<App>, rel: &str) {
 
 /// A ring in the pane that is not the active one, pressed through XTEST: none of its buttons
 /// greyed, and a press picks the tool on its own tab alone, against what its ring shows, its pane
-/// taking the keyboard, beside another PDF and beside a diagram. Writes `ring-a.pdf`, `ring-b.pdf`
+/// taking the keyboard, beside another PDF and beside a diagram. Then each in a pane of its own,
+/// every ring out as the window comes back from Reload Window. Writes `ring-a.pdf`, `ring-b.pdf`
 /// and `ring.drawio` into the vault.
 pub(super) fn bench_ring_panes(app: &Rc<App>) {
+    if RING_RELOADED.replace(true) {
+        return ring_restored(app.clone());
+    }
     scratch_only(app, "ACCENT_BENCH_PDF=ring-panes");
     let root = app.root();
     let pdf = accent_core::pdf::blank_pdf((595.0, 842.0)).unwrap_or_default();
@@ -169,8 +173,65 @@ pub(super) fn bench_ring_panes(app: &Rc<App>) {
             d.tool(),
             active(&app, &a.page)
         );
+        // Each in a pane of its own, A's the active one, put back by Reload Window.
+        if let Some(right) = app.pane_of(&d.page) {
+            app.split_page(&right, Side::Right, &d.page);
+        }
+        glib::timeout_future(Duration::from_millis(500)).await;
+        for page in [&a.page, &b.page, &d.page] {
+            app.promote(page);
+        }
+        app.reveal_page(&a.page);
+        glib::timeout_future(Duration::from_millis(300)).await;
+        println!("bench ring panes split {}", rings(&app));
+        let _ = WidgetExt::activate_action(&app.window, "win.reload-window", None);
+    });
+}
+
+thread_local! {
+    /// Whether this process has reloaded its window, so the window that comes back looks at the
+    /// rings it restored rather than starting over.
+    static RING_RELOADED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// The window Reload Window brought back: every pane's PDF or diagram shows its ring, not the
+/// active pane's alone.
+fn ring_restored(app: Rc<App>) {
+    glib::spawn_future_local(async move {
+        until("ring panes", "restored", 60_000, || app.restored.get()).await;
+        let rels = ["ring-a.pdf", "ring-b.pdf", "ring.drawio"];
+        let landed = || {
+            rels.iter().all(|rel| {
+                app.doc_for(rel).is_some_and(|doc| {
+                    doc.pdf().is_some_and(|pdf| pdf.page_count() > 0) || doc.diagram().is_some()
+                })
+            })
+        };
+        until("ring panes", "restored landed", 30_000, landed).await;
+        glib::timeout_future(Duration::from_millis(500)).await;
+        println!("bench ring panes restored {}", rings(&app));
         bench_quit(&app);
     });
+}
+
+/// Each pane's front PDF or diagram, left to right as the panes were made, and whether its ring
+/// is out, the active pane's starred.
+fn rings(app: &Rc<App>) -> String {
+    let active = app.pane();
+    let panes = app.panes.borrow().clone();
+    let shown: Vec<String> = (panes.iter())
+        .filter_map(|pane| {
+            let doc = app.doc_of(pane)?;
+            let ring = match &doc {
+                Doc::Pdf(pdf) => pdf.ring_visible(),
+                Doc::Diagram(d) => d.ring_visible(),
+                _ => return None,
+            };
+            let star = if Rc::ptr_eq(pane, &active) { "*" } else { "" };
+            Some(format!("{}{star}={ring}", doc.key()))
+        })
+        .collect();
+    shown.join(" ")
 }
 
 /// How many of the buttons `ring` shows are greyed.
