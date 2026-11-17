@@ -7,13 +7,16 @@
 //! A subset of <https://orgmode.org/worg/org-syntax.html>, not a parser of all of it. Ranges are
 //! byte offsets of the text as written. The spans are a note's ([`Style`]), so an org file is
 //! styled as a note is: the content in its style, the syntax around it dimmed as [`Style::Marker`].
+//! `from_html` writes a formatted paste's HTML as org.
 
+mod from_html;
 mod links;
 mod page;
 mod search;
 mod table;
 mod task;
 
+pub use from_html::from_html;
 pub use links::{link, path_link_keys, rewrite_moved};
 pub use page::{page, to_html, to_html_file};
 pub use search::{Search, file_line};
@@ -605,22 +608,35 @@ fn target(text: &str, i: usize, end: usize) -> Option<(Range<usize>, String)> {
 /// opening at `i` ends, by org's rules for its markers:
 /// the opening one at the start of the line, after a space or after one of `-({'"`, and not
 /// before a space; the closing one the same character, not after a space, and before a space,
-/// the end of the line or one of `-.,;:!?')}["\`.
+/// the end of the line or one of `-.,;:!?')}["\`. A zero-width space is a space ([`blank_at`]).
 fn emphasis(text: &str, line: usize, i: usize, end: usize) -> Option<usize> {
     let b = text.as_bytes();
-    let pre = i == line || b[i - 1].is_ascii_whitespace() || b"-({'\"".contains(&b[i - 1]);
-    if !pre || i + 2 >= end || b[i + 1].is_ascii_whitespace() {
+    let pre = i == line || blank_before(text, i) || b"-({'\"".contains(&b[i - 1]);
+    if !pre || i + 2 >= end || blank_at(text, i + 1) {
         return None;
     }
     (i + 2..end)
         .find(|&j| {
             b[j] == b[i]
-                && !b[j - 1].is_ascii_whitespace()
-                && (j + 1 == end
-                    || b[j + 1].is_ascii_whitespace()
-                    || b"-.,;:!?')}[\"\\".contains(&b[j + 1]))
+                && !blank_before(text, j)
+                && (j + 1 == end || blank_at(text, j + 1) || b"-.,;:!?')}[\"\\".contains(&b[j + 1]))
         })
         .map(|j| j + 1)
+}
+
+/// The zero-width space org's manual escapes markup with (Escape Character), which Emacs's
+/// syntax table makes a space (`characters.el` puts U+2000 to U+200B among the spaces), so that
+/// it ends emphasis and a formula as a space does.
+const ZWSP: char = '\u{200B}';
+
+/// Whether a space, or a zero-width one, starts at byte `at` of `text`.
+fn blank_at(text: &str, at: usize) -> bool {
+    text.as_bytes().get(at).is_some_and(u8::is_ascii_whitespace) || text[at..].starts_with(ZWSP)
+}
+
+/// Whether a space, or a zero-width one, ends just before byte `at` of `text`.
+fn blank_before(text: &str, at: usize) -> bool {
+    text[..at].ends_with(|c: char| c.is_ascii_whitespace() || c == ZWSP)
 }
 
 #[cfg(test)]

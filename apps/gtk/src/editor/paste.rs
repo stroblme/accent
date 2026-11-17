@@ -1,26 +1,40 @@
 //! Paste a single address over selected note text as `[selection](address)`, or org's
-//! `[[address][selection]]` in an org note, and formatted text another application copied as the
-//! Markdown it reads as. `Ctrl+Shift+V` bypasses both (DESIGN.md, Editing).
+//! `[[address][selection]]` in an org note, and formatted text another application copied or
+//! drags in as the Markdown or org it reads as. `Ctrl+Shift+V` bypasses both (DESIGN.md, Editing).
 
 use super::{Flavour, Syntax, Tab};
+use crate::clipboard::HTML;
 use crate::multicaret;
-use gtk::glib;
 use gtk::prelude::*;
+use gtk::{gdk, glib};
 use std::cell::Cell;
 use std::rc::Rc;
 
-/// What a formatted paste makes of clipboard HTML: the Markdown it writes, or `None` for the
-/// clipboard's plain text.
+/// What a formatted paste makes of clipboard HTML: the Markdown or org it writes, or `None` for
+/// the clipboard's plain text.
 pub(crate) type Convert = fn(&str) -> Option<String>;
 
 /// What VS Code copies beside its HTML, whose styled spans are code, not formatting.
 const VSCODE: &str = "vscode-editor-data";
 
-/// How a view of `flavour` converts a formatted paste: a markdown note or cell into its Markdown.
-/// Org, code and tables take the plain text.
+/// How a view of `flavour` converts a formatted paste: a markdown note or cell into its Markdown,
+/// an org note into org. Code and tables take the plain text.
 pub(crate) fn converter(flavour: Flavour) -> Option<Convert> {
-    (flavour == Flavour::Note(Syntax::Markdown))
-        .then_some(accent_core::markdown::from_html as Convert)
+    match flavour {
+        Flavour::Note(Syntax::Markdown) => Some(accent_core::markdown::from_html),
+        Flavour::Note(Syntax::Org) => Some(accent_core::org::from_html),
+        Flavour::Code | Flavour::Csv(_) => None,
+    }
+}
+
+/// `convert` where `formats` hold HTML beside text, and no VS Code copy, whose styled spans are
+/// code: what a paste and a drop both ask before they convert.
+fn offered(convert: Option<Convert>, formats: &gdk::ContentFormats) -> Option<Convert> {
+    convert.filter(|_| {
+        formats.contains_type(glib::Type::STRING)
+            && formats.contain_mime_type(HTML)
+            && !formats.contain_mime_type(VSCODE)
+    })
 }
 
 /// A diagram label's formatted paste: the Markdown its editor keeps (`accent_drawio::label`),
@@ -125,9 +139,9 @@ fn is_url(text: &str) -> bool {
 
 /// Take the paste a note, a cell or a label editor does its own way, in the flavour `flavour`
 /// holds at that moment, which a tab's rename changes (`Tab::set_syntax`): a URL over a selection
-/// [`link`]s it, and formatted text `convert` reads in that flavour becomes its Markdown, outside
-/// a code block, the front matter and a table, where the plain text goes in. Each is one undo
-/// step.
+/// [`link`]s it, and formatted text `convert` reads in that flavour becomes its Markdown or org,
+/// outside a code block, the front matter and a table, where the plain text goes in. Each is one
+/// undo step.
 ///
 /// Anything else is GTK's paste: a column of carets, a view not editable, and a clipboard with no
 /// text, whose image is filed as an attachment (`App::wire_attachments`) by a handler connected
@@ -154,11 +168,8 @@ pub(super) fn formatted_paste(
         });
         let selection = buffer.text(&start, &end, true);
         let linking = could_link(&selection, flavour);
-        let convert = convert(flavour).filter(|_| {
-            formats.contain_mime_type(crate::clipboard::HTML)
-                && !formats.contain_mime_type(VSCODE)
-                && !verbatim(&buffer, &start)
-        });
+        let convert =
+            offered(convert(flavour), &formats).filter(|_| !verbatim(&buffer, &start, flavour));
         if !linking && convert.is_none() {
             return;
         }
@@ -199,14 +210,83 @@ pub(super) fn formatted_paste(
     })
 }
 
-/// Whether `at` is in a code block, the front matter or a table row, where Markdown is text.
-fn verbatim(buffer: &gtk::TextBuffer, at: &gtk::TextIter) -> bool {
+/// Take formatted text another application drags onto the view, a browser's selection say, as
+/// [`formatted_paste`] takes it off the clipboard, in one undo step where it is let go: written as
+/// `convert` writes it in the flavour `flavour` holds, else its plain text. A drop with no HTML,
+/// one onto a code block, the front matter or a table, and one onto a view whose flavour converts
+/// nothing are GTK's own, which puts in the text.
+pub(super) fn formatted_drop(
+    view: &sourceview5::View,
+    flavour: Rc<Cell<Flavour>>,
+    convert: fn(Flavour) -> Option<Convert>,
+) {
+    let formats = gdk::ContentFormats::new(&[HTML]);
+    let target = gtk::DropTargetAsync::new(Some(formats), gdk::DragAction::COPY);
+    let accepting = flavour.clone();
+    target.connect_accept(move |_, drop| {
+        drop.actions().contains(gdk::DragAction::COPY)
+            && offered(convert(accepting.get()), &drop.formats()).is_some()
+    });
+    // GTK's own target still shows where the text would land.
+    let aim = |target: &gtk::DropTargetAsync, _: &gdk::Drop, x: f64, y: f64| {
+        let view = target.widget().and_downcast::<sourceview5::View>();
+        match view.and_then(|view| super::drag::drop_point(&view, x, y)) {
+            Some(_) => gdk::DragAction::COPY,
+            None => gdk::DragAction::empty(),
+        }
+    };
+    target.connect_drag_enter(aim);
+    target.connect_drag_motion(aim);
+    target.connect_drop(move |target, drop, x, y| {
+        let Some(view) = target.widget().and_downcast::<sourceview5::View>() else {
+            return false;
+        };
+        let (flavour, buffer) = (flavour.get(), view.buffer());
+        let (Some(at), Some(convert)) = (super::drag::drop_point(&view, x, y), convert(flavour))
+        else {
+            return false;
+        };
+        if verbatim(&buffer, &at, flavour) {
+            return false;
+        }
+        let at = crate::attach::InsertAt::new(&buffer, &at, &at);
+        let drop = drop.clone();
+        glib::spawn_future_local(async move {
+            let converted = (crate::clipboard::dropped_html(&drop).await)
+                .as_deref()
+                .and_then(convert);
+            let text = match converted {
+                Some(text) => Some(text),
+                None => (drop.read_value_future(glib::Type::STRING, glib::Priority::DEFAULT))
+                    .await
+                    .ok()
+                    .and_then(|value| value.get::<String>().ok()),
+            };
+            if let Some(text) = &text {
+                at.fill(text);
+            }
+            drop.finish(match text {
+                Some(_) => gdk::DragAction::COPY,
+                None => gdk::DragAction::empty(),
+            });
+        });
+        true
+    });
+    view.add_controller(target);
+}
+
+/// Whether `at` is in a code block, the front matter or a table row, where markup is text.
+fn verbatim(buffer: &gtk::TextBuffer, at: &gtk::TextIter, flavour: Flavour) -> bool {
     if crate::typing::verbatim(buffer, at) {
         return true;
     }
     let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), true);
     let lines: Vec<&str> = text.split('\n').collect();
-    accent_core::markdown::in_table(&lines, at.line() as usize)
+    let at = at.line() as usize;
+    match flavour {
+        Flavour::Note(Syntax::Org) => lines[at].trim_start().starts_with('|'),
+        _ => accent_core::markdown::in_table(&lines, at),
+    }
 }
 
 /// Paste verbatim at all of `view`'s carets using GTK, suppressing its [`formatted_paste`]

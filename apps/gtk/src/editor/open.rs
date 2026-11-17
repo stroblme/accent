@@ -90,15 +90,15 @@ pub(crate) fn build(
 /// cell's alike: plain-text cut and copy, and the whole line with nothing selected (an editor where
 /// Ctrl+X on no selection does nothing makes the user select the line first), the middle-click
 /// paste styled again, a selection dragged with its folds, and in a note a URL pasted over a
-/// selection linking it and formatted text pasted as its Markdown. Answers that paste's handler,
-/// which [`paste_verbatim`] holds back.
+/// selection linking it and formatted text pasted or dropped as its Markdown or org. Answers that
+/// paste's handler, which [`paste_verbatim`] holds back.
 pub(crate) fn interact(view: &sourceview5::View, flavour: Flavour) -> glib::SignalHandlerId {
     interact_with(view, Rc::new(Cell::new(flavour)), paste::converter)
 }
 
-/// [`interact`] with the flavour read off `flavour` at each paste, where a tab's rename changes it,
-/// and formatted text written as `convert` has that flavour write it: a diagram label's own
-/// Markdown.
+/// [`interact`] with the flavour read off `flavour` at each paste and drop, where a tab's rename
+/// changes it, and formatted text written as `convert` has that flavour write it: a diagram
+/// label's own Markdown.
 pub(crate) fn interact_with(
     view: &sourceview5::View,
     flavour: Rc<Cell<Flavour>>,
@@ -107,6 +107,7 @@ pub(crate) fn interact_with(
     line_clipboard(view);
     primary_paste(view);
     drag::install(view);
+    paste::formatted_drop(view, flavour.clone(), convert);
     paste::formatted_paste(view, flavour, convert)
 }
 

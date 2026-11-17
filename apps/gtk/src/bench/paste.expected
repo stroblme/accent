@@ -8,10 +8,10 @@ bench paste note front_matter="Pasted\nSome bold and a link.\none\ntwo"
 bench paste note link="[before](https://example.org/x)"
 bench paste note copied_link="https://example.org/x"
 bench paste note vscode="Pasted\nSome bold and a link.\none\ntwo"
-bench paste paste.org="Pasted\nSome bold and a link.\none\ntwo"
+bench paste paste.org="** Pasted\n\nSome *bold* and a [[https://example.org/][link]].\n\n- one\n- two"
 bench paste paste.py="Pasted\nSome bold and a link.\none\ntwo"
 bench paste renamed.org link="[[https://example.org/x][end]]"
-bench paste renamed.org formatted="Pasted\nSome bold and a link.\none\ntwo"
+bench paste renamed.org formatted="** Pasted\n\nSome *bold* and a [[https://example.org/][link]].\n\n- one\n- two"
 bench paste renamed.md link="[Org](https://example.org/x)"
 bench paste renamed.md formatted="## Pasted\n\nSome **bold** and a [link](https://example.org/).\n\n- one\n- two"
 bench paste notebook markdown_cell="## Pasted\n\nSome **bold** and a [link](https://example.org/).\n\n- one\n- two"
@@ -23,3 +23,8 @@ bench paste diagram canvas_ctrl_shift_v="Pasted\nSome bold and a link.\none\ntwo
 bench paste diagram ctrl_shift_v accels=Some(["<Shift><Control>v"]) enabled=true
 bench paste diagram label="**Pasted**\nSome **bold** and a link.\n- one\n- two"
 bench paste diagram label_plain="Pasted\nSome bold and a link.\none\ntwo"
+bench paste drop drop.md html="## Pasted\n\nSome **bold** and a [link](https://example.org/).\n\n- one\n- two" ended=Some(true)
+bench paste drop undo removed=true
+bench paste drop drop.md plain="Pasted\nSome bold and a link.\none\ntwo" ended=Some(true)
+bench paste drop drop.org html="** Pasted\n\nSome *bold* and a [[https://example.org/][link]].\n\n- one\n- two" ended=Some(true)
+bench paste drop paste.py html="Pasted\nSome bold and a link.\none\ntwo" ended=Some(true)

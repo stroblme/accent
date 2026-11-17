@@ -14,7 +14,9 @@
 
 use super::links::OrgLink;
 use super::table::{aligns, cookie};
-use super::{Search, closed, emphasis, heading, is_heading, keywords, lines, target};
+use super::{
+    Search, blank_at, blank_before, closed, emphasis, heading, is_heading, keywords, lines, target,
+};
 use crate::markdown::{
     Align, Block, Cell, LinkKind, Mode, Node, Part, Style, cut, declarations, declare, formulas,
     is_image, math, parts, percent_encode, split, write,
@@ -677,24 +679,7 @@ impl<'a> Page<'a> {
                     .map_or(at.end, |n| i + n);
             }
             let before = run..i;
-            let found = match b[i] {
-                b'[' => super::links::bracket(text, i, eol)
-                    .map(Found::Link)
-                    .or_else(|| footnote(text, i).map(Found::Footnote))
-                    .or_else(|| inline_footnote(text, i, at.end).map(Found::Note)),
-                b'<' if b.get(i + 1) == Some(&b'<') => target(text, i, eol).map(Found::Target),
-                b'<' => super::links::angle(text, i, eol).map(Found::Link),
-                b'\\' => latex(text, i, at.end).map(Found::Math),
-                b'$' => dollars(text, i, at.end).map(Found::Math),
-                c @ (b'_' | b'^') if b.get(i + 1) == Some(&b'{') && i > at.start => {
-                    script(text, i, eol).map(|r| Found::Script(c == b'^', r))
-                }
-                _ => None,
-            };
-            let found = found.or_else(|| match b[i] {
-                c @ (b'=' | b'~' | b'*' | b'/' | b'_' | b'+') => {
-                    emphasis(text, at.start, i, at.end).map(|end| Found::Emphasis(c, i..end))
-                }
+            let found = object(text, at.start, i, eol, at.end).or_else(|| match b[i] {
                 c if c.is_ascii_alphabetic()
                     && (i == at.start || !b[i - 1].is_ascii_alphanumeric()) =>
                 {
@@ -887,8 +872,35 @@ impl<'a> Page<'a> {
     }
 }
 
+/// The object of org's markup at byte `i` of the prose that runs from `start` to `end`, on the line
+/// ending at `eol`, a plain link aside: what [`Page::inline`] reads, and what an org note's
+/// formatted paste escapes (`super::from_html`).
+pub(super) fn object(text: &str, start: usize, i: usize, eol: usize, end: usize) -> Option<Found> {
+    let b = text.as_bytes();
+    let found = match b[i] {
+        b'[' => super::links::bracket(text, i, eol)
+            .map(Found::Link)
+            .or_else(|| footnote(text, i).map(Found::Footnote))
+            .or_else(|| inline_footnote(text, i, end).map(Found::Note)),
+        b'<' if b.get(i + 1) == Some(&b'<') => target(text, i, eol).map(Found::Target),
+        b'<' => super::links::angle(text, i, eol).map(Found::Link),
+        b'\\' => latex(text, i, end).map(Found::Math),
+        b'$' => dollars(text, i, end).map(Found::Math),
+        c @ (b'_' | b'^') if b.get(i + 1) == Some(&b'{') && i > start => {
+            script(text, i, eol).map(|r| Found::Script(c == b'^', r))
+        }
+        _ => None,
+    };
+    found.or_else(|| match b[i] {
+        c @ (b'=' | b'~' | b'*' | b'/' | b'_' | b'+') => {
+            emphasis(text, start, i, end).map(|end| Found::Emphasis(c, i..end))
+        }
+        _ => None,
+    })
+}
+
 /// An object [`Page::inline`] found.
-enum Found {
+pub(super) enum Found {
     Link(OrgLink),
     /// `[fn:label]`.
     Footnote(Range<usize>),
@@ -1099,7 +1111,8 @@ fn latex(text: &str, i: usize, end: usize) -> Option<(Range<usize>, Range<usize>
 
 /// `$$…$$` or `$…$` at `i`, by org's rules for the single one: not after a `$`, its first
 /// character no blank, `.`, `,`, `;` or `$`, its last no blank, `.`, `,` or `$`, and a blank,
-/// punctuation or the end after it, so `$5 and $10` stays text.
+/// punctuation or the end after it, so `$5 and $10` stays text. A zero-width space is a blank
+/// ([`blank_at`]).
 fn dollars(text: &str, i: usize, end: usize) -> Option<(Range<usize>, Range<usize>, bool)> {
     let b = text.as_bytes();
     if i > 0 && b[i - 1] == b'$' {
@@ -1110,14 +1123,14 @@ fn dollars(text: &str, i: usize, end: usize) -> Option<(Range<usize>, Range<usiz
         return (len > 0).then(|| (i..i + len + 4, i + 2..i + 2 + len, true));
     }
     let first = *b.get(i + 1).filter(|_| i + 1 < end)?;
-    if first.is_ascii_whitespace() || b".,;$".contains(&first) {
+    if blank_at(text, i + 1) || b".,;$".contains(&first) {
         return None;
     }
     let close = i + 1 + text[i + 1..end].find('$')?;
     let last = b[close - 1];
     let after = b.get(close + 1).filter(|_| close + 1 < end);
-    let ends = after.is_none_or(|c| c.is_ascii_whitespace() || c.is_ascii_punctuation());
-    (!last.is_ascii_whitespace() && !b".,$".contains(&last) && ends)
+    let ends = after.is_none_or(|c| c.is_ascii_punctuation()) || blank_at(text, close + 1);
+    (!blank_before(text, close) && !b".,$".contains(&last) && ends)
         .then(|| (i..close + 1, i + 1..close, false))
 }
 

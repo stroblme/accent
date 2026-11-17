@@ -1,5 +1,6 @@
 //! What the clipboard holds beyond the text GTK's own paste reads: one MIME type's bytes, and
-//! the HTML another application copies formatted text as; and an image put on it.
+//! the HTML another application copies formatted text as, which a drop may carry too; and an
+//! image put on it.
 
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
@@ -14,13 +15,18 @@ pub async fn read(clipboard: &gdk::Clipboard, mime: &str) -> Option<Vec<u8>> {
         .await)
         .inspect_err(|e| tracing::debug!("no {mime} on the clipboard: {e}"))
         .ok()?;
-    // Read whole, however large: a page of strokes is easily more than a buffer's guess.
+    whole(stream, mime).await
+}
+
+/// All of `stream`, which carries `mime`, however large: a page of strokes is easily more than a
+/// buffer's guess.
+async fn whole(stream: gio::InputStream, mime: &str) -> Option<Vec<u8>> {
     let out = gio::MemoryOutputStream::new_resizable();
     let flags =
         gio::OutputStreamSpliceFlags::CLOSE_SOURCE | gio::OutputStreamSpliceFlags::CLOSE_TARGET;
     (out.splice_future(&stream, flags, glib::Priority::DEFAULT)
         .await)
-        .inspect_err(|e| tracing::warn!("reading the clipboard's {mime}: {e}"))
+        .inspect_err(|e| tracing::warn!("reading {mime}: {e}"))
         .ok()?;
     Some(out.steal_as_bytes().to_vec())
 }
@@ -44,6 +50,14 @@ pub fn set_texture(
 /// The clipboard's HTML as text, or `None` when it holds none.
 pub async fn html(clipboard: &gdk::Clipboard) -> Option<String> {
     read(clipboard, HTML).await.map(|bytes| decode(&bytes))
+}
+
+/// The HTML `drop` carries as text, or `None` when it carries none.
+pub async fn dropped_html(drop: &gdk::Drop) -> Option<String> {
+    let (stream, _) = (drop.read_future(&[HTML], glib::Priority::DEFAULT).await)
+        .inspect_err(|e| tracing::debug!("no {HTML} in the drop: {e}"))
+        .ok()?;
+    whole(stream, HTML).await.map(|bytes| decode(&bytes))
 }
 
 /// Clipboard HTML's bytes as text: UTF-8, its byte-order mark dropped, or UTF-16 where a mark or

@@ -1,5 +1,6 @@
-//! A drill over formatted paste: `Ctrl+V` writing another application's HTML as the Markdown a
-//! note, a markdown cell or a diagram reads, and Paste as Plain Text putting in its text.
+//! A drill over formatted paste: `Ctrl+V` writing another application's HTML as the Markdown or
+//! org a note, a markdown cell or a diagram reads, and Paste as Plain Text putting in its text;
+//! and a drop of the same HTML, dragged in through XTEST.
 
 use super::*;
 
@@ -7,11 +8,12 @@ use super::*;
 const HTML: &str = r#"<meta charset="utf-8"><h2>Pasted</h2><p>Some <b>bold</b> and a <a href="https://example.org/">link</a>.</p><ul><li>one</li><li>two</li></ul>"#;
 const PLAIN: &str = "Pasted\nSome bold and a link.\none\ntwo";
 
-/// `ACCENT_BENCH_PASTE=1` on a vault holding `paste.md`, `paste.org`, `paste.py`, `paste.ipynb`
-/// and `paste.drawio` (`build-aux/drills.sh`): Ctrl+V and Paste as Plain Text in a note, beside
-/// its code block, table, a URL over a selection and VS Code's HTML; in an org note and a code
-/// tab; in a note renamed between markdown and org; in a notebook's markdown and code cells; on a
-/// diagram's canvas and in its label editor.
+/// `ACCENT_BENCH_PASTE=1` on a vault holding `paste.md`, `paste.org`, `paste.py`, `paste.ipynb`,
+/// `paste.drawio`, `drop.md` and `drop.org` (`build-aux/drills.sh`): Ctrl+V and Paste as Plain
+/// Text in a note, beside its code block, table, a URL over a selection and VS Code's HTML; in an
+/// org note and a code tab; a drop in a note, an org note and a code tab; in a note renamed between
+/// markdown and org; in a notebook's markdown and code cells; on a diagram's canvas and in its
+/// label editor.
 /// Prints what each put in.
 pub(super) fn bench_paste(app: &Rc<App>) {
     let app = app.clone();
@@ -102,6 +104,8 @@ pub(super) fn bench_paste(app: &Rc<App>) {
         renamed(&app).await;
         notebook(&app, &act).await;
         diagram(&app, &act).await;
+        // Last, as the window it drags from takes the keyboard from this one.
+        dropped(&app).await;
         bench_quit(&app);
     });
 }
@@ -247,12 +251,122 @@ fn offer(app: &Rc<App>, html: &str, plain: &str, vscode: bool) {
     }
 }
 
+/// HTML dragged in from another window and let go at the end of a note, an org note and a code
+/// tab, and plain text at the end of the note: the note's and the org note's own drop writes their
+/// markup in one undo step, the others are GTK's, which put the text in. A browser's drag is
+/// another process's, which Xvfb cannot start, so a window of the drill's own offers the same
+/// HTML and text, dragged by XTEST.
+async fn dropped(app: &Rc<App>) {
+    let source = gtk::Window::builder()
+        .decorated(false)
+        .default_width(160)
+        .default_height(48)
+        .build();
+    let label = gtk::Label::new(Some("drag me"));
+    source.set_child(Some(&label));
+    let drag = gtk::DragSource::new();
+    drag.set_actions(gdk::DragAction::COPY);
+    let content = Rc::new(RefCell::new(None::<gdk::ContentProvider>));
+    let offered = content.clone();
+    drag.connect_prepare(move |_, _, _| offered.borrow().clone());
+    // Whether the last drag ended in a drop, rather than cancelled.
+    let ended = Rc::new(Cell::new(None));
+    let end = ended.clone();
+    drag.connect_drag_end(move |_, _, _| end.set(end.get().or(Some(true))));
+    let cancel = ended.clone();
+    drag.connect_drag_cancel(move |_, _, _| {
+        cancel.set(Some(false));
+        false
+    });
+    label.add_controller(drag);
+    source.present();
+    pumped().await;
+    for (rel, html) in [
+        ("drop.md", true),
+        ("drop.md", false),
+        ("drop.org", true),
+        ("paste.py", true),
+    ] {
+        let Some(tab) = opened(app, rel).await else {
+            println!("bench paste no_tab {rel}");
+            continue;
+        };
+        let plain = gdk::ContentProvider::for_value(&PLAIN.to_value());
+        content.replace(Some(match html {
+            true => gdk::ContentProvider::new_union(&[
+                gdk::ContentProvider::for_bytes("text/html", &glib::Bytes::from(HTML.as_bytes())),
+                plain,
+            ]),
+            false => plain,
+        }));
+        let buffer = &tab.buffer;
+        buffer.place_cursor(&buffer.start_iter());
+        glib::timeout_future(Duration::from_millis(300)).await;
+        // From the label's middle to just past the end of the text, both on screen, where a
+        // window sits at the screen's corner with no window manager.
+        let screen = |widget: &gtk::Widget, root: &gtk::Window, x: f32, y: f32| {
+            let (sx, sy) = root.surface_transform();
+            (widget.compute_point(root, &graphene::Point::new(x, y)))
+                .map(|p| (f64::from(p.x()) + sx, f64::from(p.y()) + sy))
+        };
+        let end = tab.view.iter_location(&buffer.end_iter());
+        let (x, y) = tab.view.buffer_to_window_coords(
+            gtk::TextWindowType::Widget,
+            end.x() + 4,
+            end.y() + end.height() / 2,
+        );
+        let from = screen(label.upcast_ref(), &source, 80.0, 24.0);
+        let to = screen(
+            tab.view.upcast_ref(),
+            app.window.upcast_ref(),
+            x as f32,
+            y as f32,
+        );
+        let (Some((x0, y0)), Some((x1, y1))) = (from, to) else {
+            println!("bench paste drop {rel} no_point");
+            continue;
+        };
+        ended.set(None);
+        let before = text(buffer);
+        let steps = format!(
+            "move {x0} {y0}; sleep 0.2; down; sleep 0.1; move {} {}; sleep 0.1; move {} {}; \
+             sleep 0.3; move {x1} {y1}; sleep 0.5; move {} {y1}; sleep 0.5; up",
+            x0 + 10.0,
+            y0 + 10.0,
+            (x0 + x1) / 2.0,
+            (y0 + y1) / 2.0,
+            x1 + 2.0,
+        );
+        super::git::xtest(&steps).await;
+        until("paste", "the drop", 3000, || text(buffer) != before).await;
+        let put = changed(&before, &text(buffer));
+        let kind = if html { "html" } else { "plain" };
+        println!(
+            "bench paste drop {rel} {kind}={put:?} ended={:?}",
+            ended.get()
+        );
+        if rel == "drop.md" && html {
+            let all = text(buffer);
+            buffer.undo();
+            println!(
+                "bench paste drop undo removed={}",
+                all.len() - text(buffer).len() == put.len()
+            );
+        }
+    }
+    source.destroy();
+}
+
 /// What `paste` put into `buffer`, once it has changed, the text the paste replaced aside.
 async fn pasted(buffer: &impl IsA<gtk::TextBuffer>, paste: impl Fn()) -> String {
     let before = text(buffer);
     paste();
     until("paste", "the paste", 3000, || text(buffer) != before).await;
-    let after = text(buffer);
+    changed(&before, &text(buffer))
+}
+
+/// What is in `after` that was not in `before`, the text it replaced aside.
+fn changed(before: &str, after: &str) -> String {
     let lead = (before.chars().zip(after.chars()))
         .take_while(|(a, b)| a == b)
         .map(|(a, _)| a.len_utf8())

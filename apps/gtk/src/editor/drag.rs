@@ -139,7 +139,7 @@ fn drop_target(flight: Flight) -> gtk::DropTarget {
 
 /// Resolve a drop at widget coordinates using GTK's drag rules, excluding
 /// the selection and both endpoints (`gtk_text_view_drag_motion`).
-fn drop_point(view: &sourceview5::View, x: f64, y: f64) -> Option<gtk::TextIter> {
+pub(super) fn drop_point(view: &sourceview5::View, x: f64, y: f64) -> Option<gtk::TextIter> {
     let at = at_pixel(view, x, y)?;
     let on_selection = view
         .buffer()

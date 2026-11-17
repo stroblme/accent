@@ -4,7 +4,8 @@
 //! Helpers separate delimiter validation, link handling, frontmatter and HTML. `page` cuts a
 //! note into the blocks its preview shows, which `html` writes out. `table` handles pipe-table
 //! layout and cell navigation for Tab and Enter; `uri` reads the preview's own addresses back
-//! for a click. `from_html` writes a formatted paste's HTML as Markdown.
+//! for a click. `from_html` writes a formatted paste's HTML as Markdown, and as org for
+//! `crate::org`.
 
 mod atoms;
 mod blocks;
@@ -20,6 +21,10 @@ mod uri;
 
 pub use atoms::declarations;
 pub use blocks::{BlockId, block_ids};
+#[cfg(test)]
+pub(crate) use from_html::shown;
+/// What an org note's formatted paste is written with (`crate::org::from_html`).
+pub(crate) use from_html::{Syntax, convert};
 pub use from_html::{formatted, from_html, link_destination};
 pub use frontmatter::is_tag_char;
 /// What an org page is built and written with (`crate::org`).

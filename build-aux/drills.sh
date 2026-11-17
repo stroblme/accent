@@ -459,11 +459,14 @@ drill_diagram_style() {
 
 # Ctrl+V with a browser's HTML on the clipboard, and Paste as Plain Text, in a note (beside its code
 # block, table and front matter too), an org note, a code tab, a note renamed between markdown and
-# org, a notebook's cells and a diagram.
+# org, a notebook's cells and a diagram; the same HTML dropped on a note, an org note and a code
+# tab.
 drill_paste() {
 	printf -- '---\ntitle: Note\n---\n\n# Note\n\nbefore\n\n```text\ncode\n```\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\nend\n' >"$vault/paste.md"
 	echo "* Org" >"$vault/paste.org"
 	echo "x = 1" >"$vault/paste.py"
+	printf '# Drop\n\ntext\n' >"$vault/drop.md"
+	printf '* Drop\n\ntext\n' >"$vault/drop.org"
 	cat >"$vault/paste.ipynb" <<'EOF'
 {"cells": [{"cell_type": "markdown", "metadata": {}, "source": ["Notes\n"]},
  {"cell_type": "code", "execution_count": null, "metadata": {}, "outputs": [], "source": ["x = 1\n"]}],
@@ -472,7 +475,7 @@ EOF
 	cat >"$vault/paste.drawio" <<'EOF'
 <mxfile><diagram id="p" name="Page-1"><mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/></root></mxGraphModel></diagram></mxfile>
 EOF
-	launch 60 ACCENT_BENCH_PASTE=1 >"$dir/paste"
+	launch 90 ACCENT_BENCH_PASTE=1 >"$dir/paste"
 	expect paste paste
 }
 

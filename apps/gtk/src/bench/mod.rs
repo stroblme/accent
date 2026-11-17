@@ -347,7 +347,8 @@ use user_commands::bench_commands;
 ///   window on the local vault, as another window's tree drop hands them over.
 /// - `ACCENT_BENCH_ATTACH=<rel_note>,<rel_vault_png>,<rel_code>`: image paste/drop.
 /// - `ACCENT_BENCH_PASTE=1`: formatted paste and Paste as Plain Text in a note, an org note, a code
-///   tab, a note renamed between markdown and org, a notebook and a diagram (`paste::bench_paste`).
+///   tab, a note renamed between markdown and org, a notebook and a diagram, and a formatted drop
+///   (`paste::bench_paste`).
 /// - `ACCENT_BENCH_ANSWER=<rel_note>`: conflict responses and main-loop timing;
 ///   `same:<rel_note>`: etag-only change during typing; `doc:<rel_ipynb>,<rel_drawio>`: a
 ///   notebook's and a diagram's saves and reloads on a slow host (`answer::bench_answer_doc`).

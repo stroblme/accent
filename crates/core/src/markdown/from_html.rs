@@ -1,28 +1,156 @@
-//! Clipboard HTML as the Markdown a note is written in: what `Ctrl+V` puts into a markdown note
-//! when another application copied formatted text (DESIGN.md, Editing).
+//! Clipboard HTML as the Markdown a note is written in: what `Ctrl+V` and a drop put into a
+//! markdown note when another application offers formatted text (DESIGN.md, Editing).
 //!
 //! The HTML is read with the tolerant tag reader labels use (`accent_drawio::html`) into a small
-//! tree, which is written block by block: headings, paragraphs, lists, quotes, fenced code, GFM
-//! tables and rules, with emphasis, strikethrough, code, links and pictures inline. What Markdown
-//! has no syntax for is kept as the raw HTML a note may hold (`<u>`, `<sub>`, `<sup>`) or left out
-//! (colours, fonts, sizes). Text is escaped only where it would read as markup.
+//! tree, which is written block by block in a note's [`Syntax`], Markdown here and org in
+//! `crate::org::from_html`: headings, paragraphs, lists, quotes, code blocks, tables and rules,
+//! with emphasis, strikethrough, code, links and pictures inline. What Markdown has no syntax for
+//! is kept as the raw HTML a note may hold (`<u>`, `<sub>`, `<sup>`) or left out (colours, fonts,
+//! sizes). Text is escaped only where it would read as markup.
 
 use accent_drawio::Marks;
 use accent_drawio::html::{Tag, attributes, html_char};
+use std::marker::PhantomData;
 
 /// The Markdown `html` reads as, or `None` where it carries no formatting worth keeping (see
 /// [`formatted`]), so the paste takes the clipboard's plain text instead.
 pub fn from_html(html: &str) -> Option<String> {
+    convert::<Markdown>(html)
+}
+
+/// What `html` reads as in the syntax `S`, or `None` where it carries no formatting worth keeping
+/// (see [`formatted`]).
+pub(crate) fn convert<S: Syntax>(html: &str) -> Option<String> {
     let root = parse(copied(html));
     if !carries_formatting(&root) {
         return None;
     }
-    let md = join(&Writer::default().blocks(&root.children, &root), false);
+    let mut writer = Writer::<S>::default();
+    let out = join(&writer.blocks(&root.children, &root), false);
     // A link alone that shows its own address, as a browser's Copy Link copies one, is that
     // address, which the plain text is.
-    let address = (md.strip_prefix('<').and_then(|m| m.strip_suffix('>')))
-        .is_some_and(|a| !a.contains(['<', '>', ' ']));
-    (!md.is_empty() && !address).then_some(md)
+    (!out.is_empty() && writer.address.as_ref() != Some(&out)).then_some(out)
+}
+
+/// What a note's syntax writes for each thing [`convert`] reads off the HTML: Markdown's here,
+/// org's in `crate::org::from_html`.
+pub(crate) trait Syntax: Default {
+    /// Each mark's opening and closing, in the order they nest, the outermost first: underline,
+    /// superscript, subscript, strikethrough, bold, italic.
+    const MARKS: [(&'static str, &'static str); 6];
+    /// A hard line break in a paragraph.
+    const BREAK: &'static str;
+    /// A line break in a table's cell, which is one line.
+    const CELL_BREAK: &'static str;
+    /// A rule between blocks.
+    const RULE: &'static str;
+    /// Whether a heading may stand in a list item or a quote; where it may not, its text is bold.
+    const NESTED_HEADINGS: bool;
+
+    /// A heading of `level`, 1 to 6.
+    fn heading(level: usize, text: &str) -> String;
+    /// A quote around `blocks`.
+    fn quote(blocks: &str) -> String;
+    /// A block of `code`, in the language `lang` where it is not empty.
+    fn code_block(lang: &str, code: &str) -> String;
+    /// `code` inline.
+    fn code(code: &str) -> String;
+    /// A link to `href` over `text`, which `shows_address` says is the address itself.
+    fn link(href: &str, text: &str, shows_address: bool) -> String;
+    /// A picture on the web at `src`, described by `alt`, `in_link` where it is a link's text.
+    fn image(src: &str, alt: &str, in_link: bool) -> String;
+    /// A task's checkbox, ticked or not, with the space after it.
+    fn tick(ticked: bool) -> &'static str;
+    /// The line under a table's header row, `width` columns wide.
+    fn table_rule(width: usize) -> String;
+    /// A table cell holding `blocks`, on its one line.
+    fn cell(blocks: &[String]) -> String;
+    /// Add `text` to `out`, escaped where it would read as markup.
+    fn escape(out: &mut String, text: &str);
+}
+
+/// CommonMark with GFM's tables, task lists and strikethrough, and the raw HTML a note keeps for
+/// underline, sub- and superscript.
+#[derive(Default)]
+struct Markdown;
+
+impl Syntax for Markdown {
+    const MARKS: [(&'static str, &'static str); 6] = [
+        ("<u>", "</u>"),
+        ("<sup>", "</sup>"),
+        ("<sub>", "</sub>"),
+        ("~~", "~~"),
+        ("**", "**"),
+        ("*", "*"),
+    ];
+    const BREAK: &'static str = "\\\n";
+    const CELL_BREAK: &'static str = "<br>";
+    const RULE: &'static str = "---";
+    const NESTED_HEADINGS: bool = true;
+
+    fn heading(level: usize, text: &str) -> String {
+        format!("{} {text}", "#".repeat(level))
+    }
+
+    fn quote(blocks: &str) -> String {
+        let quoted: Vec<String> = (blocks.lines())
+            .map(|line| match line.is_empty() {
+                true => ">".to_string(),
+                false => format!("> {line}"),
+            })
+            .collect();
+        quoted.join("\n")
+    }
+
+    /// Fenced, the fence longer than any run of backticks inside.
+    fn code_block(lang: &str, code: &str) -> String {
+        let fence = "`".repeat(longest_run(code, '`').max(2) + 1);
+        format!("{fence}{lang}\n{code}\n{fence}")
+    }
+
+    fn code(code: &str) -> String {
+        code_span(code)
+    }
+
+    /// An address showing itself is an autolink, `<href>`, where it reads back as one.
+    fn link(href: &str, text: &str, shows_address: bool) -> String {
+        match shows_address && !href.contains([' ', '<', '>']) {
+            true => format!("<{href}>"),
+            false => format!("[{}]({})", after_markup(text), link_destination(href)),
+        }
+    }
+
+    fn image(src: &str, alt: &str, _: bool) -> String {
+        let mut escaped = String::new();
+        escape(&mut escaped, alt);
+        format!("![{}]({})", after_markup(&escaped), link_destination(src))
+    }
+
+    fn tick(ticked: bool) -> &'static str {
+        match ticked {
+            true => "[x] ",
+            false => "[ ] ",
+        }
+    }
+
+    fn table_rule(width: usize) -> String {
+        format!("| {} |", vec!["---"; width].join(" | "))
+    }
+
+    /// The blocks joined by `<br>`, their pipes escaped.
+    fn cell(blocks: &[String]) -> String {
+        let md: Vec<String> = (blocks.iter().enumerate())
+            .map(|(i, b)| match i {
+                0 => b.replace('\n', "<br>"),
+                _ => after_markup(&b.replace('\n', "<br>")),
+            })
+            .collect();
+        escape_pipes(&md.join("<br>"))
+    }
+
+    fn escape(out: &mut String, text: &str) {
+        escape(out, text);
+    }
 }
 
 /// The part of clipboard HTML that holds what was copied, without the document around it, where
@@ -66,19 +194,9 @@ struct Look {
     pre: bool,
 }
 
-/// Each mark's opening and closing Markdown, in the order they nest, the outermost first.
-const MARKS: [(&str, &str); 6] = [
-    ("<u>", "</u>"),
-    ("<sup>", "</sup>"),
-    ("<sub>", "</sub>"),
-    ("~~", "~~"),
-    ("**", "**"),
-    ("*", "*"),
-];
-
 impl Look {
-    /// Which of [`MARKS`] this look has where `base` does not: a heading is bold already, and a
-    /// link underlined.
+    /// Which of [`Syntax::MARKS`] this look has where `base` does not: a heading is bold already,
+    /// and a link underlined.
     fn marks(self, base: Look) -> [bool; 6] {
         let mark = |on: bool, had: bool| on && !had;
         [
@@ -344,7 +462,7 @@ fn carries_formatting(root: &Element) -> bool {
                 }
                 Node::Text(_) => {}
                 Node::Element(child) => {
-                    let picture = child.name == "img" && image(child).is_some();
+                    let picture = child.name == "img" && web_src(child).is_some();
                     found.free |= picture && !child.look.pre;
                     found.formatted |= picture
                         || matches!(
@@ -388,22 +506,15 @@ fn linkable(href: &str) -> bool {
         && !["javascript", "vbscript", "data"].contains(&scheme.to_ascii_lowercase().as_str())
 }
 
-/// A picture as Markdown, where its address is on the web; one held in the HTML (`data:`) or in
-/// a file the copying application made has none a note could keep.
-fn image(img: &Element) -> Option<String> {
+/// A picture's address, where it is on the web; one held in the HTML (`data:`) or in a file the
+/// copying application made has none a note could keep.
+fn web_src(img: &Element) -> Option<&str> {
     let src = attr(&img.attrs, "src")?.trim();
     let web = ["http://", "https://"].iter().any(|scheme| {
         src.get(..scheme.len())
             .is_some_and(|head| head.eq_ignore_ascii_case(scheme))
     });
-    web.then(|| {
-        let mut alt = String::new();
-        escape(
-            &mut alt,
-            &collapse(attr(&img.attrs, "alt").unwrap_or_default()),
-        );
-        format!("![{}]({})", after_markup(&alt), link_destination(src))
-    })
+    web.then_some(src)
 }
 
 /// Whitespace as HTML shows it outside `<pre>`: each stretch of it one space.
@@ -451,16 +562,22 @@ fn join(blocks: &[Block], tight: bool) -> String {
     out
 }
 
-/// Writes the tree as Markdown.
+/// Writes the tree in the syntax `S`.
 #[derive(Default)]
-struct Writer {
-    /// In a table's cell, where a line break is `<br>` and every block shares the cell's line.
+struct Writer<S> {
+    /// In a table's cell, where a line break is [`Syntax::CELL_BREAK`] and every block shares the
+    /// cell's line.
     cell: bool,
     /// In a link's text, where another link can only be text.
     link: bool,
+    /// In a list item or a quote, where a syntax may hold no heading ([`Syntax::NESTED_HEADINGS`]).
+    nested: bool,
+    /// The last link written that shows its own address, as it is written.
+    address: Option<String>,
+    syntax: PhantomData<S>,
 }
 
-impl Writer {
+impl<S: Syntax> Writer<S> {
     /// `nodes`, children of `parent`, as blocks: runs of inline content as paragraphs, each block
     /// element as what it is.
     fn blocks(&mut self, nodes: &[Node], parent: &Element) -> Vec<Block> {
@@ -480,23 +597,34 @@ impl Writer {
         out
     }
 
-    /// A block element, a child of `parent`.
+    /// [`Writer::blocks`] in a list item or a quote.
+    fn nested_blocks(&mut self, nodes: &[Node], parent: &Element) -> Vec<Block> {
+        let outer = std::mem::replace(&mut self.nested, true);
+        let blocks = self.blocks(nodes, parent);
+        self.nested = outer;
+        blocks
+    }
+
+    /// A block element, a child of `parent`. A heading where the syntax can hold none is its
+    /// text, bold as a heading's look is.
     fn block(&mut self, e: &Element, parent: &Element, out: &mut Vec<Block>) {
         let paragraph = |md: String| Block { md, list: false };
         match e.name.as_str() {
-            "h1" | "h2" | "h3" | "h4" | "h5" | "h6" if !self.cell => {
+            "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
+                if !self.cell && (S::NESTED_HEADINGS || !self.nested) =>
+            {
                 let mut line = Vec::new();
                 self.contents(e, &mut line);
                 let text = self.render(&line, e.look, " ");
                 if !text.is_empty() {
                     let level = usize::from(e.name.as_bytes()[1] - b'0');
-                    out.push(paragraph(format!("{} {text}", "#".repeat(level))));
+                    out.push(paragraph(S::heading(level, &text)));
                 }
             }
             "ul" | "ol" | "li" if !self.cell => {
                 let list = match e.name.as_str() {
                     // An item outside any list.
-                    "li" => items(vec![self.blocks(&e.children, e)], None),
+                    "li" => items(vec![self.nested_blocks(&e.children, e)], None),
                     _ => self.list(e),
                 };
                 if !list.is_empty() {
@@ -507,20 +635,14 @@ impl Writer {
                 }
             }
             "blockquote" if !self.cell => {
-                let inner = join(&self.blocks(&e.children, e), false);
+                let inner = join(&self.nested_blocks(&e.children, e), false);
                 if !inner.is_empty() {
-                    let quoted: Vec<String> = (inner.lines())
-                        .map(|line| match line.is_empty() {
-                            true => ">".to_string(),
-                            false => format!("> {line}"),
-                        })
-                        .collect();
-                    out.push(paragraph(quoted.join("\n")));
+                    out.push(paragraph(S::quote(&inner)));
                 }
             }
             "pre" => out.push(paragraph(self.code_block(e, parent))),
             "table" if !self.cell => out.extend(self.table(e)),
-            "hr" if !self.cell => out.push(paragraph("---".into())),
+            "hr" if !self.cell => out.push(paragraph(S::RULE.into())),
             _ => out.extend(self.blocks(&e.children, e)),
         }
     }
@@ -532,7 +654,9 @@ impl Writer {
         let mut found = Vec::new();
         for node in &list.children {
             match node {
-                Node::Element(li) if li.name == "li" => found.push(self.blocks(&li.children, li)),
+                Node::Element(li) if li.name == "li" => {
+                    found.push(self.nested_blocks(&li.children, li));
+                }
                 Node::Element(nested) if matches!(nested.name.as_str(), "ul" | "ol") => {
                     let block = Block {
                         md: self.list(nested),
@@ -544,16 +668,16 @@ impl Writer {
                     }
                 }
                 Node::Text(text) if text.trim().is_empty() => {}
-                other => found.push(self.blocks(std::slice::from_ref(other), list)),
+                other => found.push(self.nested_blocks(std::slice::from_ref(other), list)),
             }
         }
         let start = attr(&list.attrs, "start").and_then(|s| s.trim().parse().ok());
         items(found, (list.name == "ol").then_some(start.unwrap_or(1)))
     }
 
-    /// `<pre>` as a fenced block, named for its language where a class says it (`language-rust`,
-    /// GitHub's `highlight-source-rust` on the block around it), its fence longer than any run of
-    /// backticks inside. In a table's cell, each of its lines as inline code.
+    /// `<pre>` as a block of code, named for its language where a class says it (`language-rust`,
+    /// GitHub's `highlight-source-rust` on the block around it). In a table's cell, each of its
+    /// lines as inline code.
     fn code_block(&mut self, pre: &Element, parent: &Element) -> String {
         let mut code = String::new();
         raw_text(pre, &mut code);
@@ -564,10 +688,10 @@ impl Writer {
             let lines: Vec<String> = (code.lines())
                 .map(|line| match line.trim().is_empty() {
                     true => String::new(),
-                    false => code_span(line),
+                    false => S::code(line),
                 })
                 .collect();
-            return lines.join("<br>");
+            return lines.join(S::CELL_BREAK);
         }
         let code_child = pre.children.iter().find_map(|node| match node {
             Node::Element(code) if code.name == "code" => Some(code),
@@ -584,13 +708,12 @@ impl Writer {
                     .find_map(|prefix| class.strip_prefix(prefix))
             })
         });
-        let fence = "`".repeat(longest_run(code, '`').max(2) + 1);
-        format!("{fence}{}\n{code}\n{fence}", lang.unwrap_or_default())
+        S::code_block(lang.unwrap_or_default(), code)
     }
 
-    /// A table as a GFM pipe table, its first row the header, a cell's lines and blocks joined by
-    /// `<br>` and its pipes escaped; a cell spanning columns is followed by empty ones, so the
-    /// columns stay in line. A table of one cell is that cell's content.
+    /// A table as rows of cells between pipes, its first row the header, each cell on one line
+    /// ([`Syntax::cell`]); a cell spanning columns is followed by empty ones, so the columns stay
+    /// in line. A table of one cell is that cell's content.
     fn table(&mut self, table: &Element) -> Vec<Block> {
         let mut rows: Vec<Vec<&Element>> = Vec::new();
         let mut caption = Vec::new();
@@ -611,13 +734,8 @@ impl Writer {
                 self.cell = true;
                 let blocks = self.blocks(&cell.children, cell);
                 self.cell = false;
-                let md: Vec<String> = (blocks.iter().enumerate())
-                    .map(|(i, b)| match i {
-                        0 => b.md.replace('\n', "<br>"),
-                        _ => after_markup(&b.md.replace('\n', "<br>")),
-                    })
-                    .collect();
-                cells.push(escape_pipes(&md.join("<br>")));
+                let md: Vec<String> = blocks.into_iter().map(|b| b.md).collect();
+                cells.push(S::cell(&md));
                 let span: usize = attr(&cell.attrs, "colspan")
                     .and_then(|s| s.trim().parse().ok())
                     .unwrap_or(1);
@@ -634,7 +752,7 @@ impl Writer {
             padded.resize(width, String::new());
             format!("| {} |", padded.join(" | "))
         };
-        let mut md = vec![line(&written[0]), line(&vec!["---".to_string(); width])];
+        let mut md = vec![line(&written[0]), S::table_rule(width)];
         md.extend(written[1..].iter().map(|row| line(row)));
         out.push(Block {
             md: md.join("\n"),
@@ -647,25 +765,28 @@ impl Writer {
     fn inline(&mut self, e: &Element, line: &mut Vec<Piece>) {
         match e.name.as_str() {
             "br" => line.push(Piece::Break),
-            "img" => match image(e) {
-                Some(md) => line.push(Piece::Markdown(md, e.look)),
-                None => push_text(line, attr(&e.attrs, "alt").unwrap_or_default(), e.look),
-            },
+            "img" => {
+                let alt = attr(&e.attrs, "alt").unwrap_or_default();
+                match web_src(e) {
+                    Some(src) => {
+                        let md = S::image(src, &collapse(alt), self.link);
+                        line.push(Piece::Markdown(md, e.look));
+                    }
+                    None => push_text(line, alt, e.look),
+                }
+            }
             "code" | "kbd" | "samp" | "tt" => {
                 let mut text = String::new();
                 raw_text(e, &mut text);
                 let text = collapse(&text);
                 if !text.is_empty() {
-                    line.push(Piece::Markdown(code_span(&text), e.look));
+                    line.push(Piece::Markdown(S::code(&text), e.look));
                 }
             }
             "input"
                 if attr(&e.attrs, "type").is_some_and(|t| t.eq_ignore_ascii_case("checkbox")) =>
             {
-                let tick = match attr(&e.attrs, "checked") {
-                    Some(_) => "[x] ",
-                    None => "[ ] ",
-                };
+                let tick = S::tick(attr(&e.attrs, "checked").is_some());
                 line.push(Piece::Markdown(tick.into(), Look::default()));
             }
             "a" => {
@@ -684,18 +805,16 @@ impl Writer {
                     underline: true,
                     ..e.look
                 };
-                let text = after_markup(&self.render(&inner, base, " "));
-                let plain = match inner.as_slice() {
-                    [Piece::Text(plain, _)] => Some(plain.trim()),
-                    _ => None,
-                };
-                let md = match plain {
-                    _ if text.is_empty() => return,
-                    Some(plain) if plain == href && !href.contains([' ', '<', '>']) => {
-                        format!("<{href}>")
-                    }
-                    _ => format!("[{text}]({})", link_destination(href)),
-                };
+                let text = self.render(&inner, base, " ");
+                if text.is_empty() {
+                    return;
+                }
+                let shows_address =
+                    matches!(inner.as_slice(), [Piece::Text(plain, _)] if plain.trim() == href);
+                let md = S::link(href, &text, shows_address);
+                if shows_address {
+                    self.address = Some(md.clone());
+                }
                 line.push(Piece::Markdown(md, e.look));
             }
             _ => self.contents(e, line),
@@ -713,10 +832,10 @@ impl Writer {
     }
 
     /// `line` as paragraphs: each run between two line breaks or more is one, a single break in
-    /// it a hard line break, `<br>` in a cell.
+    /// it a hard line break, a cell's in a cell.
     fn paragraphs(&mut self, line: &mut Vec<Piece>, out: &mut Vec<Block>) {
         let pieces = std::mem::take(line);
-        let breaks = if self.cell { "<br>" } else { "\\\n" };
+        let breaks = if self.cell { S::CELL_BREAK } else { S::BREAK };
         let mut rest = pieces.as_slice();
         while !rest.is_empty() {
             let end = (0..rest.len())
@@ -742,7 +861,7 @@ impl Writer {
         for piece in pieces {
             match piece {
                 Piece::Break => {
-                    mark(&mut out, &mut open, [false; 6]);
+                    mark::<S>(&mut out, &mut open, [false; 6]);
                     let kept = out.trim_end_matches(' ').len();
                     out.truncate(kept);
                     if !out.is_empty() && !out.ends_with(breaks) {
@@ -765,20 +884,21 @@ impl Writer {
                         }
                         None => text,
                     };
-                    mark(&mut out, &mut open, look.marks(base));
+                    mark::<S>(&mut out, &mut open, look.marks(base));
                     match piece {
-                        Piece::Text(..) => escape(&mut out, text),
+                        Piece::Text(..) => S::escape(&mut out, text),
                         _ => out.push_str(text),
                     }
                 }
             }
         }
-        mark(&mut out, &mut open, [false; 6]);
+        mark::<S>(&mut out, &mut open, [false; 6]);
         out.trim_end_matches(breaks).trim().to_string()
     }
 }
 
-/// List items as Markdown: `- `, or numbered from `start`, each item's blocks joined tight.
+/// List items, `- ` or numbered from `start` as Markdown and org write them, each item's blocks
+/// joined tight.
 fn items(items: Vec<Vec<Block>>, start: Option<u64>) -> String {
     let mut out = Vec::new();
     for (i, item) in items.iter().enumerate() {
@@ -805,15 +925,16 @@ fn items(items: Vec<Vec<Block>>, start: Option<u64>) -> String {
 /// Close the marks `open` has that `want` has not, from the innermost, and open the ones it
 /// lacks. A closing mark goes before the spaces it follows, so that it still closes.
 // ponytail: a mark between punctuation and a letter (`**Note:**text`) neither opens nor closes
-// in CommonMark and shows its stars; CommonMark's flanking rules decide where `<b>` would do.
-fn mark(out: &mut String, open: &mut [bool; 6], want: [bool; 6]) {
+// in CommonMark and shows its stars, nor one against a letter in org (`*a*s`); CommonMark's
+// flanking rules decide where `<b>` would do.
+fn mark<S: Syntax>(out: &mut String, open: &mut [bool; 6], want: [bool; 6]) {
     // Everything inside a mark that closes closes with it, and opens again after it.
     if let Some(first) = (0..6).find(|&i| open[i] && !want[i]) {
         let kept = out.trim_end_matches(' ').len();
         let spaces = out.split_off(kept);
         for i in (first..6).rev() {
             if open[i] {
-                out.push_str(MARKS[i].1);
+                out.push_str(S::MARKS[i].1);
                 open[i] = false;
             }
         }
@@ -821,7 +942,7 @@ fn mark(out: &mut String, open: &mut [bool; 6], want: [bool; 6]) {
     }
     for i in 0..6 {
         if want[i] && !open[i] {
-            out.push_str(MARKS[i].0);
+            out.push_str(S::MARKS[i].0);
             open[i] = true;
         }
     }
@@ -980,26 +1101,32 @@ fn escape(out: &mut String, text: &str) {
     }
 }
 
+/// The text an HTML page shows, without its whitespace and the zero-width spaces org escapes
+/// with: what a paste keeps, however it is marked up.
+#[cfg(test)]
+pub(crate) fn shown(html: &str) -> String {
+    fn walk(e: &Element, out: &mut String) {
+        for node in &e.children {
+            match node {
+                Node::Text(text) => {
+                    out.extend(
+                        text.chars()
+                            .filter(|&c| !c.is_whitespace() && c != '\u{200B}'),
+                    );
+                }
+                Node::Element(child) => walk(child, out),
+            }
+        }
+    }
+    let mut out = String::new();
+    walk(&parse(html), &mut out);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::markdown::to_html;
-
-    /// The text an HTML page shows, without its whitespace: what a paste keeps, however it is
-    /// marked up.
-    fn shown(html: &str) -> String {
-        fn walk(e: &Element, out: &mut String) {
-            for node in &e.children {
-                match node {
-                    Node::Text(text) => out.extend(text.chars().filter(|c| !c.is_whitespace())),
-                    Node::Element(child) => walk(child, out),
-                }
-            }
-        }
-        let mut out = String::new();
-        walk(&parse(html), &mut out);
-        out
-    }
 
     /// `html` converts to `md`, which a note shows as the text `html` showed.
     fn converts(html: &str, md: &str) {
