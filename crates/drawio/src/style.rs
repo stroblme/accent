@@ -138,7 +138,8 @@ impl fmt::Display for Style {
 }
 
 /// The keys a pasted style carries over, draw.io's `Graph.cellStyles`: how a cell looks, never
-/// what shape it is.
+/// what shape it is. The fill's and the line's opacity are accent's own additions, so a fade
+/// travels with the look it belongs to (`textOpacity` is in [`TEXT_LOOK`]).
 // Graph.js 1676-1717
 pub(crate) const LOOK: &[&str] = &[
     "rounded",
@@ -181,6 +182,8 @@ pub(crate) const LOOK: &[&str] = &[
     "fillColor",
     "gradientColor",
     "gradientDirection",
+    "fillOpacity",
+    "strokeOpacity",
 ];
 
 /// What a text cell takes of a pasted style (`Graph.textStyles`); every other cell takes these

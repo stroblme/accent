@@ -1100,7 +1100,9 @@ impl<'a> Builder<'a> {
             size.1,
         );
         let bits = style.num("fontStyle", 0.0) as u32;
-        let opacity = style.num("opacity", 100.0) / 100.0 * style.num("textOpacity", 100.0) / 100.0;
+        // `textOpacity` alone, as draw.io's label leaves the cell's `opacity` to its shape
+        // (`mxText.apply`).
+        let opacity = style.num("textOpacity", 100.0) / 100.0;
         self.prims.push(Prim::Text {
             cell: cell.id.clone(),
             locked,
@@ -1871,11 +1873,11 @@ mod tests {
     }
 
     #[test]
-    fn a_picture_takes_the_fill_opacity_and_its_border_the_line_opacity() {
+    fn a_picture_takes_the_fill_opacity_its_border_the_line_s_and_its_label_the_text_s() {
         let style = "shape=image;image=x.png;imageBackground=#ff0000;imageBorder=#0000ff;\
-                     fillOpacity=50;strokeOpacity=40;opacity=80;";
+                     fillOpacity=50;strokeOpacity=40;textOpacity=60;opacity=80;";
         let r = Rect::new(0.0, 0.0, 80.0, 40.0);
-        let s = scene(&page(vec![Cell::new_vertex("i", "1", r, style, "")]));
+        let s = scene(&page(vec![Cell::new_vertex("i", "1", r, style, "A")]));
         let alphas: Vec<(u8, f64)> = s
             .prims
             .iter()
@@ -1890,11 +1892,12 @@ mod tests {
                     opacity,
                     ..
                 } => Some((line.color.a, *opacity)),
-                Prim::Image { opacity, .. } => Some((255, *opacity)),
+                Prim::Image { opacity, .. } | Prim::Text { opacity, .. } => Some((255, *opacity)),
                 _ => None,
             })
             .collect();
-        assert_eq!(alphas, [(128, 0.8), (255, 0.4), (102, 0.8)]);
+        // The label is faded by `textOpacity` alone, not by the cell's `opacity`.
+        assert_eq!(alphas, [(128, 0.8), (255, 0.4), (102, 0.8), (255, 0.6)]);
     }
 
     #[test]

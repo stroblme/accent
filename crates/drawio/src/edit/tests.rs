@@ -182,18 +182,24 @@ fn a_pasted_style_gives_its_look_and_keeps_the_shape() {
             "",
         ),
     ]);
-    let from = Style::parse("ellipse;fillColor=#ff0000;dashed=1;fontSize=20;endArrow=block;");
+    let from = Style::parse(
+        "ellipse;fillColor=#ff0000;dashed=1;fontSize=20;endArrow=block;\
+         fillOpacity=40;strokeOpacity=70;textOpacity=60;",
+    );
     e.paste_style(0, &list(&["r", "t", "f"]), &from).unwrap();
     let style = |e: &Editor, id: &str| e.page(0).unwrap().cell(id).unwrap().style.to_string();
-    // The default stroke drawn again, the arrow head an edge's alone.
+    // The default stroke drawn again, the fades with their colours, the arrow head an edge's
+    // alone.
     assert_eq!(
         style(&e, "r"),
-        "strokeColor=default;html=1;dashed=1;fillColor=#ff0000;fontSize=20;"
+        "strokeColor=default;html=1;dashed=1;fillColor=#ff0000;fillOpacity=40;strokeOpacity=70;\
+         fontSize=20;textOpacity=60;"
     );
-    assert_eq!(style(&e, "t"), "text;html=1;fontSize=20;");
+    assert_eq!(style(&e, "t"), "text;html=1;fontSize=20;textOpacity=60;");
     assert_eq!(
         style(&e, "f"),
-        "dashed=1;fillColor=#ff0000;fontSize=20;endArrow=block;"
+        "dashed=1;fillColor=#ff0000;fillOpacity=40;strokeOpacity=70;fontSize=20;textOpacity=60;\
+         endArrow=block;"
     );
     // A look drawn without a fill takes the fill off.
     e.paste_style(0, &list(&["r"]), &Style::parse("text;"))
