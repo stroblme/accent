@@ -417,8 +417,9 @@ IPYTHONDIR="$PWD/ipython" exec python3 "$@""#;
         let root = tempfile::tempdir().unwrap();
         let dir = root.path();
         std::fs::create_dir_all(dir.join(".venv/bin")).unwrap();
-        // `sh` refuses `-m ipykernel_launcher` and `-c "import ipykernel"` as such a Python does.
-        std::os::unix::fs::symlink("/bin/sh", dir.join(".venv/bin/python")).unwrap();
+        // `false` refuses the kernel's start and the ipykernel probe as such a Python does. Not
+        // `sh`, whose `import` may be ImageMagick's, which waits for a click on a display.
+        std::os::unix::fs::symlink("/usr/bin/false", dir.join(".venv/bin/python")).unwrap();
         let (events, _news) = std::sync::mpsc::channel();
         let kernels = Arc::new(Kernels::new(dir.to_path_buf(), events));
         let start = Start {
