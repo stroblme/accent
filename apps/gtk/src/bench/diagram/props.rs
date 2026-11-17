@@ -547,6 +547,42 @@ pub(super) fn props(app: &Rc<App>, rel: &str) {
                 arc.map(|r| r.text().to_string())
             );
         }
+        // A folder's Arc Size is draw.io's share of its shorter side, stepped by hundredths, and
+        // Fixed Corner Size writes the radius it is drawn at, and back; the folder goes again.
+        tab.edit(|e, page| {
+            let rect = accent_drawio::Rect::new(600.0, 200.0, 120.0, 60.0);
+            e.add_vertex(page, None, rect, "shape=folder;rounded=1;", "")
+                .map(drop)
+        });
+        let folder = tab.file().pages[0].cells.last().map(|c| c.id.clone());
+        let folder = folder.unwrap_or_default();
+        tab.select(vec![folder.clone()]);
+        let arc = || row("Arc Size").and_downcast::<adw::SpinRow>();
+        let before = arc().map(|r| r.text().to_string());
+        if let Some(arc) = arc() {
+            let steps = arc.adjustment();
+            for _ in 0..5 {
+                arc.set_value(steps.value() + steps.step_increment());
+            }
+        }
+        glib::timeout_future(Duration::from_millis(600)).await;
+        println!(
+            "bench diagram props folder arc={before:?} stepped={:?}",
+            style(&folder)
+        );
+        for on in [true, false] {
+            if let Some(fixed) = row("Fixed Corner Size").and_downcast::<adw::SwitchRow>() {
+                fixed.set_active(on);
+            }
+            println!(
+                "bench diagram props folder fixed={on} style={:?} arc={:?}",
+                style(&folder),
+                arc().map(|r| r.text().to_string())
+            );
+        }
+        let ids = vec![folder];
+        tab.edit(|e, page| e.delete(page, &ids));
+        tab.select(vec!["a".to_string()]);
         // Sketch writes draw.io's comic drawing onto a and takes it, and `comic`, off again.
         for on in [true, false] {
             if let Some(sketch) = row("Sketch").and_downcast::<adw::SwitchRow>() {

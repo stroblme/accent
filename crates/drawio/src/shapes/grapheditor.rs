@@ -854,6 +854,16 @@ fn folder_arc(w: f64, h: f64, tab_h: f64, style: &Resolved) -> f64 {
     arc.min(w * 0.5).min((h - tab_h) * 0.5)
 }
 
+/// The radius a rounded folder's corners are drawn at in `b`, below its tab.
+pub(super) fn folder_radius(b: Rect, style: &Resolved) -> f64 {
+    folder_arc(
+        b.w,
+        b.h,
+        style.num("tabHeight", 20.0).min(b.h).max(0.0),
+        style,
+    )
+}
+
 /// With `boundedLbl=1` a folder's label keeps below the tab, or with `labelInHeader=1` in it
 /// (Shapes.js 1506-1548).
 pub(super) fn folder_margins(rect: Rect, style: &Resolved) -> Margins {

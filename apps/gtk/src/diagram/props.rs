@@ -334,8 +334,10 @@ pub(super) fn rotation(degrees: f64) -> Option<String> {
     (degrees != 0.0).then(|| number(degrees))
 }
 
-/// A number as a style value: `12`, not `12.0`.
+/// A number as a style value: `12`, not `12.0`, and to a millionth, so five steps of a
+/// hundredth from 0.1 are written `0.15`, not `0.15000000000000002`.
 pub(super) fn number(v: f64) -> String {
+    let v = (v * 1e6).round() / 1e6;
     match v.fract() == 0.0 {
         true => format!("{}", v as i64),
         false => format!("{v}"),
@@ -814,13 +816,20 @@ impl Props {
                 self.gradient.fill(style.color("gradientColor"));
                 self.fill_opacity.set_value(style.num("fillOpacity", 100.0));
                 self.rounded.set_active(style.flag("rounded", false));
-                // mxGraph's corner when the style gives none: `LINE_ARCSIZE` units with
-                // `absoluteArcSize`, else `RECTANGLE_ROUNDING_FACTOR` of the shorter side.
-                let arc = if style.flag("absoluteArcSize", false) {
-                    20.0
-                } else {
-                    15.0
+                // The corner as the first cell's shape reads `arcSize`: a folder's a share of its
+                // shorter side, 0.1 when the style gives none and stepped by hundredths, or with
+                // `absoluteArcSize` its radius (`FolderShape`); any other's mxGraph's, 15 % of the
+                // shorter side (`RECTANGLE_ROUNDING_FACTOR`) or 20 units (`LINE_ARCSIZE`).
+                let fixed = style.flag("absoluteArcSize", false);
+                let (arc, step) = match (style.shape() == "folder", fixed) {
+                    (true, false) => (0.1, 0.01),
+                    (true, true) => (0.1, 1.0),
+                    (false, true) => (20.0, 1.0),
+                    (false, false) => (15.0, 1.0),
                 };
+                let steps = self.arc_size.adjustment();
+                steps.set_step_increment(step);
+                steps.set_page_increment(10.0 * step);
                 self.arc_size.set_value(style.num("arcSize", arc));
                 self.effects.fill(style, effects);
                 self.divider.set_active(style.flag("swimlaneLine", true));
@@ -1067,6 +1076,7 @@ mod tests {
     fn numbers_are_written_as_draw_io_writes_them() {
         assert_eq!(super::number(12.0), "12");
         assert_eq!(super::number(1.5), "1.5");
+        assert_eq!(super::number(0.1 + 0.01 * 5.0), "0.15");
         let c = gtk::gdk::RGBA::new(0.0, 150.0 / 255.0, 130.0 / 255.0, 1.0);
         assert_eq!(super::hex(c), "#009682");
     }
