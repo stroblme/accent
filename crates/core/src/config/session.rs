@@ -143,6 +143,9 @@ pub struct Session {
     pub recent_files: Vec<String>,
     /// Full action names of the commands run from the palette or a menu, most recent first.
     pub recent_commands: Vec<String>,
+    /// The git dirs of the repositories picked in the Git pane, most recent first: the order its
+    /// chooser lists them in, and so the one a window opens on.
+    pub recent_repos: Vec<String>,
     /// Saved reading positions keyed by vault-relative PDF path. Entries are not pruned.
     pub pdf: BTreeMap<String, PdfPlace>,
     /// Saved diagram positions keyed by vault-relative path; entries are not pruned.
@@ -227,6 +230,7 @@ impl Default for Session {
             zoom: 1.0,
             recent_files: Vec::new(),
             recent_commands: Vec::new(),
+            recent_repos: Vec::new(),
             pdf: BTreeMap::new(),
             diagram: BTreeMap::new(),
             terminals: BTreeMap::new(),

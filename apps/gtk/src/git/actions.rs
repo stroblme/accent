@@ -391,8 +391,8 @@ impl Panel {
                 .unwrap_or(state.selected)
         };
         if self.state.borrow().selected != index {
-            self.state.borrow_mut().selected = index;
-            // The notify this fires is the same one a user's pick fires, refresh included.
+            // The notify this fires is the same one a user's pick fires, refresh included: the
+            // pick sets aside what the pane holds about the repository it leaves.
             self.chooser.set_selected(index as u32);
         }
         // What the branch said before the transfer, which is what a sync is about to move. Read

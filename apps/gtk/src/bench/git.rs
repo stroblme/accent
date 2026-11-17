@@ -118,7 +118,9 @@ pub(super) fn bench_git_switch(app: &Rc<App>) {
         };
         println!("bench git_switch before rows={}", git.log_rows());
         let said = app.toasted.get();
-        git.select_repo(1);
+        if let Some(name) = git.repo_names().get(1) {
+            git.select_repo(name);
+        }
         let rows = git.log_rows();
         git.activate_log_row(0);
         glib::timeout_future(Duration::from_millis(1500)).await;
@@ -129,8 +131,10 @@ pub(super) fn bench_git_switch(app: &Rc<App>) {
             git.log_rows()
         );
         app.show_pane("git");
+        // Every repository twice, starting after the selected one, which the chooser lists first
+        // once its pick has landed: each pick a switch.
         let names = git.repo_names();
-        for (at, name) in names.iter().enumerate().chain(names.iter().enumerate()) {
+        for name in names.iter().cycle().skip(1).take(2 * names.len()) {
             // The longest the main loop went without turning, from the pick until its lists are
             // full: a tick asked for every millisecond, and the widest gap between two of them.
             let (worst, last) = (Rc::new(Cell::new(0.0)), Rc::new(Cell::new(Instant::now())));
@@ -144,7 +148,7 @@ pub(super) fn bench_git_switch(app: &Rc<App>) {
                 }
             });
             let (t, said) = (Instant::now(), app.toasted.get());
-            git.select_repo(at as u32);
+            git.select_repo(name);
             let pick = t.elapsed().as_secs_f64() * 1000.0;
             let (rows, branch) = (git.log_rows(), git.shown_branch());
             git.activate_log_row(0);

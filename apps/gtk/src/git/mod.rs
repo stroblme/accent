@@ -57,6 +57,10 @@ pub const GIT_SHARE: (i32, i32) = (1, 2);
 /// One page of history: what Load More adds, and what a refresh reads until it has.
 const PAGE: usize = 200;
 
+/// How many picked repositories the chooser remembers the order of. One picked longer ago than
+/// that sorts among those never picked.
+const RECENT_REPOS: usize = 50;
+
 /// How many rows one turn of the main loop adds to the changes list or the history ([`Fill`]).
 const FILL_CHUNK: usize = 10;
 
@@ -131,6 +135,11 @@ pub struct Hooks {
     pub syncing: Box<dyn Fn(bool)>,
     /// Whether the changes list starts grouped by folder — `git_tree` in the config.
     pub tree: bool,
+    /// The git dirs of the repositories picked before, most recent first: the session's
+    /// `recent_repos`, which the chooser is sorted by from the first refresh on.
+    pub recent: Vec<String>,
+    /// A repository was picked, which the session keeps ([`Panel::recent_repos`]).
+    pub picked: Box<dyn Fn()>,
     /// The file's own menu under a changed file's row, by vault key and whether the file is
     /// gone from the working tree: none outside the vault or in a window without one.
     pub file_menu: Box<dyn Fn(&str, bool) -> Vec<gio::Menu>>,
@@ -167,6 +176,9 @@ struct State {
     head_moved: bool,
     /// What the pane last held about every repository but the selected one, by git dir.
     seen: HashMap<PathBuf, Seen>,
+    /// The git dirs of the repositories picked, most recent first, which the next refresh sorts
+    /// `repos` by ([`by_recent`]).
+    recent: Vec<String>,
 }
 
 /// The part of [`State`] only the selected repository has, set aside while another is picked:
@@ -182,7 +194,7 @@ struct Seen {
 impl State {
     /// Make `at` the selected repository, setting aside what is held about the one it replaces
     /// and bringing back what was set aside for `at`: nothing, the first time. The history keeps
-    /// its first page alone, so the refresh a pick asks for reads one page.
+    /// its first page alone, so the refresh a pick asks for reads one page, and lists `at` first.
     fn pick(&mut self, at: usize) {
         let mut commits = std::mem::take(&mut self.commits);
         commits.truncate(PAGE);
@@ -205,6 +217,10 @@ impl State {
         self.branches = back.branches;
         self.incoming = back.incoming;
         self.submodules = back.submodules;
+        if let Some(repo) = self.repos.get(at) {
+            let dir = repo.git_dir.to_string_lossy();
+            accent_core::config::touch(&mut self.recent, &dir, RECENT_REPOS);
+        }
     }
 }
 
@@ -372,7 +388,7 @@ impl Panel {
         }
     }
 
-    pub fn new(hooks: Hooks) -> Rc<Panel> {
+    pub fn new(mut hooks: Hooks) -> Rc<Panel> {
         let names = gtk::StringList::new(&[]);
         let chooser = gtk::DropDown::builder()
             .model(&names)
@@ -477,6 +493,10 @@ impl Panel {
         root.append(&column);
 
         let source = RefCell::new(hooks.source.clone());
+        let state = State {
+            recent: std::mem::take(&mut hooks.recent),
+            ..State::default()
+        };
         let panel = Rc::new(Panel {
             tree: Cell::new(hooks.tree),
             collapsed: RefCell::new(HashSet::new()),
@@ -509,7 +529,7 @@ impl Panel {
             log,
             log_view: log_view.clone(),
             has_more: Cell::new(false),
-            state: RefCell::new(State::default()),
+            state: RefCell::new(state),
             pending: crate::widgets::Debounce::new(DEBOUNCE),
             refresh_gate: RefCell::new(refresh::RefreshGate::default()),
             running_git: RefCell::new(actions::RunningGit::default()),
@@ -563,6 +583,11 @@ impl Panel {
         !self.state.borrow().repos.is_empty()
     }
 
+    /// The git dirs of the repositories picked, most recent first, for the session.
+    pub fn recent_repos(&self) -> Vec<String> {
+        self.state.borrow().recent.clone()
+    }
+
     /// Whether the vault's root is in a repository the pane knows of, which leaves Initialize Git
     /// Repository nothing to do. A repository nested in the vault is not one.
     pub fn vault_in_repository(&self) -> bool {
@@ -593,9 +618,13 @@ impl Panel {
         self.log_view.emit_by_name::<()>("activate", &[&at]);
     }
 
+    /// Pick the repository called `name` in the chooser, wherever its order has put it.
     #[cfg(feature = "bench")]
-    pub fn select_repo(&self, at: u32) {
-        self.chooser.set_selected(at);
+    pub fn select_repo(&self, name: &str) {
+        let at = self.repo_names().iter().position(|n| n == name);
+        if let Some(at) = at {
+            self.chooser.set_selected(at as u32);
+        }
     }
 
     /// What the branch button reads. `ACCENT_BENCH_GIT=switch` and nothing else.
@@ -680,6 +709,7 @@ impl Panel {
             // the status every refresh reads for every one, the rest from the last time it was
             // picked — and the refresh replaces that once it lands.
             panel.state.borrow_mut().pick(chooser.selected() as usize);
+            (panel.hooks.picked)();
             panel.draw();
             panel.redraw_log();
             panel.refresh(Depth::Everything);
@@ -1519,6 +1549,19 @@ fn clamp(selected: usize, len: usize) -> usize {
     selected.min(len.saturating_sub(1))
 }
 
+/// Sort `repos` as the chooser lists them: the ones in `recent` (git dirs, most recent first) in
+/// its order, then the rest in the order they were found. One in `recent` that is gone is passed
+/// over, so the first one listed is the one picked last that is still there.
+fn by_recent(repos: &mut [Repo], recent: &[String]) {
+    repos.sort_by_key(|repo| {
+        let dir = repo.git_dir.to_string_lossy();
+        recent
+            .iter()
+            .position(|r| *r == dir)
+            .unwrap_or(recent.len())
+    });
+}
+
 /// Where the repository at `selected` in `known` is in `repos`, found by its git dir, so one
 /// discovered ahead of it does not move the chooser onto another; where it went, [`clamp`].
 fn reselect(selected: usize, known: &[Repo], repos: &[Repo]) -> usize {
@@ -1741,6 +1784,21 @@ mod tests {
         // `c` went: the index it had, as far as the list reaches.
         assert_eq!(reselect(1, &known, &[a.clone(), b]), 1);
         assert_eq!(reselect(1, &known, &[a]), 0);
+    }
+
+    #[test]
+    fn the_chooser_lists_the_repositories_picked_last_first() {
+        let (a, b, c, d) = (repo("/v"), repo("/v/b"), repo("/v/c"), repo("/v/d"));
+        let mut state = State {
+            repos: vec![a.clone(), b.clone(), c.clone(), d.clone()],
+            recent: vec!["/v/.git".into(), "/v/gone/.git".into()],
+            ..State::default()
+        };
+        state.pick(2);
+        assert_eq!(state.recent, ["/v/c/.git", "/v/.git", "/v/gone/.git"]);
+        // `c` picked last, then `a`; the gone one passed over, the others as they were found.
+        by_recent(&mut state.repos, &state.recent);
+        assert_eq!(state.repos, [c, a, b, d]);
     }
 
     #[test]

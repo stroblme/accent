@@ -594,6 +594,7 @@ fn session_roundtrips_as_json() {
         zoom: 1.2,
         recent_files: vec!["Daily/2026-09-03.md".to_string()],
         recent_commands: vec!["win.save".to_string()],
+        recent_repos: vec!["/vault/sub/.git".to_string(), "/vault/.git".to_string()],
         pdf: BTreeMap::from([(
             "Attachments/paper.pdf".to_string(),
             PdfPlace {
@@ -692,6 +693,7 @@ fn session_roundtrips_as_json() {
         assert_eq!(back.zoom, 1.2);
         assert_eq!(back.recent_files, s.recent_files);
         assert_eq!(back.recent_commands, s.recent_commands);
+        assert_eq!(back.recent_repos, s.recent_repos);
         assert_eq!(back.terminals, s.terminals);
         assert_eq!(back.pinned, s.pinned);
         assert_eq!(back.web_images, s.web_images);

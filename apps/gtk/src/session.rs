@@ -424,6 +424,11 @@ impl App {
             zoom: self.zoom.get(),
             recent_files: self.recent_files.borrow().clone(),
             recent_commands: self.recent_commands.borrow().clone(),
+            recent_repos: self
+                .git
+                .get()
+                .map(|git| git.recent_repos())
+                .unwrap_or_default(),
             // Merged rather than replaced: a PDF closed earlier in this session keeps the place
             // it was left at, which is the whole point of remembering it.
             pdf: {

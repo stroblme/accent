@@ -159,15 +159,20 @@ impl Panel {
         let vault = self.source();
         // As many commits as are shown, so the pages a Load More brought in outlive a history
         // that moved: a bigger `git log` on every save, but only once Load More was used.
-        let (selected, known, rows) = {
+        let (selected, known, rows, recent) = {
             let state = self.state.borrow();
             let rows = state.commits.len().max(PAGE);
-            (state.selected, state.repos.clone(), rows)
+            (
+                state.selected,
+                state.repos.clone(),
+                rows,
+                state.recent.clone(),
+            )
         };
         let panel = self.clone();
         glib::spawn_future_local(async move {
             let fetched = crate::work::off_thread("git", move || {
-                fetch::fetch(&vault, selected, &ask, known, rows)
+                fetch::fetch(&vault, selected, &ask, known, rows, &recent)
             })
             .await;
             let again = panel.refresh_gate.borrow_mut().finish(generation);

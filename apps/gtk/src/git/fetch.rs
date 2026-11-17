@@ -118,6 +118,7 @@ pub(super) struct Fetched {
     pub(super) selected: usize,
     /// How many commits the history was asked for: fewer back is all of it.
     pub(super) rows: usize,
+    /// The repositories, sorted, where they are not the ones the pane holds in that order.
     pub(super) repos: Option<Vec<Repo>>,
     /// One per repository, `None` where git did not answer or was not asked.
     pub(super) statuses: Vec<Option<Status>>,
@@ -133,19 +134,21 @@ pub(super) struct Fetched {
 
 /// Read what `ask` asks for, or nothing where it names paths no repository holds. `known` is the
 /// repositories the pane already holds, which is what a refresh below [`Depth::Discover`] runs
-/// against rather than looking for them again, and `rows` how many commits of history the pane
-/// shows.
+/// against rather than looking for them again, `rows` how many commits of history the pane
+/// shows, and `recent` the git dirs picked, most recent first, which the repositories are sorted
+/// by ([`by_recent`]).
 pub(super) fn fetch(
     vault: &Source,
     selected: usize,
     ask: &Ask,
     known: Vec<Repo>,
     rows: usize,
+    recent: &[String],
 ) -> Option<Fetched> {
     let depth = ask.depth();
     // A refusal is not "there are no repositories": on `Err` the pane keeps the ones it had,
     // which is what a remote whose link dropped mid-refresh needs.
-    let repos = match (depth >= Depth::Discover).then(|| vault.repos()) {
+    let found = match (depth >= Depth::Discover).then(|| vault.repos()) {
         Some(Ok(repos)) => Some(repos),
         Some(Err(e)) => {
             tracing::debug!("listing the repositories: {e}");
@@ -153,7 +156,12 @@ pub(super) fn fetch(
         }
         None => None,
     };
-    let against: &[Repo] = repos.as_deref().unwrap_or(&known);
+    // Sorted before anything is read of them, so every answer below lines up with the order the
+    // chooser will list them in. A pick moves its repository to the top this way, with the
+    // refresh it asks for.
+    let mut against = found.unwrap_or_else(|| known.clone());
+    by_recent(&mut against, recent);
+    let repos = (against != known).then(|| against.clone());
     // A save outside every repository asks git nothing, and leaves the pane as it is.
     let asked: Vec<bool> = against.iter().map(|repo| ask.asks(repo)).collect();
     if matches!(ask, Ask::Paths(_)) && !asked.contains(&true) {
@@ -180,7 +188,7 @@ pub(super) fn fetch(
             }
         })
         .collect();
-    let at = reselect(selected, &known, against);
+    let at = reselect(selected, &known, &against);
     // Everything below is about the repository itself rather than the working tree, so a save
     // does not pay for it: five to seven processes per keystroke were what this cost before.
     let head = (depth >= Depth::Everything)

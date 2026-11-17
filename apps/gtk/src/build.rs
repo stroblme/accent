@@ -791,7 +791,8 @@ fn ports_data(vault: &Arc<Vault>) -> sidebar::PortsData {
 
 /// Wire Git hooks with weak window captures to avoid retaining the vault after window closure.
 fn build_git(app: &Rc<App>, source: Arc<git::Source>) -> Rc<git::Panel> {
-    let (held, toast, open, diff, compare, merge, leave, trash, changed, syncing, files) = (
+    let (held, toast, open, diff, compare, merge, leave, trash, changed, syncing, files, picked) = (
+        Rc::downgrade(app),
         Rc::downgrade(app),
         Rc::downgrade(app),
         Rc::downgrade(app),
@@ -821,6 +822,15 @@ fn build_git(app: &Rc<App>, source: Arc<git::Source>) -> Rc<git::Panel> {
             fileops::file_sections(key, &facts)
         }),
         tree: app.config.borrow().git_tree,
+        recent: match &*source {
+            git::Source::Vault(vault) => vault.session().recent_repos,
+            _ => Vec::new(),
+        },
+        picked: Box::new(move || {
+            if let Some(app) = picked.upgrade() {
+                app.save_session_soon();
+            }
+        }),
         source,
         window: app.window.clone(),
         toast: Box::new(move |text| {

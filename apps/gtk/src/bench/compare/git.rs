@@ -983,9 +983,13 @@ pub(in crate::bench) fn bench_compare_pick(app: &Rc<App>, rel: &str) {
         let Some(git) = app.git.get().cloned() else {
             return bench_quit(&app);
         };
-        println!("bench compare_pick repos={:?}", git.repo_names());
+        // By name: a pick moves its repository to the top of the chooser.
+        let names = git.repo_names();
+        println!("bench compare_pick repos={names:?}");
         for (at, settle) in [(1, 0), (0, 2500)] {
-            git.select_repo(at);
+            if let Some(name) = names.get(at) {
+                git.select_repo(name);
+            }
             wait(settle).await;
             let listed = git.activate_change(&rel).is_some();
             wait(1500).await;
