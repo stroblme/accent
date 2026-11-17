@@ -296,7 +296,7 @@ fn layers_are_added_locked_hidden_reordered_and_deleted_a_step_each() {
 fn a_vertex_in_a_group_is_stored_relative() {
     let mut e = editor();
     let group = Rect::new(100.0, 50.0, 200.0, 100.0);
-    let g = e.add_vertex(0, None, group, "group", "").unwrap();
+    let g = e.add_vertex(0, None, group, "", "").unwrap();
     let r = Rect::new(110.0, 70.0, 30.0, 40.0);
     let c = e.add_vertex(0, Some(&g), r, "", "").unwrap();
     assert_eq!(geometry(&e, &c).rect(), Rect::new(10.0, 20.0, 30.0, 40.0));
@@ -518,13 +518,13 @@ fn a_paste_into_a_group_is_placed_from_its_corner() {
     let pasted = e.paste(0, Some("g"), &from, 10.0, 20.0).unwrap();
     let copy = e.page(0).unwrap().cell(&pasted[0]).unwrap();
     assert_eq!(copy.parent.as_deref(), Some("g"));
-    // A grid step from c, as on the layer, in g's own coordinates, g grown down to hold it.
+    // A grid step from c, as on the layer, in g's own coordinates, g fitted to hold both.
     assert_eq!(
         geometry(&e, &pasted[0]).rect(),
         Rect::new(10.0, 20.0, 40.0, 40.0)
     );
     let grown = geometry(&e, "g").rect();
-    assert_eq!(grown, Rect::new(100.0, 50.0, 100.0, 60.0));
+    assert_eq!(grown, Rect::new(100.0, 50.0, 50.0, 60.0));
     assert!(e.undo());
     assert!(e.page(0).unwrap().cell(&pasted[0]).is_none());
 }
@@ -604,7 +604,7 @@ fn move_takes_edges_between_moved_cells() {
         "an edge with one end moved stays"
     );
     let group = Rect::new(300.0, 0.0, 100.0, 100.0);
-    let g = e.add_vertex(0, None, group, "group", "").unwrap();
+    let g = e.add_vertex(0, None, group, "", "").unwrap();
     let inner = Rect::new(310.0, 10.0, 10.0, 10.0);
     let inner = e.add_vertex(0, Some(&g), inner, "", "").unwrap();
     let drawn = scene(e.page(0).unwrap());
@@ -614,7 +614,7 @@ fn move_takes_edges_between_moved_cells() {
     assert_eq!(
         geometry(&e, &inner).x,
         10.0,
-        "a child moves with its group, not again"
+        "a child moves with its shape, not again"
     );
 }
 
@@ -944,4 +944,114 @@ fn a_pasted_page_is_a_copy_with_ids_of_its_own() {
     assert!(e.undo());
     assert_eq!(e.file().pages.len(), 2, "one paste, one step");
     assert!(matches!(e.paste_page(3, &copied), Err(Error::NoPage(3))));
+}
+
+/// The rectangle of cell `id` on the page.
+fn at(e: &Editor, id: &str) -> Rect {
+    e.page(0).unwrap().absolute_rect(id).unwrap()
+}
+
+#[test]
+fn a_group_fits_what_it_holds_as_it_moves_grows_and_shrinks() {
+    // Left loose by the file, wider than the 40-unit squares it holds 60 apart.
+    let mut e = open([
+        Cell::new_vertex("g", "1", Rect::new(100.0, 50.0, 300.0, 100.0), "group", ""),
+        Cell::new_vertex("a", "g", Rect::new(0.0, 0.0, 40.0, 40.0), "", "a"),
+        Cell::new_vertex("b", "g", Rect::new(60.0, 0.0, 40.0, 40.0), "", "b"),
+    ]);
+    e.set_style(0, &list(&["a"]), "fillColor", Some("#ff0000"))
+        .unwrap();
+    let loose = Rect::new(100.0, 50.0, 300.0, 100.0);
+    assert_eq!(
+        geometry(&e, "g").rect(),
+        loose,
+        "fitted only once a member moves"
+    );
+    e.move_cells(0, &list(&["a"]), -30.0, 20.0, &Scene::default())
+        .unwrap();
+    // Out to the left and down: the corner moves and b's offset with it, so b stays put.
+    assert_eq!(geometry(&e, "g").rect(), Rect::new(70.0, 50.0, 130.0, 60.0));
+    assert_eq!(at(&e, "a"), Rect::new(70.0, 70.0, 40.0, 40.0));
+    assert_eq!(at(&e, "b"), Rect::new(160.0, 50.0, 40.0, 40.0));
+    assert_eq!(geometry(&e, "b").rect(), Rect::new(90.0, 0.0, 40.0, 40.0));
+    // The fit is part of the move's step.
+    assert!(e.undo());
+    assert_eq!(geometry(&e, "g").rect(), loose);
+    assert_eq!(geometry(&e, "a").rect(), Rect::new(0.0, 0.0, 40.0, 40.0));
+    // A member resized and one deleted take it in, and the last one deleted takes it away.
+    e.resize(0, "b", Rect::new(160.0, 50.0, 20.0, 20.0))
+        .unwrap();
+    assert_eq!(geometry(&e, "g").rect(), Rect::new(100.0, 50.0, 80.0, 40.0));
+    e.delete(0, &list(&["a"])).unwrap();
+    assert_eq!(geometry(&e, "g").rect(), Rect::new(160.0, 50.0, 20.0, 20.0));
+    assert_eq!(geometry(&e, "b").rect(), Rect::new(0.0, 0.0, 20.0, 20.0));
+    e.delete(0, &list(&["b"])).unwrap();
+    assert_eq!(order(&e), ["0", "1"]);
+}
+
+#[test]
+fn nested_groups_fit_outward_and_a_container_only_grows() {
+    let mut e = open([
+        Cell::new_vertex("G", "1", Rect::new(0.0, 0.0, 100.0, 40.0), "group", ""),
+        Cell::new_vertex("g", "G", Rect::new(60.0, 0.0, 40.0, 40.0), "group", ""),
+        Cell::new_vertex("a", "G", Rect::new(0.0, 0.0, 40.0, 40.0), "", ""),
+        Cell::new_vertex("b", "g", Rect::new(0.0, 0.0, 40.0, 40.0), "", ""),
+        Cell::new_vertex(
+            "s",
+            "1",
+            Rect::new(200.0, 0.0, 100.0, 100.0),
+            "swimlane",
+            "",
+        ),
+        Cell::new_vertex("c", "s", Rect::new(10.0, 30.0, 20.0, 20.0), "", ""),
+    ]);
+    e.resize(0, "b", Rect::new(60.0, 0.0, 40.0, 80.0)).unwrap();
+    assert_eq!(geometry(&e, "g").rect(), Rect::new(60.0, 0.0, 40.0, 80.0));
+    assert_eq!(geometry(&e, "G").rect(), Rect::new(0.0, 0.0, 100.0, 80.0));
+    let drawn = Scene::default();
+    e.move_cells(0, &list(&["c"]), 100.0, 0.0, &drawn).unwrap();
+    let grown = Rect::new(200.0, 0.0, 130.0, 100.0);
+    assert_eq!(geometry(&e, "s").rect(), grown, "grown right to hold c");
+    e.move_cells(0, &list(&["c"]), -150.0, 0.0, &drawn).unwrap();
+    assert_eq!(
+        geometry(&e, "s").rect(),
+        grown,
+        "neither shrunk nor grown left"
+    );
+}
+
+#[test]
+fn a_group_sized_by_what_it_holds_keeps_its_geometry_at_nothing() {
+    let tb = "group;transparentBounds=1;groupPadding=10;";
+    let mut e = open([
+        Cell::new_vertex("G", "1", Rect::new(0.0, 0.0, 10.0, 10.0), "group", ""),
+        Cell::new_vertex("t", "G", Rect::default(), tb, ""),
+        Cell::new_vertex("a", "t", Rect::new(100.0, 50.0, 40.0, 40.0), "", ""),
+        Cell::new_vertex("b", "t", Rect::new(160.0, 50.0, 40.0, 40.0), "", ""),
+    ]);
+    let boxed = |e: &Editor| {
+        let page = e.page(0).unwrap();
+        bounds(page, page.cell("t").unwrap())
+    };
+    let padded = Rect::new(90.0, 40.0, 120.0, 60.0);
+    assert_eq!(boxed(&e), Some(padded), "what it holds and its padding");
+    // Moved by what it holds, the group round it fitting that.
+    e.move_cells(0, &list(&["t"]), 10.0, 0.0, &Scene::default())
+        .unwrap();
+    assert_eq!(geometry(&e, "t").rect(), Rect::default());
+    assert_eq!(at(&e, "a"), Rect::new(110.0, 50.0, 40.0, 40.0));
+    assert_eq!(
+        geometry(&e, "G").rect(),
+        Rect::new(100.0, 40.0, 120.0, 60.0)
+    );
+    assert_eq!(geometry(&e, "a").rect(), Rect::new(10.0, 10.0, 40.0, 40.0));
+    assert_eq!(boxed(&e), Some(padded.translate(10.0, 0.0)));
+    let resized = e.resize(0, "t", Rect::new(0.0, 0.0, 50.0, 50.0));
+    assert!(resized.is_err(), "its size is what it holds");
+    let copy = e.duplicate(0, &list(&["t"])).unwrap();
+    assert_eq!(geometry(&e, &copy[0]).rect(), Rect::default());
+    // With the last of what it holds the group goes, and the group it was the last of after it.
+    e.delete(0, &copy).unwrap();
+    e.delete(0, &list(&["a", "b"])).unwrap();
+    assert_eq!(order(&e), ["0", "1"]);
 }

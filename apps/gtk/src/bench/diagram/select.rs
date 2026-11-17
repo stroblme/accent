@@ -39,7 +39,10 @@ const GROUPS: &str = r#"<mxfile host="accent">
 /// bands prints what each selects: a band over a group and over part of one, clicks into a group
 /// and on to a sibling, into a nested group and on to a cousin, a click and a band from a
 /// selected group's empty middle, first clicks under the three parents draw.io's
-/// `isPropagateSelectionCell` treats apart, and pastes inside a group and outside it.
+/// `isPropagateSelectionCell` treats apart, the clicks out of a group whose bounds are its
+/// shapes' and back, Select All, and pastes inside a group and outside it. Then it prints how
+/// the groups fit what they hold as the keys move a shape out of one and delete what it holds,
+/// and move the group whose bounds are its shapes'.
 pub(super) fn select(app: &Rc<App>, rel: &str) {
     std::fs::write(app.root().join(rel), GROUPS).expect("write the diagram");
     let (app, rel) = (app.clone(), rel.to_string());
@@ -116,11 +119,21 @@ pub(super) fn select(app: &Rc<App>, rel: &str) {
         click(on("c")).await;
         super::super::git::xtest(&band((140.0, 70.0), (380.0, 230.0))).await;
         say("band from inside g over c2 and d1");
-        for id in ["p1", "t1", "xl"] {
+        for id in ["p1", "xl", "t1"] {
             tab.select(Vec::new());
             click(on(id)).await;
             say(&format!("first click {id}"));
         }
+        // The group whose bounds are its shapes' is framed round them and taken by a second
+        // click on t1, as draw.io's is, and a third goes back in.
+        click(on("t1")).await;
+        say("click t1 again");
+        let r = tab.frame_of("tb").unwrap_or_default();
+        println!("bench diagram select tb frame {:?}", (r.x, r.y, r.w, r.h));
+        click(on("t1")).await;
+        say("click t1 a third time");
+        super::super::git::xtest("key ctrl+a").await;
+        say("select all");
         // A group is open while the selection is inside it: its outline shows and a paste goes
         // into it, and once the selection is let go of a paste lands on the layer.
         let parents = || {
@@ -144,6 +157,35 @@ pub(super) fn select(app: &Rc<App>, rel: &str) {
         super::super::git::xtest("key ctrl+v").await;
         let (open, outside) = (tab.open_group(), parents());
         println!("bench diagram select paste outside {outside:?} open={open:?}");
+        // A group fits what it holds, c moved left out of g and down by the keys ten units a
+        // press, then d deleted and the rest with it, g going with the last of them.
+        let page = || {
+            let file = accent_drawio::File::from_bytes(tab.text().as_bytes()).ok();
+            file.and_then(|f| f.pages.into_iter().next())
+                .unwrap_or_default()
+        };
+        let placed = |id: &str| {
+            let g = page().cell(id)?.geometry.clone()?;
+            Some(format!("{},{},{},{}", g.x, g.y, g.width, g.height))
+        };
+        let fits = |step: &str| {
+            let [g, c, d] = ["g", "c", "d"].map(placed);
+            println!("bench diagram select fit {step} g={g:?} c={c:?} d={d:?}");
+        };
+        tab.select(vec!["c".into()]);
+        super::super::git::xtest(&"key shift+Left; key shift+Down; ".repeat(4)).await;
+        fits("move c");
+        tab.select(vec!["d".into()]);
+        super::super::git::xtest("key Delete").await;
+        fits("delete d");
+        tab.select(page().children("g").map(|c| c.id.clone()).collect());
+        super::super::git::xtest("key Delete").await;
+        fits("delete the rest");
+        // The group whose bounds are its shapes' moves by them and keeps its 0,0,0,0.
+        tab.select(vec!["tb".into()]);
+        super::super::git::xtest("key shift+Right; key shift+Right").await;
+        let [tb, t1] = ["tb", "t1"].map(placed);
+        println!("bench diagram select fit move tb tb={tb:?} t1={t1:?}");
         bench_quit(&app);
     });
 }

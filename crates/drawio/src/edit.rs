@@ -9,6 +9,11 @@ use crate::route::Constraint;
 use crate::scene::Scene;
 use crate::style::{EDGE_LOOK, LOOK, Style, TEXT_LOOK};
 
+mod fit;
+
+pub use fit::{bounds, fit_groups};
+use fit::{group_bounds, moved_by, shift};
+
 /// Where [`Editor::reorder`] moves cells among their siblings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ZOrder {
@@ -152,9 +157,6 @@ impl Editor {
             };
             let id = ids.fresh(p);
             add_vertex(p, &id, &into, rect, style, label)?;
-            if parent.is_some() {
-                extend_parent(p, &id);
-            }
             Ok(id)
         })
     }
@@ -354,10 +356,8 @@ impl Editor {
             let at = subtree_end(p, &parent);
             p.cells.insert(at, group);
             append_to(p, &cells, &id);
-            for cell in p.cells.iter_mut().filter(|c| cells.contains(&c.id)) {
-                if let Some(g) = &mut cell.geometry {
-                    translate(g, -bounds.x, -bounds.y);
-                }
+            for cell in &cells {
+                shift(p, cell, -bounds.x, -bounds.y);
             }
             Ok(Some(id))
         })
@@ -383,17 +383,10 @@ impl Editor {
                 let subtree = with_subtrees(p, [original.clone()]);
                 let (mut end, mut block) = (0, Vec::new());
                 for (i, cell) in p.cells.iter().enumerate() {
-                    if !subtree.contains(&cell.id) {
-                        continue;
+                    if subtree.contains(&cell.id) {
+                        block.push(copy_of(cell, &fresh));
+                        end = i + 1;
                     }
-                    let mut copy = copy_of(cell, &fresh);
-                    if &cell.id == original
-                        && let Some(g) = &mut copy.geometry
-                    {
-                        translate(g, 10.0, 10.0);
-                    }
-                    block.push(copy);
-                    end = i + 1;
                 }
                 blocks.push((end, block));
             }
@@ -402,7 +395,11 @@ impl Editor {
             for (end, block) in blocks {
                 p.cells.splice(end..end, block);
             }
-            Ok(top.iter().map(|id| fresh[id].clone()).collect())
+            let copies: Vec<CellId> = top.iter().map(|id| fresh[id].clone()).collect();
+            for copy in &copies {
+                shift(p, copy, 10.0, 10.0);
+            }
+            Ok(copies)
         })
     }
 
@@ -432,6 +429,7 @@ impl Editor {
         let mut pages = self.file.pages.clone();
         let onto = &mut pages[page];
         let pasted = paste_into(onto, &mut self.ids, current, group, first, dx, dy)?;
+        fit_groups(&self.file.pages[page], onto);
         for from in rest {
             let mut added = from.clone();
             added.set_id(&guid());
@@ -668,6 +666,7 @@ impl Editor {
     ) -> Result<T, Error> {
         let mut page = self.file.page(index)?.clone();
         let out = change(&mut page, &mut self.ids)?;
+        fit_groups(&self.file.pages[index], &mut page);
         if page != self.file.pages[index] {
             let before = std::mem::replace(&mut self.file.pages[index], page);
             self.record(Snapshot::Page {
@@ -784,9 +783,6 @@ fn paste_into(
         for copy in &mut copies {
             if copy.parent.as_ref() == Some(layer) {
                 copy.parent = Some(into.clone());
-                if let Some(g) = &mut copy.geometry {
-                    translate(g, dx - corner.x, dy - corner.y);
-                }
             }
         }
         pasted = copies
@@ -796,8 +792,8 @@ fn paste_into(
             .collect();
         let at = subtree_end(page, &into);
         page.cells.splice(at..at, copies);
-        if group.is_some() {
-            pasted.iter().for_each(|id| extend_parent(page, id));
+        for id in &pasted {
+            shift(page, id, dx - corner.x, dy - corner.y);
         }
     } else {
         let into = page.root().map(|c| c.id.clone());
@@ -943,16 +939,16 @@ pub fn ungroup(p: &mut Page, ids: &[CellId]) -> Result<Vec<CellId>, Error> {
         let into = p.origin_of(group);
         let places: Vec<Option<Rect>> = children.iter().map(|c| p.absolute_rect(c)).collect();
         for (id, place) in children.iter().zip(places) {
-            let Some(cell) = p.cell_mut(id) else { continue };
-            let vertex = cell.vertex;
-            let Some(g) = &mut cell.geometry else {
-                continue;
-            };
-            match (vertex && g.relative, place) {
-                (true, Some(r)) => {
-                    (g.x, g.y, g.relative) = (r.x - into.x, r.y - into.y, false);
+            let relative = p
+                .cell(id)
+                .is_some_and(|c| c.vertex && c.geometry.as_ref().is_some_and(|g| g.relative));
+            match place.filter(|_| relative) {
+                Some(r) => {
+                    if let Some(g) = p.cell_mut(id).and_then(|c| c.geometry.as_mut()) {
+                        (g.x, g.y, g.relative) = (r.x - into.x, r.y - into.y, false);
+                    }
                 }
-                _ => translate(g, shift.x - into.x, shift.y - into.y),
+                None => self::shift(p, id, shift.x - into.x, shift.y - into.y),
             }
         }
         append_to(p, &children, &parent);
@@ -977,29 +973,6 @@ pub fn ungroup(p: &mut Page, ids: &[CellId]) -> Result<Vec<CellId>, Error> {
         chosen.push(id.clone());
     }
     Ok(chosen)
-}
-
-/// Sibling bounds in parent coordinates (`Graph.getBoundsForGroup`): vertex
-/// rectangles and edge endpoints/waypoints. Relative vertices do not contribute.
-fn group_bounds(p: &Page, cells: &[CellId]) -> Option<Rect> {
-    let mut bounds: Option<Rect> = None;
-    let mut add = |r: Rect| bounds = Some(bounds.map_or(r, |b| b.union(&r)));
-    for cell in cells.iter().filter_map(|id| p.cell(id)) {
-        let Some(g) = &cell.geometry else { continue };
-        if cell.edge {
-            let loose = [
-                g.source_point.filter(|_| cell.source.is_none()),
-                g.target_point.filter(|_| cell.target.is_none()),
-            ];
-            let points = g.points.iter().flatten().copied();
-            for pt in loose.into_iter().flatten().chain(points) {
-                add(Rect::new(pt.x, pt.y, 0.0, 0.0));
-            }
-        } else if cell.vertex && !g.relative {
-            add(g.rect());
-        }
-    }
-    bounds
 }
 
 /// Where a cell added last under `parent` goes in the page's order: after everything under it.
@@ -1058,9 +1031,10 @@ pub fn start_move(page: &mut Page, ids: &[CellId], drawn: &Scene) -> Result<Movi
         .iter()
         .filter(|c| c.edge && !moved.contains(&c.id) && moves(&c.source) && moves(&c.target));
     let between: Vec<CellId> = between.map(|c| c.id.clone()).collect();
+    let top = top.iter().flat_map(|id| moved_by(page, id));
     Ok(Moving {
         count: moved.len(),
-        shifted: top.into_iter().chain(between).collect(),
+        shifted: top.chain(between).collect(),
     })
 }
 
@@ -1105,30 +1079,6 @@ pub fn add_vertex(
     Ok(())
 }
 
-/// Grow the shape vertex `id` is in right and down to hold it, as draw.io grows the parent a
-/// cell is added to (`mxGraph.extendParent`), but not one collapsed, one with `expand=0` or a
-/// group whose bounds are its shapes' (`transparentBounds=1`, `Graph.isExtendParent`).
-// mxGraph.js 6302-6335; Graph.js 17928-17950
-fn extend_parent(p: &mut Page, id: &str) {
-    let Some(cell) = p.cell(id).filter(|c| c.vertex) else {
-        return;
-    };
-    let (Some(parent), Some(g)) = (cell.parent.clone(), cell.geometry.clone()) else {
-        return;
-    };
-    let Some(holder) = p.cell_mut(&parent).filter(|c| c.vertex && !g.relative) else {
-        return;
-    };
-    let style = holder.style.resolve(false);
-    let kept = holder.attr("collapsed") == Some("1")
-        || style.get("expand") == Some("0")
-        || style.get("transparentBounds") == Some("1");
-    if let Some(r) = holder.geometry.as_mut().filter(|_| !kept) {
-        r.width = r.width.max(g.x + g.width);
-        r.height = r.height.max(g.y + g.height);
-    }
-}
-
 /// An edge `id` in `layer`. An end without a cell dangles at its point; an end with one keeps
 /// the point too, as draw.io writes it.
 pub fn add_edge(
@@ -1150,6 +1100,11 @@ pub fn resize(page: &mut Page, id: &str, rect: Rect) -> Result<(), Error> {
     check(page, [id])?;
     page.absolute_rect(id)
         .ok_or(Error::Refused("only a shape can be resized"))?;
+    if page.cell(id).is_some_and(fit::is_transparent) {
+        return Err(Error::Refused(
+            "a group sized by what it holds is not resized",
+        ));
+    }
     let origin = page.origin_of(id);
     if let Some(g) = page.cell_mut(id).and_then(|c| c.geometry.as_mut()) {
         (g.x, g.y) = (rect.x - origin.x, rect.y - origin.y);
@@ -1448,8 +1403,12 @@ pub fn flip(page: &mut Page, ids: &[CellId], horizontal: bool, drawn: &Scene) ->
     };
     let on = !first.style.resolve(false).flag(key, false);
     for id in &shapes {
-        let geometry = page.cell(id).and_then(|c| c.geometry.as_ref());
-        if let Some(middle) = geometry.map(|g| if horizontal { g.width } else { g.height } / 2.0) {
+        let own = page.cell(id).and_then(|c| fit::own_box(page, c));
+        let middle = own.map(|b| match horizontal {
+            true => b.x + b.w / 2.0,
+            false => b.y + b.h / 2.0,
+        });
+        if let Some(middle) = middle {
             let inside: Vec<CellId> = page.children(id).map(|c| c.id.clone()).collect();
             for child in &inside {
                 mirror(cell_mut(page, child)?, horizontal, middle);

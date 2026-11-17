@@ -296,7 +296,7 @@ impl DiagramView {
             let on_text = cache.label_at(&sheet.scene.prims, p) == Some(id);
             return (label.is_some() && on_text).then_some(Grip::Label);
         }
-        let r = sheet.rect(id).filter(|_| !sheet.is_pinned(id))?;
+        let r = sheet.rect(id).filter(|_| sheet.is_resizable(id))?;
         let local = frame.to_content(rotate(p, r.centre(), -sheet.rotation(id)));
         // The handles sit on the frame the overlay draws, just outside the shape.
         let b = frame.rect(&r.grow(sheet.padding(id)));

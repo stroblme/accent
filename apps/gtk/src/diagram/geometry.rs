@@ -517,6 +517,9 @@ pub type End = (Option<CellId>, Point, Option<Constraint>);
 pub struct Pick {
     pub cell: CellId,
     pub held: Option<CellId>,
+    /// The group with `transparentBounds=1` that `cell`, the one cell selected, is in, which a
+    /// click on it goes out to.
+    pub out: Option<CellId>,
 }
 
 impl Pick {
@@ -524,8 +527,12 @@ impl Pick {
     /// delayed selection (`mxGraphHandler.selectDelayed`): the cell under the pointer alone,
     /// one level into a selected group or one of several cells selected; `None` where that is the
     /// whole selection already. draw.io's climbs from a selected shape back out to its group
-    /// instead, which accent leaves out (user decision 2026-11-15).
+    /// instead, which accent leaves out (user decision 2026-11-15) but for a group with
+    /// `transparentBounds=1`, which only such a click selects (`Graph.selectCellForEvent`).
     pub fn clicked(&self, selection: &[CellId]) -> Option<Vec<CellId>> {
+        if let Some(group) = &self.out {
+            return Some(vec![group.clone()]);
+        }
         (selection != std::slice::from_ref(&self.cell)).then(|| vec![self.cell.clone()])
     }
 }
@@ -566,6 +573,9 @@ pub struct Sheet {
     unturnable: HashSet<CellId>,
     /// Each vertex's line width, which its selection frame keeps clear of.
     lines: HashMap<CellId, f64>,
+    /// Groups with `transparentBounds=1`, whose rectangle is what they hold and whose geometry
+    /// stays at 0,0,0,0 as draw.io keeps it: framed and moved, never resized or turned.
+    derived: HashSet<CellId>,
 }
 
 impl Sheet {
@@ -614,8 +624,11 @@ impl Sheet {
             if cell.edge {
                 sheet.edges.insert(cell.id.clone());
             }
-            if let Some(r) = page.absolute_rect(&cell.id) {
+            if let Some(r) = accent_drawio::edit::bounds(page, cell) {
                 sheet.rects.insert(cell.id.clone(), r);
+            }
+            if cell.vertex && cell.style.get("transparentBounds") == Some("1") {
+                sheet.derived.insert(cell.id.clone());
             }
             let turned = cell
                 .style
@@ -694,6 +707,13 @@ impl Sheet {
         (self.rects.contains_key(id) || line())
             && !self.is_pinned(id)
             && !self.unturnable.contains(id)
+            && !self.derived.contains(id)
+    }
+
+    /// Whether vertex `id` takes resize handles: a shape that can be moved, and not a group whose
+    /// size is what it holds.
+    pub fn is_resizable(&self, id: &str) -> bool {
+        self.rects.contains_key(id) && !self.is_pinned(id) && !self.derived.contains(id)
     }
 
     /// How far a vertex is turned, in degrees.
@@ -850,9 +870,16 @@ impl Sheet {
                 .find(|id| !self.climbs(id, selection))
                 .unwrap_or(&chain[chain.len() - 1]),
         };
+        // The one cell selected, clicked again, goes out to the group with
+        // `transparentBounds=1` it is in, as draw.io's does (`Graph.selectCellForEvent`).
+        let again = held == Some(0) && selection.len() == 1;
+        let out = self
+            .parent(cell)
+            .filter(|p| again && self.derived.contains(*p));
         Some(Pick {
             cell: cell.to_string(),
             held: held.map(|k| chain[k].to_string()),
+            out: out.map(str::to_string),
         })
     }
 
@@ -1097,19 +1124,7 @@ impl Sheet {
     /// the shapes in it, and a group partly inside gives the shapes the band covers. Nothing
     /// locked or hidden is taken.
     pub fn band(&self, band: Rect) -> Vec<CellId> {
-        // What each cell draws unlocked, and the groups those cells are in, which draw nothing.
-        let mut drawn: HashMap<&str, Option<Rect>> = HashMap::new();
-        let prims = self.scene.prims.iter().zip(&self.bounds);
-        for (prim, b) in prims.filter(|(p, _)| !p.locked()) {
-            let id = prim.cell();
-            let ink = drawn.entry(id).or_default();
-            *ink = Some(ink.map_or(*b, |r| r.union(b)));
-            let mut up = self.parent(id);
-            while let Some(group) = up.filter(|g| !drawn.contains_key(*g)) {
-                drawn.insert(group, None);
-                up = self.parent(group);
-            }
-        }
+        let drawn = self.drawn();
         let inside = |id: &str, ink: Option<Rect>| {
             let rect = self.rect(id).filter(|r| r.w > 0.0 || r.h > 0.0);
             let turned = rect.map(|r| bounding_box(&r, self.rotation(id)));
@@ -1139,18 +1154,31 @@ impl Sheet {
         })
     }
 
-    /// Every unlocked cell in paint order that sits directly on a layer: what Select All
-    /// takes, draw.io leaving what is on a locked layer out of a selection.
-    pub fn top_level(&self) -> Vec<CellId> {
-        let mut seen = HashSet::new();
-        self.scene
-            .prims
-            .iter()
-            .filter(|p| !p.locked())
-            .map(|p| p.cell())
-            .filter(|id| self.parent(id).is_none() && seen.insert(id.to_string()))
-            .map(str::to_string)
-            .collect()
+    /// Every cell drawn unlocked at any depth, and the groups those are in, in the page's
+    /// order: what Select All takes, as draw.io's takes every cell under a layer
+    /// (`selectAll(null, true)`), leaving what is on a locked layer out of a selection.
+    pub fn all(&self) -> Vec<CellId> {
+        let drawn = self.drawn();
+        let cells = self.page.cells.iter();
+        let cells = cells.filter(|c| drawn.contains_key(c.id.as_str()));
+        cells.map(|c| c.id.clone()).collect()
+    }
+
+    /// What each cell draws unlocked, and the groups those cells are in, which draw nothing.
+    fn drawn(&self) -> HashMap<&str, Option<Rect>> {
+        let mut drawn: HashMap<&str, Option<Rect>> = HashMap::new();
+        let prims = self.scene.prims.iter().zip(&self.bounds);
+        for (prim, b) in prims.filter(|(p, _)| !p.locked()) {
+            let id = prim.cell();
+            let ink = drawn.entry(id).or_default();
+            *ink = Some(ink.map_or(*b, |r| r.union(b)));
+            let mut up = self.parent(id);
+            while let Some(group) = up.filter(|g| !drawn.contains_key(*g)) {
+                drawn.insert(group, None);
+                up = self.parent(group);
+            }
+        }
+        drawn
     }
 }
 
@@ -1671,11 +1699,40 @@ mod tests {
             <mxCell id="0"/><mxCell id="L" parent="0" style="locked=1;"/><mxCell id="C" parent="0"/>
             <mxCell id="a" parent="L" vertex="1" style=""><mxGeometry x="0" y="0" width="10" height="10" as="geometry"/></mxCell>
             <mxCell id="b" parent="C" vertex="1" style=""><mxGeometry x="20" y="0" width="10" height="10" as="geometry"/></mxCell>
+            <mxCell id="g" parent="C" vertex="1" style="group"><mxGeometry x="40" y="0" width="10" height="10" as="geometry"/></mxCell>
+            <mxCell id="c" parent="g" vertex="1" style=""><mxGeometry x="0" y="0" width="10" height="10" as="geometry"/></mxCell>
             </root></mxGraphModel></diagram></mxfile>"#;
         let file = accent_drawio::File::from_bytes(xml.as_bytes()).unwrap();
         let sheet = Sheet::of(&file.pages()[0], &Context::default());
         assert!(sheet.is_pinned("a") && !sheet.is_pinned("b"));
-        assert_eq!(sheet.top_level(), vec!["b".to_string()]);
+        // A group and what it holds, as draw.io's Select All takes them.
+        assert_eq!(sheet.all(), ["b", "g", "c"]);
+    }
+
+    #[test]
+    fn a_group_sized_by_what_it_holds_is_framed_round_it_and_left_by_a_second_click() {
+        let xml = r#"<mxfile><diagram name="P" id="p"><mxGraphModel><root>
+            <mxCell id="0"/><mxCell id="1" parent="0"/>
+            <mxCell id="b" parent="1" vertex="1" style="group;transparentBounds=1;"><mxGeometry as="geometry"/></mxCell>
+            <mxCell id="c" parent="b" vertex="1" style=""><mxGeometry x="100" y="0" width="10" height="10" as="geometry"/></mxCell>
+            <mxCell id="d" parent="b" vertex="1" style=""><mxGeometry x="130" y="20" width="10" height="10" as="geometry"/></mxCell>
+            </root></mxGraphModel></diagram></mxfile>"#;
+        let file = accent_drawio::File::from_bytes(xml.as_bytes()).unwrap();
+        let sheet = Sheet::of(&file.pages()[0], &Context::default());
+        assert_eq!(sheet.rect("b"), Some(Rect::new(100.0, 0.0, 40.0, 30.0)));
+        assert!(!sheet.is_resizable("b") && !sheet.is_turnable("b"));
+        let ids = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+        let click = |selected: &[&str]| {
+            let pick = sheet.pick(Point::new(105.0, 5.0), 1.0, &ids(selected));
+            pick.unwrap().clicked(&ids(selected))
+        };
+        assert_eq!(click(&["c"]), Some(ids(&["b"])));
+        assert_eq!(click(&["b"]), Some(ids(&["c"])), "and back in");
+        assert_eq!(
+            click(&["c", "d"]),
+            Some(ids(&["c"])),
+            "one of several stays itself"
+        );
     }
 
     #[test]

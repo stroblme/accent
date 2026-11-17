@@ -35,6 +35,8 @@ pub(super) struct Live {
     moving: Option<Moving>,
     /// The edit [`Live::scene`] shows; `None` until the first frame.
     pub shown: Option<Edit>,
+    /// The page as that edit leaves it, its groups fitted to what it moved in them.
+    pub page: Page,
     pub scene: Scene,
     /// Per prim, in page units: what culling tests against.
     pub bounds: Vec<Rect>,
@@ -58,6 +60,7 @@ impl Preview {
             base,
             moving,
             shown: None,
+            page: Page::default(),
             scene: Scene::default(),
             bounds: Vec::new(),
             cache: Cache::default(),
@@ -85,6 +88,7 @@ impl Live {
         if let Err(e) = applied {
             tracing::debug!("diagram preview refused: {e}");
         }
+        edit::fit_groups(&self.base, &mut page);
         let scene = accent_drawio::scene_with(&page, &sheet.ctx);
         let cache = match self.shown {
             None => sheet_cache.carried(&sheet.scene.prims, &scene.prims),
@@ -92,6 +96,7 @@ impl Live {
         };
         self.bounds = scene.prims.iter().map(|p| p.bounds()).collect();
         self.scene = scene;
+        self.page = page;
         self.cache = cache;
         self.shown = Some(edit.clone());
     }

@@ -606,7 +606,7 @@ impl DiagramTab {
     }
 
     pub fn select_all(self: &Rc<Self>) {
-        let ids = self.view.sheet().map(|s| s.top_level()).unwrap_or_default();
+        let ids = self.view.sheet().map(|s| s.all()).unwrap_or_default();
         self.select(ids);
     }
 

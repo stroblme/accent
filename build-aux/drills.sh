@@ -403,8 +403,8 @@ drill_diagram_file_picture() {
 		'bench diagram web embed pictures=1'
 }
 
-# What real clicks and bands select among a diagram's groups, as draw.io selects (DESIGN.md,
-# Diagram).
+# What real clicks and bands select among a diagram's groups, as draw.io selects, and how the
+# groups fit what they hold (DESIGN.md, Diagram).
 drill_diagram_select() {
 	launch 60 ACCENT_BENCH_DIAGRAM=select:select.drawio >"$dir/select"
 	has "$dir/select" \
@@ -423,9 +423,17 @@ drill_diagram_select() {
 		'bench diagram select first click p1 ["p"]' \
 		'bench diagram select first click t1 ["t1"]' \
 		'bench diagram select first click xl ["xl"]' \
+		'bench diagram select click t1 again ["tb"]' \
+		'bench diagram select tb frame (300.0, 280.0, 200.0, 60.0)' \
+		'bench diagram select click t1 a third time ["t1"]' \
+		'bench diagram select select all ["g", "c", "d", "G", "g1", "c1", "c2", "g2", "d1", "d2", "p", "p1", "tb", "t1", "t2", "s1", "s2", "x", "xl"]' \
 		'bench diagram select open inside g Some("g")' \
 		'bench diagram select paste inside g [Some("g")] open=Some("g")' \
-		'bench diagram select paste outside [Some("1")] open=None'
+		'bench diagram select paste outside [Some("1")] open=None' \
+		'bench diagram select fit move c g=Some("0,40,240,100") c=Some("0,40,80,60") d=Some("160,0,80,60")' \
+		'bench diagram select fit delete d g=Some("0,50,130,90") c=Some("0,30,80,60") d=None' \
+		'bench diagram select fit delete the rest g=None c=None d=None' \
+		'bench diagram select fit move tb tb=Some("0,0,0,0") t1=Some("320,280,80,60")'
 }
 
 # Ctrl+V with a browser's HTML on the clipboard, and Paste as Plain Text, in a note (beside its code

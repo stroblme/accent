@@ -102,8 +102,14 @@ impl DiagramView {
         // dashed one and all of them in a solid box round the lot.
         let faded = theme::at(accent, FADED_ALPHA);
         // The group the selection is inside, dashed in the faded accent: quieter than what is
-        // selected (user decision 2026-11-15).
-        if let Some((r, rotation)) = sheet.open_group(&selection).and_then(|g| framed(&g)) {
+        // selected (user decision 2026-11-15), and fitted live to what is dragged in it.
+        let open = sheet.open_group(&selection);
+        let fitted = |g: &str| {
+            let page = &live?.page;
+            let r = accent_drawio::edit::bounds(page, page.cell(g)?)?;
+            Some((r.grow(sheet.padding(g)), sheet.rotation(g)))
+        };
+        if let Some((r, rotation)) = open.and_then(|g| fitted(&g).or_else(|| framed(&g))) {
             turned(&r, rotation, true, &faded);
         }
         let several = selection.len() > 1;
@@ -171,7 +177,7 @@ impl DiagramView {
             && !sheet.is_pinned(id)
             && !moving
         {
-            for h in Handle::ALL.into_iter().filter(|_| !sheet.is_edge(id)) {
+            for h in Handle::ALL.into_iter().filter(|_| sheet.is_resizable(id)) {
                 square(rotate(h.at(&r), r.centre(), rotation));
             }
             // The rotate handle, a ring beyond the top-right corner, turned with the frame.
