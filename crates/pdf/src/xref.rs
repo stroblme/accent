@@ -7,6 +7,10 @@ use std::collections::{HashMap, HashSet};
 use crate::lex::{Lexed, Lexer, Stop};
 use crate::{Dict, Error, Object, Result, Source};
 
+/// The most indirect objects a file holds, which ISO 32000-1 (Annex C, Table C.1) asks readers
+/// to accommodate and writers to remain within.
+const MAX_OBJECTS: usize = 8_388_607;
+
 /// Where an object is.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum Entry {
@@ -70,6 +74,11 @@ pub(crate) fn read(src: &dyn Source) -> Result<Xref> {
 
 fn read_sections(src: &dyn Source) -> Result<Xref> {
     let startxref = startxref(src)?;
+    // An object takes more than a byte of the file, even packed into an object stream, so its
+    // sections together name no more objects than the file has bytes, where 1166 PDFs of TeX's
+    // and other documentation named one in 60 at most (2026-11-18). A few bytes inflating to a
+    // million rows are refused before any is read.
+    let mut budget = src.size().min(MAX_OBJECTS as u64) as usize;
     let mut entries = HashMap::new();
     let mut newest = None;
     let mut seen = HashSet::new();
@@ -78,14 +87,14 @@ fn read_sections(src: &dyn Source) -> Result<Xref> {
         if !seen.insert(at) {
             return Err(Error::Broken("the xref's /Prev chain loops".into()));
         }
-        let section = section(src, at)?;
+        let section = section(src, at, &mut budget)?;
         let mut revision: HashMap<u32, Entry> = HashMap::new();
         for (num, entry) in section.entries {
             revision.entry(num).or_insert(entry);
         }
         // A hybrid file's hidden xref stream: what its table leaves out or frees for older readers.
         if let Some(stm) = section.dict.get(b"XRefStm").and_then(Object::as_int) {
-            let hidden = section_at(src, stm)?;
+            let hidden = section_at(src, stm, &mut budget)?;
             for (num, entry) in hidden.entries {
                 let slot = revision.entry(num).or_insert(entry);
                 if *slot == Entry::Free {
@@ -137,13 +146,14 @@ struct Section {
     stream: bool,
 }
 
-fn section_at(src: &dyn Source, at: i64) -> Result<Section> {
+fn section_at(src: &dyn Source, at: i64, budget: &mut usize) -> Result<Section> {
     let at = u64::try_from(at).map_err(|_| Error::Broken("negative xref offset".into()))?;
-    section(src, at)
+    section(src, at, budget)
 }
 
-/// The section at `at`: a table and its trailer, or an xref stream.
-fn section(src: &dyn Source, at: u64) -> Result<Section> {
+/// The section at `at`: a table and its trailer, or an xref stream. Its rows are taken from
+/// `budget`, the most the xref may still name.
+fn section(src: &dyn Source, at: u64, budget: &mut usize) -> Result<Section> {
     enum Head {
         Table(Vec<(u32, Entry)>, Dict),
         Stream(Dict, usize),
@@ -162,6 +172,8 @@ fn section(src: &dyn Source, at: u64) -> Result<Section> {
     })?;
     let (dict, data) = match head {
         Head::Table(entries, dict) => {
+            // A table's rows are bytes of the file itself, so they are charged once read.
+            charge(budget, entries.len())?;
             return Ok(Section {
                 entries,
                 dict,
@@ -179,12 +191,20 @@ fn section(src: &dyn Source, at: u64) -> Result<Section> {
     };
     let raw = src.read_vec(data, length)?;
     let data = crate::filter::decode(&raw, dict.get(b"Filter"), dict.get(b"DecodeParms"))?;
-    let entries = stream_entries(&dict, &data)?;
+    let entries = stream_entries(&dict, &data, budget)?;
     Ok(Section {
         entries,
         dict,
         stream: true,
     })
+}
+
+/// `rows` taken from `budget`, or the xref is not the file's.
+fn charge(budget: &mut usize, rows: usize) -> Result<()> {
+    *budget = budget
+        .checked_sub(rows)
+        .ok_or_else(|| Error::Broken("the xref names more objects than the file holds".into()))?;
+    Ok(())
 }
 
 /// A table's subsections after `xref`, and the trailer dictionary after them. Lines of 19 or 21
@@ -219,8 +239,9 @@ fn table(lex: &mut Lexer) -> Lexed<(Vec<(u32, Entry)>, Dict)> {
     }
 }
 
-/// An xref stream's entries: `/W` field widths over the `/Index` ranges.
-fn stream_entries(dict: &Dict, data: &[u8]) -> Result<Vec<(u32, Entry)>> {
+/// An xref stream's entries: `/W` field widths over the `/Index` ranges. Every row the data
+/// holds is taken from `budget` before any is read, listed or not.
+fn stream_entries(dict: &Dict, data: &[u8], budget: &mut usize) -> Result<Vec<(u32, Entry)>> {
     let broken = |what: &str| Error::Broken(format!("xref stream {what}"));
     let ints = |key: &[u8]| -> Option<Vec<i64>> {
         dict.get(key)?
@@ -235,11 +256,13 @@ fn stream_entries(dict: &Dict, data: &[u8]) -> Result<Vec<(u32, Entry)>> {
     };
     let size = dict.get(b"Size").and_then(Object::as_int).unwrap_or(0);
     let index = ints(b"Index").unwrap_or_else(|| vec![0, size]);
-    if index.len() % 2 != 0 || w.iter().sum::<usize>() == 0 {
+    let width = w.iter().sum::<usize>();
+    if index.len() % 2 != 0 || width == 0 {
         return Err(broken("/Index"));
     }
+    charge(budget, data.len() / width)?;
     let field = |bytes: &[u8]| bytes.iter().fold(0u64, |v, &b| v << 8 | u64::from(b));
-    let mut rows = data.chunks_exact(w.iter().sum());
+    let mut rows = data.chunks_exact(width);
     let mut entries = Vec::new();
     for range in index.chunks(2) {
         let (Ok(first), Ok(count)) = (u32::try_from(range[0]), u64::try_from(range[1])) else {

@@ -335,6 +335,48 @@ fn loops_are_errors_not_hangs() {
     ));
 }
 
+/// An xref stream of `rows` objects from `first` on, each a one-byte row (`/W [0 1 0]`), which
+/// compress to a few bytes a thousand.
+fn one_byte_rows(b: &mut Build, num: u32, first: u32, rows: usize) -> u64 {
+    let at = b.out.len() as u64;
+    let z = miniz_oxide::deflate::compress_to_vec_zlib(&vec![0; rows], 9);
+    let prev = b.last.map_or(String::new(), |p| format!("/Prev {p}"));
+    let dict = format!(
+        "/Type/XRef/W[0 1 0]/Index[{first} {rows}]/Size {}/Filter/FlateDecode/Root 1 0 R{prev}",
+        first as usize + rows
+    );
+    b.stream(num, &dict, &z);
+    b.last = Some(at);
+    at
+}
+
+/// An xref names no more objects than the file has bytes, in one stream or in its sections
+/// together, so that a few compressed bytes cannot ask for a million entries.
+#[test]
+fn an_xref_names_no_more_objects_than_the_file_has_bytes() {
+    let mut b = Build::new();
+    b.obj(1, CATALOG);
+    let at = one_byte_rows(&mut b, 2, 3, 1 << 16);
+    let file = b.end(at);
+    assert!(file.len() < 1 << 10, "{}", file.len());
+    assert!(matches!(open(file), Err(Error::Broken(_))));
+
+    // Twenty revisions, each of fewer objects than the file has bytes.
+    let chain = |each: usize| {
+        let mut b = Build::new();
+        b.obj(1, CATALOG);
+        let mut at = 0;
+        for i in 0..20 {
+            at = one_byte_rows(&mut b, 2 + i, 100 + i * each as u32, each);
+        }
+        b.end(at)
+    };
+    let (few, many) = (chain(100), chain(2000));
+    assert!(20 * 100 < few.len() && 2000 < many.len() && many.len() < 20 * 2000);
+    assert!(open(few).is_ok());
+    assert!(matches!(open(many), Err(Error::Broken(_))));
+}
+
 /// Whatever a damaged file holds, reading it ends: cut short at every 7th byte, or one byte
 /// flipped at every 5th.
 #[test]
