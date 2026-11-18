@@ -712,6 +712,71 @@ fn list_tags_counts_only_the_files_it_shows() {
     c.close();
 }
 
+/// What a file a symlink brings in from outside writes is in no list or count: its highlights,
+/// the notes it alone links to, its links in, its declarations and its templates; and a link
+/// to it leads nowhere.
+#[test]
+fn mcp_counts_and_quotes_only_the_files_it_shows() {
+    let scratch = Scratch::new("counts");
+    let write = |rel: &str, text: &str| std::fs::write(scratch.dir.join(rel), text).unwrap();
+    write("vault/p.pdf", "%PDF-1.4\n%%EOF\n");
+    write(
+        "vault/z.md",
+        "[[p.pdf#page=2&selection=0,0,0,4|mine]]\n[[Later]]\n",
+    );
+    write(
+        "outside/hl.md",
+        "[[p.pdf#page=1&selection=0,0,0,5|secret quote]]\n[[Hidden]]\n[[a]]\n",
+    );
+    write("vault/y.md", "[[secret]]\n");
+    write("vault/lib.rs", "fn tally() -> u8 {\n    1\n}\n");
+    write("outside/ext.rs", "fn tally() -> u8 {\n    2\n}\n");
+    write("vault/Templates/Plain.md", "# Plain\n");
+    write("outside/tpl.md", "# Ext\n");
+    std::os::unix::fs::symlink(
+        scratch.dir.join("outside/tpl.md"),
+        scratch.dir.join("vault/Templates/Ext.md"),
+    )
+    .unwrap();
+    let mut c = Client::start(&scratch, &[]);
+    c.initialize();
+
+    // The external highlight sorts first, and its quote stays with it.
+    let (said, _) = c.call("pdf_annotations", json!({"path": "p.pdf"}));
+    assert_eq!(
+        said[0],
+        r#"[{"line":1,"note":"z.md","page":2,"quote":"mine"}]"#
+    );
+    // `Hidden` sorts first too, and the one listed is the only one there is.
+    let (said, _) = c.call("missing_notes", json!({"limit": 1}));
+    assert_eq!(
+        said,
+        [r#"[{"linked_from":[{"line":2,"path":"z.md"}],"path":"Later.md"}]"#]
+    );
+    let (said, _) = c.call("explore", json!({"query": "a.md"}));
+    assert!(
+        said[0].contains("Backlinks:\n  `b.md`:2  see [[a#Part]]\n```"),
+        "{}",
+        said[0]
+    );
+    let (said, _) = c.call("explore", json!({"query": "y.md"}));
+    assert!(
+        said[0].contains("Links out:\n  1 → secret (missing)\n"),
+        "{}",
+        said[0]
+    );
+    let (said, _) = c.call("explore", json!({"query": "tally"}));
+    assert!(said[0].contains("- `tally` fn (lib.rs:1)"), "{}", said[0]);
+    assert!(!said[0].contains("declarations share"), "{}", said[0]);
+    let (said, error) = c.call(
+        "create_note_from_template",
+        json!({"template": "Templates/Plain.md"}),
+    );
+    assert!(error && said[0].contains("Templates/Plain.md"), "{said:?}");
+    assert!(!said[0].contains("Ext.md"), "{said:?}");
+    c.close();
+}
+
 /// Explore ranks linked notes, returns whole cards for explicit paths, and respects its budget.
 #[test]
 fn explore_ranks_by_links_and_answers_a_path_with_its_card() {

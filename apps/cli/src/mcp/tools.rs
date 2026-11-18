@@ -681,8 +681,14 @@ impl Server {
         self.blocking(move |s| {
             let partial = s.ready.wait();
             let missing = s.vault.missing_notes().map_err(fail)?;
+            // The links shown notes write alone, so that a note only an external symlink target
+            // links to is not listed as missing.
+            let mut shown = HashMap::new();
             let mut sources: HashMap<String, Vec<(String, usize)>> = HashMap::new();
             for (src, target, at) in s.vault.unresolved_links().map_err(fail)? {
+                if !*shown.entry(src.clone()).or_insert_with(|| s.shown(&src)) {
+                    continue;
+                }
                 let held = sources
                     .entry(markdown::link_key(&linked_path(&target)))
                     .or_default();
@@ -690,10 +696,13 @@ impl Server {
                     held.push((src, at as usize));
                 }
             }
+            let missing: Vec<&String> = missing
+                .iter()
+                .filter(|rel| sources.contains_key(&markdown::link_key(rel)) && s.shown(rel))
+                .collect();
             let limit = a.limit.unwrap_or(20).min(500);
             let rows: Vec<Value> = missing
                 .iter()
-                .filter(|rel| s.shown(rel))
                 .take(limit)
                 .map(|rel| {
                     let from = sources.remove(&markdown::link_key(rel)).unwrap_or_default();
@@ -727,7 +736,15 @@ impl Server {
         self.blocking(move |s| {
             let rel = s.inside(&a.path)?;
             let partial = s.ready.wait();
-            let links = s.vault.pdf_links(&rel).map_err(fail)?;
+            // Only the highlights shown notes write, picked before the quotes are split from
+            // the notes below, so that each quote stays with its own.
+            let links: Vec<_> = s
+                .vault
+                .pdf_links(&rel)
+                .map_err(fail)?
+                .into_iter()
+                .filter(|l| s.shown(&l.src_rel_path))
+                .collect();
             let quotes: Vec<(usize, Option<String>)> = links
                 .iter()
                 .map(|l| (l.page + 1, l.alias.clone()))
@@ -844,7 +861,13 @@ impl Server {
                 }
                 None => {
                     let Some(target) = s.vault.template_target(&a.template).map_err(fail)? else {
-                        let templates = s.vault.templates().map_err(fail)?;
+                        let templates: Vec<String> = s
+                            .vault
+                            .templates()
+                            .map_err(fail)?
+                            .into_iter()
+                            .filter(|t| s.shown(t))
+                            .collect();
                         return Err(format!(
                             "{} says nowhere its notes go: give a path. The templates are \
                              {templates:?}",

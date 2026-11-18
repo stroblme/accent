@@ -649,7 +649,8 @@ fn card(s: &Shared, rel: &str, f: &Found, cap: usize, whole: bool) -> Result<Str
         .into_iter()
         .filter(|l| l.kind != LinkKind::External)
         .map(|l| {
-            let to = match &l.path {
+            // A link into an external symlink target leads nowhere shown, as `resolve_link` says.
+            let to = match l.path.as_ref().filter(|p| s.shown(p)) {
                 Some(p) => format!("`{p}`"),
                 None => format!("{} (missing)", l.target),
             };
@@ -721,7 +722,14 @@ fn outlined(rel: &str) -> bool {
 
 /// Return up to `max` notes linking to `rel`, with source lines.
 fn backlinks(s: &Shared, rel: &str, out: &mut String, max: usize) -> Result<(), String> {
-    let rows = s.vault.backlinks(rel).map_err(fail)?;
+    // The shown notes' links alone, so that the count of those left out is theirs too.
+    let rows: Vec<_> = s
+        .vault
+        .backlinks(rel)
+        .map_err(fail)?
+        .into_iter()
+        .filter(|b| s.shown(&b.src_rel_path))
+        .collect();
     let total = rows.len();
     let at = rows
         .into_iter()

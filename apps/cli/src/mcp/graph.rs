@@ -60,12 +60,15 @@ pub(super) fn seeds(s: &Shared, names: &[String]) -> Result<(Vec<Seed>, Vec<Stri
         if exact.is_empty() {
             missing.push(name.clone());
         }
-        // Every declaration of the name in its language counts, whatever its container: a call
-        // reaches any.
-        let all = s
+        // Every shown declaration of the name in its language counts, whatever its container: a
+        // call reaches any.
+        let all: Vec<CodeSymbol> = s
             .vault
             .symbols_named(&[bare.to_string()], "", 50)
-            .map_err(fail)?;
+            .map_err(fail)?
+            .into_iter()
+            .filter(|d| s.shown(&d.rel_path))
+            .collect();
         for sym in exact.into_iter().take(DEFS) {
             if !out.iter().any(|o| same(&o.sym, &sym)) {
                 let defs = all.iter().filter(|d| same_lang(d, &sym)).count();
