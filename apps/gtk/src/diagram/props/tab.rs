@@ -7,7 +7,7 @@ use accent_drawio::CellId;
 use adw::prelude::*;
 use gtk::glib;
 
-use super::{Change, Clip, Placed, Target, effects, ends, number};
+use super::{Change, Clip, Placed, Shades, Target, effects, ends, number};
 use crate::diagram::view::Edit;
 use crate::diagram::{DiagramTab, Tool};
 
@@ -61,6 +61,7 @@ impl DiagramTab {
                 Some(first) => Target::Cells {
                     style: first.style.resolve(first.edge),
                     raw: first.style.to_string(),
+                    shades: Shades::of(&cells),
                     count: cells.len(),
                     vertices: cells.iter().any(|c| c.vertex),
                     edges: cells.iter().any(|c| c.edge),

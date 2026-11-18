@@ -8,7 +8,9 @@ use std::rc::Rc;
 use accent_drawio::{Color, Resolved};
 use adw::prelude::*;
 
-use super::{Change, ColourRow, Props, choose, colour, combo, entry_row, listed, owned, spin};
+use super::{
+    Change, ColourRow, Props, Shades, choose, colour, combo, entry_row, listed, owned, spin,
+};
 
 /// draw.io's arrow heads (`Format.addLineMarkerItems`): the style value, whether the head is
 /// filled (`startFill`/`endFill`), and a label. The circle is filled at the start and open at
@@ -322,9 +324,9 @@ impl Line {
         );
     }
 
-    /// Show the first cell's `style`, its line read from `stroke_key`, the route and the heads
-    /// where `edges` are selected and the perimeter where `vertices` are alone.
-    pub(super) fn fill(&self, style: &Resolved, stroke_key: &str, vertices: bool, edges: bool) {
+    /// Show the first cell's `style`, the line's colour as `shades` has it, the route and the
+    /// heads where `edges` are selected and the perimeter where `vertices` are alone.
+    pub(super) fn fill(&self, style: &Resolved, shades: &Shades, vertices: bool, edges: bool) {
         self.perimeter.set_visible(vertices && !edges);
         let arrow: [&gtk::Widget; 8] = [
             self.waypoints.upcast_ref(),
@@ -361,7 +363,7 @@ impl Line {
             .set_value(style.num("sourcePerimeterSpacing", 0.0));
         self.end_spacing
             .set_value(style.num("targetPerimeterSpacing", 0.0));
-        self.stroke.fill(style.color(stroke_key));
+        self.stroke.fill(shades.stroke);
         self.opacity.set_value(style.num("strokeOpacity", 100.0));
         self.stroke_width.set_value(style.num("strokeWidth", 1.0));
         // A pattern draw.io's menu does not list is Custom, its numbers in the row below.

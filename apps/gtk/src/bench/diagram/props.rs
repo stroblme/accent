@@ -54,6 +54,65 @@ pub(super) fn props(app: &Rc<App>, rel: &str) {
             }
         };
         let style = |id: &str| tab.file().pages[0].cell(id).map(|c| c.style.to_string());
+
+        // A colour row whose cells differ shows a hatched swatch with no colour, its tooltip
+        // Mixed, while a shape's and an arrow's fill is the shape's alone (user decision
+        // 2026-11-18). A colour picked there reaches every cell, the first one's own colour too,
+        // as the dialog hands it over, and one Undo takes it back.
+        let swatch = |title: &str| {
+            let row = find_widget(&pane, &|w| {
+                w.downcast_ref::<adw::PreferencesRow>()
+                    .is_some_and(|r| r.title() == title)
+            })?;
+            find_widget(&row, &|w| w.is::<gtk::ColorDialogButton>())
+                .and_downcast::<gtk::ColorDialogButton>()
+        };
+        let swatches = || {
+            ["Fill", "Line Colour", "Font Colour"].map(|title| {
+                let b = swatch(title)?;
+                let tip = b.tooltip_text().map(|t| t.to_string());
+                Some((b.is_mapped(), b.has_css_class("accent-mixed"), tip))
+            })
+        };
+        let fills = || {
+            ["a", "b"].map(|id| {
+                let file = tab.file();
+                let cell = file.pages[0].cell(id)?;
+                cell.style.get("fillColor").map(str::to_string)
+            })
+        };
+        tab.select(vec!["a".to_string(), "b".to_string()]);
+        println!("bench diagram props swatches a+b {:?}", swatches());
+        if let Ok(path) = std::env::var("ACCENT_BENCH_DIAGRAM_SHOT") {
+            use accent_core::config::Theme;
+            for (name, theme) in [("light", Theme::Light), ("dark", Theme::Dark)] {
+                crate::theme::apply(theme);
+                glib::timeout_future(Duration::from_millis(400)).await;
+                let path = Path::new(&path).with_extension(format!("mixed-{name}.png"));
+                println!(
+                    "bench diagram props shot mixed-{name} {}",
+                    shoot(app.window.upcast_ref(), &path)
+                );
+            }
+            crate::theme::apply(Theme::Light);
+        }
+        if let Some(fill) = swatch("Fill") {
+            fill.set_rgba(&gdk::RGBA::parse("#dae8fc").expect("a colour"));
+        }
+        println!(
+            "bench diagram props swatch picked fills={:?} {:?}",
+            fills(),
+            swatches()
+        );
+        tab.undo();
+        println!(
+            "bench diagram props swatch undone fills={:?} {:?}",
+            fills(),
+            swatches()
+        );
+        tab.select(vec!["a".to_string(), "e".to_string()]);
+        println!("bench diagram props swatches a+e {:?}", swatches());
+
         tab.select(vec!["a".to_string()]);
         println!("bench diagram props a rows={:?}", rows());
         tab.nudge(30.0, 0.0);

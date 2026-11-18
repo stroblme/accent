@@ -29,6 +29,8 @@ pub enum Target {
     Cells {
         style: Resolved,
         raw: String,
+        /// What the colour rows show, each over the cells it applies to.
+        shades: Shades,
         count: usize,
         vertices: bool,
         edges: bool,
@@ -50,6 +52,62 @@ pub enum Target {
         size: (f64, f64),
         background: Option<Color>,
     },
+}
+
+/// One colour row's look over the cells it applies to: the first one's colour, and whether
+/// another one's differs from it, `none` included.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Shade {
+    pub colour: Option<Color>,
+    pub mixed: bool,
+}
+
+/// What each colour row shows.
+#[derive(Debug, Default)]
+pub struct Shades {
+    pub fill: Shade,
+    pub gradient: Shade,
+    pub stroke: Shade,
+    pub font: Shade,
+    pub label_background: Shade,
+    pub label_border: Shade,
+}
+
+impl Shades {
+    /// Over `cells`: the fill over those that take one and the gradient over those of them that
+    /// are no picture, whose fill and line are its background and border, as draw.io's panel has
+    /// them (`edit::set_styles` writes them so), and the line and the label's colours over every
+    /// cell.
+    pub fn of(cells: &[&accent_drawio::Cell]) -> Shades {
+        let styles: Vec<(Resolved, bool)> = (cells.iter())
+            .map(|c| (c.style.resolve(c.edge), c.takes_fill()))
+            .collect();
+        // The key each cell reads, by whether it takes a fill and is a picture.
+        let shade = |key: fn(bool, bool) -> Option<&'static str>| {
+            let mut colours = styles.iter().filter_map(|(style, fills)| {
+                Some(style.color(key(*fills, style.shape() == "image")?))
+            });
+            let Some(colour) = colours.next() else {
+                return Shade::default();
+            };
+            let mixed = colours.any(|c| c != colour);
+            Shade { colour, mixed }
+        };
+        Shades {
+            fill: shade(|fills, picture| match picture {
+                true => fills.then_some("imageBackground"),
+                false => fills.then_some("fillColor"),
+            }),
+            gradient: shade(|fills, picture| (fills && !picture).then_some("gradientColor")),
+            stroke: shade(|_, picture| match picture {
+                true => Some("imageBorder"),
+                false => Some("strokeColor"),
+            }),
+            font: shade(|_, _| Some("fontColor")),
+            label_background: shade(|_, _| Some("labelBackgroundColor")),
+            label_border: shade(|_, _| Some("labelBorderColor")),
+        }
+    }
 }
 
 /// One change the pane asks for.
@@ -175,11 +233,25 @@ impl ColourRow {
         }
     }
 
-    fn fill(&self, colour: Option<Color>) {
-        self.switch.set_active(colour.is_some());
-        self.button.set_visible(colour.is_some());
-        self.button
-            .set_rgba(&super::paint::rgba(colour.unwrap_or(self.blank)));
+    /// Show `shade`: its colour, or where the cells differ a hatched swatch with no colour and
+    /// the tooltip Mixed, as GTK's check button shows an inconsistent state, the switch on since
+    /// some cell has a colour (user decision 2026-11-18).
+    fn fill(&self, shade: Shade) {
+        let on = shade.colour.is_some() || shade.mixed;
+        self.switch.set_active(on);
+        self.button.set_visible(on);
+        let mut rgba = super::paint::rgba(shade.colour.unwrap_or(self.blank));
+        // Clear, which a dialog without alpha never hands back, so any colour picked is a change
+        // and reaches every cell, the first one's own colour too.
+        if shade.mixed {
+            rgba.set_alpha(0.0);
+        }
+        self.button.set_rgba(&rgba);
+        match shade.mixed {
+            true => self.button.add_css_class("accent-mixed"),
+            false => self.button.remove_css_class("accent-mixed"),
+        }
+        self.button.set_tooltip_text(shade.mixed.then_some("Mixed"));
     }
 
     /// What the row says now, as a style value: the colour, or `none`.
@@ -780,6 +852,7 @@ impl Props {
             Target::Cells {
                 style,
                 raw,
+                shades,
                 count,
                 vertices,
                 edges,
@@ -807,13 +880,9 @@ impl Props {
                         _ => paste.set_visible(!geometry.is_some_and(|(_, pinned)| pinned)),
                     }
                 }
-                // A picture's fill and line are its background and border, as draw.io's panel
-                // has them (`edit::set_styles` writes them so), with no gradient.
+                // A picture's fill and line are its background and border ([`Shades::of`]), with
+                // no gradient.
                 let picture = style.shape() == "image";
-                let (fill_key, stroke_key) = match picture {
-                    true => ("imageBackground", "imageBorder"),
-                    false => ("fillColor", "strokeColor"),
-                };
                 // An arrow's line is drawn from the same keys as a shape's outline, so every cell
                 // shows the line's colour, width and dash; the fill only where a cell takes one,
                 // the corners and the turn for shapes (an arrow's corners are its line style),
@@ -825,10 +894,10 @@ impl Props {
                 self.rounded.set_visible(*vertices);
                 self.divider.set_visible(*swimlane);
                 self.rotation.set_visible(*vertices);
-                self.line.fill(style, stroke_key, *vertices, *edges);
-                self.text.fill(style, *vertices);
-                self.fill.fill(style.color(fill_key));
-                self.gradient.fill(style.color("gradientColor"));
+                self.line.fill(style, shades, *vertices, *edges);
+                self.text.fill(style, shades, *vertices);
+                self.fill.fill(shades.fill);
+                self.gradient.fill(shades.gradient);
                 self.fill_opacity.set_value(style.num("fillOpacity", 100.0));
                 self.rounded.set_active(style.flag("rounded", false));
                 // The corner as the first cell's shape reads `arcSize`: a folder's a share of its
@@ -889,7 +958,10 @@ impl Props {
                 self.size.set_visible(false);
                 self.default_style.set_visible(false);
                 self.page_name.set_text(name);
-                self.background.fill(*background);
+                self.background.fill(Shade {
+                    colour: *background,
+                    mixed: false,
+                });
                 self.page_width.set_value(size.0);
                 self.page_height.set_value(size.1);
             }

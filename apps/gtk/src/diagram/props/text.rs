@@ -8,7 +8,9 @@ use std::rc::Rc;
 use accent_drawio::{Color, Resolved};
 use adw::prelude::*;
 
-use super::{Change, ColourRow, Props, choose, colour, combo, found, owned, pick, spin, style};
+use super::{
+    Change, ColourRow, Props, Shades, choose, colour, combo, found, owned, pick, spin, style,
+};
 
 /// draw.io's fonts (`Menus.defaultFonts`).
 const FONTS: [&str; 9] = [
@@ -206,17 +208,17 @@ impl Text {
         );
     }
 
-    /// Show the first cell's `style`, a shape's own rows where `vertices` are selected.
-    pub(super) fn fill(&self, style: &Resolved, vertices: bool) {
+    /// Show the first cell's `style`, the colours as `shades` has them, and a shape's own rows
+    /// where `vertices` are selected.
+    pub(super) fn fill(&self, style: &Resolved, shades: &Shades, vertices: bool) {
         // An arrow's label sits on its line, at no size to wrap to or turn across.
         self.label_position.set_visible(vertices);
         self.wrap.set_visible(vertices);
         self.vertical.set_visible(vertices);
         self.font_size.set_value(style.num("fontSize", 12.0));
-        self.font_colour.fill(style.color("fontColor"));
-        self.label_background
-            .fill(style.color("labelBackgroundColor"));
-        self.label_border.fill(style.color("labelBorderColor"));
+        self.font_colour.fill(shades.font);
+        self.label_background.fill(shades.label_background);
+        self.label_border.fill(shades.label_border);
         self.text_opacity.set_value(style.num("textOpacity", 100.0));
         let sides = [
             "spacing",
