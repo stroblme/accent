@@ -22,6 +22,7 @@ For the full list, choose **Keyboard Shortcuts** from the main menu or press `Ct
 | Close Tab | `Ctrl+W` |
 | Toggle Sidebar | `F9` |
 | Presentation Mode | `F5` |
+| Laser Pointer, while presenting | `L` |
 
 Shortcuts for a [PDF](pdf.md), [diagram](diagrams.md), [notebook](notebooks.md), [terminal](terminals.md) or [debug session](debugging.md) depend on what is in front.
 The in-app shortcut list shows those keys too.
