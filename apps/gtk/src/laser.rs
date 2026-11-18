@@ -15,10 +15,9 @@ use crate::widgets::Debounce;
 
 /// Xournal++'s laser highlighter: red at its highlighters' alpha of 120 of 255.
 const COLOUR: gdk::RGBA = gdk::RGBA::new(1.0, 0.0, 0.0, 120.0 / 255.0);
-/// Its medium width, 8.5 pt, which Xournal++ draws at the page's zoom. A page presented to fit
-/// the screen shows at about 2.5 px a point (an A4 slide on a 1080p screen 1.8, a Beamer one
-/// 4.2), so the strokes here, drawn on the screen rather than the page, are 21 px wide.
-const WIDTH: f32 = 8.5 * 2.5;
+/// How wide the strokes are on the screen (user decision 2026-11-18), where Xournal++ draws its
+/// medium 8.5 pt at the page's zoom.
+const WIDTH: f32 = 12.0;
 /// How long the strokes stay once the last one ends, Xournal++'s `laserPointerFadeOutTime`.
 const HOLD: Duration = Duration::from_millis(500);
 /// How long they then take to fade out: Xournal++'s 25 of 255 every 50 ms, evenly.
@@ -129,6 +128,12 @@ impl Laser {
     pub fn strokes(&self) -> Vec<usize> {
         let strokes = self.painter.imp().strokes.borrow();
         strokes.iter().map(Vec::len).collect()
+    }
+
+    /// Whether a press is drawing a stroke now, for a drill.
+    #[cfg(feature = "bench")]
+    pub fn pressed(&self) -> bool {
+        self.drag.is_active()
     }
 
     /// How strong the strokes are drawn, for a drill: 1 until they fade.

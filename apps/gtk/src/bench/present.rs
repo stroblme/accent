@@ -454,19 +454,23 @@ async fn stroke(app: &Rc<App>, kind: &str) {
     super::git::xtest_now(&path).await;
     glib::timeout_future(Duration::from_millis(100)).await;
     moment(app, kind, "drawing", Some(plain));
-    super::git::xtest_now("up").await;
+    // The release and a press 750 ms after it, into the 510 ms fade that begins 500 ms after it:
+    // one `xtest.py` times the two, however long it takes to start, and the moments between are
+    // read off the laser as it hears them.
+    let input = glib::spawn_future_local(super::git::xtest_now("up; sleep 0.75; down"));
+    let pressed = |down: bool| move || app.laser.get().is_some_and(|l| l.pressed() == down);
+    until("laser", "release", 5_000, pressed(false)).await;
     let released = Instant::now();
     glib::timeout_future(Duration::from_millis(100)).await;
     moment(app, kind, "held", Some(plain));
-    // The fade's first frames, half a second after the release.
     let fading = || app.laser.get().is_some_and(|laser| laser.strength() < 1.0);
     until("laser", "fade", 3_000, fading).await;
     let held = released.elapsed().as_millis();
     println!("bench laser detail {kind} held_ms={held}");
     moment(app, kind, "fading", None);
-    super::git::xtest_now("down").await;
-    glib::timeout_future(Duration::from_millis(50)).await;
+    until("laser", "press", 3_000, pressed(true)).await;
     moment(app, kind, "again", Some(plain));
+    let _ = input.await;
     super::git::xtest_now("up").await;
     glib::timeout_future(Duration::from_millis(1500)).await;
     moment(app, kind, "gone", Some(plain));

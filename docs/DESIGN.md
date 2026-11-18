@@ -2385,7 +2385,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
   What is presented has the keyboard, from F5 and from each tab a held `Ctrl+Tab` steps to — the rendered note, a source file, a PDF, a diagram, an image, a shell — so Space, Page Down, the arrows, Home and End read it as they do outside presentation and a shell takes typing; F5 and `Esc` still leave it, ahead of a presented shell too, which gets neither, though `Esc` closes the find bar first while it is up.
   Leaving gives the keyboard back to the document in front.
 - `L` puts a laser pointer over whatever is presented and takes it away again, as leaving presentation does, Xournal++'s laser highlighter (user decision 2026-11-18).
-  A press and drag draws a translucent red stroke 21 px wide over the pane and never on the document, which meanwhile neither selects, follows a link nor moves its page, though the wheel and the keys still read it.
+  A press and drag draws a translucent red stroke 12 px wide over the pane and never on the document, which meanwhile neither selects, follows a link nor moves its page, though the wheel and the keys still read it.
   The pointer keeps the document's own cursor, and the strokes stay half a second after the last one ends before they fade out together, unless a press brings them all back first.
   Where the keyboard types the letter, in a presented shell or source file, the find bar or a dialog, `L` types it and the palette's Laser Pointer puts the pointer up instead.
 - It does not resize the window: fullscreen stays `F11`'s, so the two compose.
