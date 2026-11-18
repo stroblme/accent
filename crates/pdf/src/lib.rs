@@ -136,6 +136,10 @@ pub enum Error {
     /// loop. A writer must not append to such a file.
     #[error("damaged PDF: {0}")]
     Broken(String),
+    /// An xref naming more objects than the file can hold, which no writer makes and a reader
+    /// taking at its word would hold an entry for each of: not repaired, as a damaged one is.
+    #[error("refused PDF: its xref names more objects than the file can hold")]
+    TooManyObjects,
     #[error("unsupported PDF: {0}")]
     Unsupported(String),
 }

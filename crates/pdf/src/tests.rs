@@ -351,7 +351,8 @@ fn one_byte_rows(b: &mut Build, num: u32, first: u32, rows: usize) -> u64 {
 }
 
 /// An xref names no more objects than the file has bytes, in one stream or in its sections
-/// together, so that a few compressed bytes cannot ask for a million entries.
+/// together, so that a few compressed bytes cannot ask for a million entries. Such a file is not
+/// rebuilt from its objects either, as a damaged one is.
 #[test]
 fn an_xref_names_no_more_objects_than_the_file_has_bytes() {
     let mut b = Build::new();
@@ -359,7 +360,9 @@ fn an_xref_names_no_more_objects_than_the_file_has_bytes() {
     let at = one_byte_rows(&mut b, 2, 3, 1 << 16);
     let file = b.end(at);
     assert!(file.len() < 1 << 10, "{}", file.len());
-    assert!(matches!(open(file), Err(Error::Broken(_))));
+    assert!(matches!(open(file.clone()), Err(Error::TooManyObjects)));
+    let read = crate::read(Arc::new(file), |_| Ok(()));
+    assert!(matches!(read, Err(Error::TooManyObjects)));
 
     // Twenty revisions, each of fewer objects than the file has bytes.
     let chain = |each: usize| {
@@ -374,7 +377,7 @@ fn an_xref_names_no_more_objects_than_the_file_has_bytes() {
     let (few, many) = (chain(100), chain(2000));
     assert!(20 * 100 < few.len() && 2000 < many.len() && many.len() < 20 * 2000);
     assert!(open(few).is_ok());
-    assert!(matches!(open(many), Err(Error::Broken(_))));
+    assert!(matches!(open(many), Err(Error::TooManyObjects)));
 }
 
 /// Whatever a damaged file holds, reading it ends: cut short at every 7th byte, or one byte

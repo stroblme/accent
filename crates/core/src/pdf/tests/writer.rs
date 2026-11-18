@@ -262,6 +262,35 @@ fn a_broken_file_is_normalised_once() {
     );
 }
 
+/// A file whose xref names more objects than it holds is refused with its reason before pdfium
+/// reads it, which would hold an entry for each, where a damaged one is repaired: here 65,536
+/// one-byte rows compressed into a few hundred bytes.
+#[test]
+fn an_xref_naming_more_objects_than_the_file_holds_is_refused() {
+    if !available() {
+        return eprintln!("skipping: no libpdfium");
+    }
+    let rows = 1 << 16;
+    let z = miniz_oxide::deflate::compress_to_vec_zlib(&vec![0; rows], 9);
+    let mut bomb = b"%PDF-1.7\n1 0 obj\n<</Type/Catalog/Pages 2 0 R>>\nendobj\n".to_vec();
+    let at = bomb.len();
+    let dict = format!(
+        "<</Type/XRef/W[0 1 0]/Size {rows}/Root 1 0 R/Filter/FlateDecode/Length {}>>",
+        z.len()
+    );
+    bomb.extend(format!("2 0 obj\n{dict}\nstream\n").bytes());
+    bomb.extend(z);
+    bomb.extend(format!("\nendstream\nendobj\nstartxref\n{at}\n%%EOF\n").bytes());
+    let Err(e) = doc_of(bomb) else {
+        panic!("opened");
+    };
+    assert!(
+        e.to_string()
+            .contains("more objects than the file can hold"),
+        "{e}"
+    );
+}
+
 /// Rendering must not change saved annotations: what pdfium generates as it draws — appearance
 /// streams, `PDFIUM_HasGeneratedAP`, popups — stays out of the file, which pdfium never writes.
 #[test]

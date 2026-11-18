@@ -143,10 +143,16 @@ impl PdfDoc {
     /// to append to. pdfium, which repairs what it reads, writes it out once, before it
     /// has rendered anything into it, and those bytes are the base: the first save writes them
     /// whole, and the file saved is sound for the next session to append to.
+    ///
+    /// A file whose xref names more objects than it can hold is refused before pdfium reads it,
+    /// since pdfium holds an entry for each: 3 GB for 24 KB of xref stream (ISSUES.md).
     fn over(file: Arc<File>, etag: Etag) -> Result<PdfDoc> {
         let pdfium = pdfium()?;
         let base: Arc<dyn Source> = file.clone();
         let read = objects_of(&base);
+        if let Err(accent_pdf::Error::TooManyObjects) = read {
+            return Err(accent_pdf::Error::TooManyObjects.into());
+        }
         let (doc, base, (pdf, pages), repaired) = {
             let _guard = lock();
             let tail = Tail {

@@ -64,7 +64,8 @@ fn syntax(at: u64, what: &str) -> Error {
 }
 
 /// Every section of the file, from the one `startxref` names. One that does not parse is
-/// [`Error::Broken`]: the offsets are not the file's, which only a repair can put right.
+/// [`Error::Broken`]: the offsets are not the file's, which only a repair can put right. Sections
+/// naming more objects than the file can hold are [`Error::TooManyObjects`].
 pub(crate) fn read(src: &dyn Source) -> Result<Xref> {
     read_sections(src).map_err(|e| match e {
         Error::Syntax { at, what } => Error::Broken(format!("xref at byte {at}: {what}")),
@@ -199,11 +200,9 @@ fn section(src: &dyn Source, at: u64, budget: &mut usize) -> Result<Section> {
     })
 }
 
-/// `rows` taken from `budget`, or the xref is not the file's.
+/// `rows` taken from `budget`, or [`Error::TooManyObjects`].
 fn charge(budget: &mut usize, rows: usize) -> Result<()> {
-    *budget = budget
-        .checked_sub(rows)
-        .ok_or_else(|| Error::Broken("the xref names more objects than the file holds".into()))?;
+    *budget = budget.checked_sub(rows).ok_or(Error::TooManyObjects)?;
     Ok(())
 }
 
