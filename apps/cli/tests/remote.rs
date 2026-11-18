@@ -852,8 +852,8 @@ fn bookmarked_pdf() -> Vec<u8> {
 /// Run `script` over a separate SSH connection and return its output.
 fn on_host(url: &Url, script: &str) -> String {
     let out = std::process::Command::new("ssh")
-        .arg(url.destination())
         .arg("--")
+        .arg(url.destination())
         .arg(script)
         .output()
         .expect("ssh must be on PATH");
@@ -885,7 +885,7 @@ fn kill_master(url: &Url, ctl: &std::path::Path) {
     let check = std::process::Command::new("ssh")
         .arg("-o")
         .arg(format!("ControlPath={}", ctl.display()))
-        .args(["-O", "check", &url.destination()])
+        .args(["-O", "check", "--", &url.destination()])
         .output()
         .unwrap();
     let said = String::from_utf8_lossy(&check.stderr);

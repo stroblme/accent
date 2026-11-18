@@ -75,6 +75,14 @@ fn parsed(url: &str) -> Result<Url, String> {
     if host.is_empty() {
         return Err("no host in the address".into());
     }
+    // ssh reads a destination beginning with a dash as one of its options, so a host or a login
+    // of `-oProxyCommand=…` would run a local command before any login.
+    if host.starts_with('-') {
+        return Err("a host cannot begin with a dash".into());
+    }
+    if user.as_deref().is_some_and(|u| u.starts_with('-')) {
+        return Err("a login name cannot begin with a dash".into());
+    }
 
     let port = port
         .map(|p| {
@@ -199,6 +207,13 @@ fn base(url: &Url, ctl: &Path) -> Vec<String> {
     argv
 }
 
+/// The options end with `--` before the destination, so ssh reads neither the destination nor
+/// the command after it as an option, whatever the address held.
+fn push_destination(argv: &mut Vec<String>, url: &Url) {
+    argv.push("--".to_string());
+    argv.push(url.destination());
+}
+
 /// Start or reuse a background master. `ControlMaster=auto` reuses live
 /// masters and removes stale sockets; `yes` can succeed without creating one.
 /// `ControlPersist=60` prevents permanent leaks after crashes and allows quick
@@ -229,7 +244,7 @@ pub fn master(url: &Url, ctl: &Path, quiet: bool) -> Vec<String> {
         ]
         .map(String::from),
     );
-    argv.push(url.destination());
+    push_destination(&mut argv, url);
     argv.push("true".to_string());
     argv
 }
@@ -251,8 +266,7 @@ pub fn probe(url: &Url, ctl: &Path, seconds: u32, command: &str) -> Vec<String> 
         "-o".to_string(),
         format!("ConnectTimeout={seconds}"),
     ]);
-    argv.push(url.destination());
-    argv.push("--".to_string());
+    push_destination(&mut argv, url);
     argv.push(command.to_string());
     argv
 }
@@ -348,18 +362,18 @@ fn control(url: &Url, ctl: &Path, op: &str) -> Vec<String> {
     let mut argv = base(url, ctl);
     argv.push("-O".to_string());
     argv.push(op.to_string());
-    argv.push(url.destination());
+    push_destination(&mut argv, url);
     argv
 }
 
-/// `-L` or `-R` belongs with the options, ahead of the destination that [`control`] already
-/// appended. Either spec leads with the port that listens, which for `-R` is the host's.
+/// `-L` or `-R` belongs with the options, ahead of the `--` and the destination that [`control`]
+/// already appended. Either spec leads with the port that listens, which for `-R` is the host's.
 fn insert_forward(argv: &mut Vec<String>, f: Forward) {
     let (flag, spec) = match f.direction {
         Direction::ToRemote => ("-L", format!("{}:localhost:{}", f.local, f.remote)),
         Direction::ToLocal => ("-R", format!("{}:localhost:{}", f.remote, f.local)),
     };
-    let at = argv.len() - 1;
+    let at = argv.len() - 2;
     argv.insert(at, flag.to_string());
     argv.insert(at + 1, spec);
 }
@@ -381,9 +395,8 @@ pub fn run(url: &Url, ctl: &Path, command: &str) -> Vec<String> {
         ]
         .map(String::from),
     );
-    argv.push(url.destination());
-    // Everything after `--` is the remote command, even when it starts with a dash.
-    argv.push("--".to_string());
+    // Everything after the destination is the remote command, even when it starts with a dash.
+    push_destination(&mut argv, url);
     argv.push(command.to_string());
     argv
 }
@@ -397,7 +410,7 @@ pub fn run(url: &Url, ctl: &Path, command: &str) -> Vec<String> {
 pub fn attach(url: &Url, ctl: &Path, server: &str, id: &str, flags: &[String]) -> Vec<String> {
     let mut argv = base(url, ctl);
     argv.extend(["-t", "-e", "none"].map(String::from));
-    argv.push(url.destination());
+    push_destination(&mut argv, url);
     let flags: String = flags.iter().map(|f| format!("{} ", quote(f))).collect();
     argv.push(format!(
         "{server} attach --cwd {} {flags}{}",
@@ -419,7 +432,7 @@ pub fn program(
 ) -> Vec<String> {
     let mut argv = base(url, ctl);
     argv.extend(["-t", "-e", "none"].map(String::from));
-    argv.push(url.destination());
+    push_destination(&mut argv, url);
     let exec = match env.is_empty() {
         true => "exec",
         false => "exec env",
@@ -798,6 +811,38 @@ mod tests {
     }
 
     #[test]
+    fn a_host_or_login_that_ssh_would_read_as_an_option_is_refused() {
+        assert_eq!(
+            parsed("ssh://-oProxyCommand=false/srv"),
+            Err("a host cannot begin with a dash".into())
+        );
+        assert_eq!(
+            parsed("ssh://-oProxyCommand=false@box/srv"),
+            Err("a login name cannot begin with a dash".into())
+        );
+        for text in [
+            "ssh://-oProxyCommand=false:22/srv",
+            "ssh://[-oProxyCommand=false]:22/srv",
+            "ssh://me@-oProxyCommand=false/srv",
+            "ssh://@-oProxyCommand=false/srv",
+        ] {
+            assert!(parse(text).is_err(), "{text} parsed");
+        }
+        // A dash inside a name is an ordinary alias or login.
+        for (text, destination) in [
+            ("ssh://my-box.example/srv", "my-box.example"),
+            ("ssh://me-too@box-1:2222/srv", "me-too@box-1"),
+            ("ssh://[::1]/srv", "::1"),
+            ("ssh://me@[fe80::1]:22/srv", "me@fe80::1"),
+        ] {
+            assert_eq!(
+                parse(text).map(|u| u.destination()),
+                Ok(destination.to_string())
+            );
+        }
+    }
+
+    #[test]
     fn a_vault_key_is_remote_when_it_carries_the_scheme() {
         assert!(is_remote("ssh://box/srv/vault"));
         assert!(is_remote("SSH://box/srv/vault"));
@@ -856,6 +901,7 @@ mod tests {
                 "ServerAliveInterval=5",
                 "-o",
                 "ServerAliveCountMax=3",
+                "--",
                 "box",
                 "true",
             ])
@@ -881,6 +927,7 @@ mod tests {
                 "ServerAliveInterval=5",
                 "-o",
                 "ServerAliveCountMax=3",
+                "--",
                 "me@box",
                 "true",
             ])
@@ -899,6 +946,7 @@ mod tests {
                 "2222",
                 "-O",
                 "exit",
+                "--",
                 "me@box",
             ])
         );
@@ -912,6 +960,7 @@ mod tests {
                 "2222",
                 "-O",
                 "check",
+                "--",
                 "me@box",
             ])
         );
@@ -923,6 +972,7 @@ mod tests {
                 "ControlPath=/run/user/1000/accent/0123456789abcdef",
                 "-O",
                 "stop",
+                "--",
                 "box",
             ])
         );
@@ -945,6 +995,7 @@ mod tests {
                 "forward",
                 "-L",
                 "8080:localhost:80",
+                "--",
                 "box",
             ])
         );
@@ -960,6 +1011,7 @@ mod tests {
                 "cancel",
                 "-L",
                 "8080:localhost:80",
+                "--",
                 "me@box",
             ])
         );
@@ -982,6 +1034,7 @@ mod tests {
                     op,
                     "-R",
                     "80:localhost:8080",
+                    "--",
                     "box",
                 ])
             );
@@ -1004,8 +1057,8 @@ mod tests {
                 "ServerAliveInterval=5",
                 "-o",
                 "ServerAliveCountMax=3",
-                "box",
                 "--",
+                "box",
                 "uname -s",
             ])
         );
@@ -1025,8 +1078,8 @@ mod tests {
                 "ServerAliveInterval=5",
                 "-o",
                 "ServerAliveCountMax=3",
-                "me@box",
                 "--",
+                "me@box",
                 "uname -s",
             ])
         );
@@ -1048,13 +1101,57 @@ mod tests {
                 "ControlPersist=30",
                 "-o",
                 "ConnectTimeout=5",
-                "box",
                 "--",
+                "box",
                 "ls -1p",
             ])
         );
         // Its own socket: an open vault on the same host must not be shut down with the dialog.
         assert_ne!(probe_path(&plain()), control_path(&plain()));
+    }
+
+    /// Even an address [`parse`] refuses never reaches ssh as an option: every command line ends
+    /// the options with one `--`, right before the destination.
+    #[test]
+    fn every_command_line_ends_the_options_before_the_destination() {
+        let host = Url {
+            user: None,
+            host: "-oProxyCommand=false".into(),
+            port: Some(2222),
+            path: PathBuf::from("/srv"),
+        };
+        let login = Url {
+            user: Some("-oProxyCommand=false".into()),
+            host: "box".into(),
+            ..host.clone()
+        };
+        let f = Forward {
+            local: 8080,
+            remote: 80,
+            direction: Direction::ToLocal,
+        };
+        for url in [host, login] {
+            for argv in [
+                master(&url, ctl(), true),
+                probe(&url, ctl(), 5, "ls -1p"),
+                run(&url, ctl(), "uname -s"),
+                exit(&url, ctl()),
+                check(&url, ctl()),
+                stop(&url, ctl()),
+                forward(&url, ctl(), f),
+                cancel(&url, ctl(), f),
+                attach(&url, ctl(), "accent-cli", "id", &[]),
+                program(&url, ctl(), "/srv", &[], &words(&["python3"])),
+            ] {
+                let ends = argv.iter().position(|a| a == "--");
+                assert_eq!(argv.iter().filter(|a| *a == "--").count(), 1, "{argv:?}");
+                assert_eq!(
+                    ends.and_then(|at| argv.get(at + 1)),
+                    Some(&url.destination()),
+                    "{argv:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1070,6 +1167,7 @@ mod tests {
                 "-t",
                 "-e",
                 "none",
+                "--",
                 "box",
                 &format!("{server} attach --cwd '/srv/vault' '{id}'"),
             ])
@@ -1086,6 +1184,7 @@ mod tests {
                 "-t",
                 "-e",
                 "none",
+                "--",
                 "me@box",
                 &format!("{server} attach --cwd '/srv/my vault' '{id}'"),
             ])
@@ -1125,6 +1224,7 @@ mod tests {
                 "-t",
                 "-e",
                 "none",
+                "--",
                 "me@box",
                 r"cd '/srv/my vault' && exec env 'A=b c' 'python3' 'it'\''s.py'",
             ])

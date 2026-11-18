@@ -694,6 +694,7 @@ fn change_files(app: &Rc<App>, op: &str, rels: &[String]) -> Result<(), String> 
     let paths = rels.iter().map(|rel| root.join(rel));
     let status = match app.vault().and_then(|v| v.remote()) {
         Some(remote) => std::process::Command::new("ssh")
+            .arg("--")
             .arg(remote.url().destination())
             .arg(op)
             .args(paths)
