@@ -4,6 +4,7 @@
 //! Derived from draw.io's `Graph.js` (`Graph.decompress`), `mxUtils.js` (`zapGremlins`) and
 //! `mxCellCodec.js` (user objects), Apache-2.0; see `NOTICE`.
 
+use miniz_oxide::inflate::TINFLStatus;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
 
@@ -14,10 +15,43 @@ use crate::style::{Style, parse_num};
 
 /// Parse a whole file.
 pub fn parse(bytes: &[u8]) -> Result<File, Error> {
+    parse_within(bytes, Budget::FILE)
+}
+
+/// What one file may hold, every page of it being read in and kept, as the bytes its compressed
+/// pages inflate to and the elements of its XML and theirs. Each page once had the bytes to
+/// itself, so that twelve pages of a file of 100 kB held 72 MiB of labels, and bytes alone leave
+/// out what an element costs, an empty cell taking some 670 bytes where it inflates from 15.
+#[derive(Clone, Copy)]
+struct Budget {
+    inflated: usize,
+    elements: usize,
+}
+
+impl Budget {
+    /// 64 MiB inflated, and a million elements, seven times as many as an uncompressed file of
+    /// 16 MiB holds in ordinary shapes.
+    const FILE: Budget = Budget {
+        inflated: MAX_INFLATED,
+        elements: 1 << 20,
+    };
+
+    /// Count one element against the budget, refusing the file past its last.
+    fn element(&mut self) -> Result<(), Error> {
+        self.elements = self.elements.checked_sub(1).ok_or_else(|| {
+            let most = Budget::FILE.elements;
+            Error::Format(format!("the file holds more than {most} elements"))
+        })?;
+        Ok(())
+    }
+}
+
+/// [`parse`], the file and all of its pages held to `budget` together.
+fn parse_within(bytes: &[u8], mut budget: Budget) -> Result<File, Error> {
     let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
     let xml = std::str::from_utf8(bytes)
         .map_err(|e| Error::Format(format!("the file is not UTF-8 text: {e}")))?;
-    let mut root = tree(xml)?;
+    let mut root = tree_within(xml, &mut budget)?;
     // A diagram that is not in an `<mxfile>` becomes one, as if accent had made it.
     let ours = || vec![("host".to_string(), "accent".to_string())];
     let (attrs, mut pages) = match root.name.as_str() {
@@ -26,11 +60,11 @@ pub fn parse(bytes: &[u8]) -> Result<File, Error> {
             let pages = diagrams
                 .into_iter()
                 .filter(|c| c.name == "diagram")
-                .map(page)
+                .map(|diagram| page(diagram, &mut budget))
                 .collect::<Result<Vec<_>, _>>()?;
             (root.attrs, pages)
         }
-        "diagram" => (ours(), vec![page(root)?]),
+        "diagram" => (ours(), vec![page(root, &mut budget)?]),
         "mxGraphModel" => {
             let attrs = vec![("name".into(), "Page-1".into()), ("id".into(), guid())];
             (ours(), vec![model_page(attrs, root)])
@@ -52,6 +86,12 @@ const MAX_DEPTH: usize = 64;
 /// The document element as a tree, attribute values and text unescaped. Text beside child
 /// elements is trimmed, which drops the indentation between them.
 pub(crate) fn tree(xml: &str) -> Result<Element, Error> {
+    let mut budget = Budget::FILE;
+    tree_within(xml, &mut budget)
+}
+
+/// [`tree`], each element counted against `budget`.
+fn tree_within(xml: &str, budget: &mut Budget) -> Result<Element, Error> {
     let mut reader = Reader::from_str(xml);
     // The elements opened and not yet closed, innermost last.
     let mut open: Vec<Element> = Vec::new();
@@ -70,9 +110,13 @@ pub(crate) fn tree(xml: &str) -> Result<Element, Error> {
                         "elements nested more than {MAX_DEPTH} deep"
                     )));
                 }
+                budget.element()?;
                 open.push(element(&start)?);
             }
-            Event::Empty(start) => close(element(&start)?, &mut open, &mut root),
+            Event::Empty(start) => {
+                budget.element()?;
+                close(element(&start)?, &mut open, &mut root);
+            }
             Event::End(_) => {
                 if let Some(done) = open.pop() {
                     close(done, &mut open, &mut root);
@@ -142,7 +186,8 @@ fn xml_error(e: impl std::fmt::Display) -> Error {
 }
 
 /// One `<diagram>`: its model inline, compressed into its text, or neither for an empty page.
-fn page(diagram: Element) -> Result<Page, Error> {
+/// A compressed one takes what it inflates to and its elements from `budget`.
+fn page(diagram: Element, budget: &mut Budget) -> Result<Page, Error> {
     let Element {
         attrs,
         children,
@@ -158,7 +203,8 @@ fn page(diagram: Element) -> Result<Page, Error> {
             ..Page::blank("", "")
         });
     }
-    let model = tree(&decompress(&text)?)?;
+    let model = decompress_within(&text, &mut budget.inflated)?;
+    let model = tree_within(&model, budget)?;
     if model.name != "mxGraphModel" {
         return Err(Error::Format(format!(
             "a compressed page holds <{}>",
@@ -168,21 +214,31 @@ fn page(diagram: Element) -> Result<Page, Error> {
     Ok(model_page(attrs, model))
 }
 
-/// Inflated page-size limit to bound memory use when reading compressed pages.
+/// What the compressed pages of one file, or a stencil in a style, may inflate to, to bound
+/// memory use when reading them.
 const MAX_INFLATED: usize = 64 << 20;
 
 /// A compressed page's model, or a stencil in a style: base64 of raw deflate of
 /// `encodeURIComponent` of the XML (`Graph.decompress`).
 pub(crate) fn decompress(text: &str) -> Result<String, Error> {
-    decompress_within(text, MAX_INFLATED)
+    let mut left = MAX_INFLATED;
+    decompress_within(text, &mut left)
 }
 
-/// [`decompress`], refusing a page that inflates to more than `limit` bytes.
-fn decompress_within(text: &str, limit: usize) -> Result<String, Error> {
+/// [`decompress`], refusing a page that inflates to more than the `left` bytes and taking what it
+/// inflates to from them.
+fn decompress_within(text: &str, left: &mut usize) -> Result<String, Error> {
     let broken = |what: &str| Error::Format(format!("a compressed page is not valid {what}"));
     let deflated = crate::base64::decode(text).ok_or_else(|| broken("base64"))?;
-    let inflated = miniz_oxide::inflate::decompress_to_vec_with_limit(&deflated, limit)
-        .map_err(|_| broken("deflate data"))?;
+    let inflated = miniz_oxide::inflate::decompress_to_vec_with_limit(&deflated, *left);
+    let inflated = inflated.map_err(|e| match e.status {
+        TINFLStatus::HasMoreOutput => Error::Format(format!(
+            "the compressed pages inflate to more than {} MiB",
+            MAX_INFLATED >> 20
+        )),
+        _ => broken("deflate data"),
+    })?;
+    *left -= inflated.len();
     let escaped = std::str::from_utf8(&inflated).map_err(|_| broken("text"))?;
     let xml = percent_decode(escaped).ok_or_else(|| broken("URI encoding"))?;
     Ok(zap_gremlins(&xml))
@@ -728,10 +784,12 @@ mod tests {
         // Raw deflate of 1000 × `a`: a zip bomb in miniature.
         let bomb = "S0wcBaNgFAx3AAA=";
         assert!(matches!(
-            decompress_within(bomb, 999),
+            decompress_within(bomb, &mut 999),
             Err(Error::Format(_))
         ));
-        assert_eq!(decompress_within(bomb, 1000).unwrap().len(), 1000);
+        let mut left = 1500;
+        assert_eq!(decompress_within(bomb, &mut left).unwrap().len(), 1000);
+        assert_eq!(left, 500, "what it inflated to is taken from what is left");
     }
 
     #[test]
@@ -814,5 +872,49 @@ mod tests {
             "</a>".repeat(MAX_DEPTH - 4)
         );
         assert!(parse(fine.as_bytes()).is_ok());
+    }
+
+    /// An `<mxfile>` of `pages` pages, each `model` compressed as draw.io writes it but for the
+    /// URI encoding, which a model without a `%` does not need.
+    fn compressed(pages: usize, model: &str) -> String {
+        let deflated = miniz_oxide::deflate::compress_to_vec(model.as_bytes(), 6);
+        let page = format!("<diagram>{}</diagram>", crate::base64::encode(&deflated));
+        format!("<mxfile>{}</mxfile>", page.repeat(pages))
+    }
+
+    /// The pages of a file share what it may inflate to and the elements it may hold, where each
+    /// page once had the whole of the bytes, so that twelve pages of a file of 100 kB held 72 MiB
+    /// of labels. Twelve pages here each fit a budget eleven of them fill.
+    #[test]
+    fn pages_each_within_the_budget_are_refused_past_it_together() {
+        let model = r#"<mxGraphModel><root><mxCell id="v" value="label"/></root></mxGraphModel>"#;
+        // The `<mxfile>`, then a `<diagram>` and the three elements of its model a page.
+        let eleven = Budget {
+            inflated: 11 * model.len(),
+            elements: 1 + 11 * 4,
+        };
+        let read = |pages, budget| parse_within(compressed(pages, model).as_bytes(), budget);
+        assert_eq!(read(11, eleven).unwrap().pages.len(), 11);
+        assert!(read(1, eleven).is_ok());
+
+        // Room for eleven pages of what they inflate to, and for any number of their elements.
+        let bytes = Budget {
+            elements: usize::MAX,
+            ..eleven
+        };
+        let e = read(12, bytes).unwrap_err();
+        assert!(
+            matches!(&e, Error::Format(why) if why.contains("inflate")),
+            "{e}"
+        );
+        let elements = Budget {
+            inflated: usize::MAX,
+            ..eleven
+        };
+        let e = read(12, elements).unwrap_err();
+        assert!(
+            matches!(&e, Error::Format(why) if why.contains("elements")),
+            "{e}"
+        );
     }
 }

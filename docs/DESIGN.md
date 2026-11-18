@@ -1521,6 +1521,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   There is one clipboard, so the menu offers the paste for what it holds: Paste Size for a size, onto one shape that is not pinned, Paste Style for a style, onto the selection, none for a position, and Paste for anything else; over nothing selected with nothing it can paste, no menu opens (user decision 2026-11-10).
 - Every change is one undo step, saved a second after the last through the etag-gated save.
   A change on disk under unsaved edits raises a banner whose Resolve… asks Reload or Overwrite: there is no comparison of two diagrams to offer.
+- A file is read whole with all its pages kept, so the file as a whole is bounded and not each page, its compressed pages inflating to 64 MiB together and its XML and theirs holding a million elements (2026-11-18).
+  A file past either opens on Not a Diagram with the reason, and the index then finds it by its name alone.
 
 ### Notebook
 
