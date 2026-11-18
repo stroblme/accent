@@ -233,6 +233,17 @@ impl Index {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// `(tag, file, uses)` for every tag each file carries: [`tags`](Self::tags) by file, for a
+    /// count that leaves some files out (MCP's external symlink targets).
+    pub fn tag_uses(&self) -> Result<Vec<(String, String, i64)>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT t.name, f.rel_path, COUNT(*) FROM tags t JOIN files f ON f.id = t.file_id
+             GROUP BY t.name, f.id",
+        )?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// The tags the files `rels` carry, each once, the first file's first in the order it writes
     /// them: what `#` completion offers first for the notes used lately.
     pub fn tags_of(&self, rels: &[String]) -> Result<Vec<String>> {

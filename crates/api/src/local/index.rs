@@ -183,6 +183,10 @@ impl Local {
         Ok(self.index().tags()?)
     }
 
+    pub fn tag_uses(&self) -> Result<Vec<(String, String, i64)>> {
+        Ok(self.index().tag_uses()?)
+    }
+
     /// What the index holds, counted.
     pub fn stats(&self) -> Result<Stats> {
         Ok(self.index().stats()?)

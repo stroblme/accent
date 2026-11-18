@@ -495,6 +495,8 @@ methods! {
     grep(query: ref str, options: val Options, limit: val usize, include_ignored: val bool)
         -> (Vec<Match>, usize);
     tags() -> Vec<(String, i64)>;
+    /// `(tag, file, uses)`: [`tags`](Vault::tags) by file, which MCP counts its shown files by.
+    tag_uses() -> Vec<(String, String, i64)>;
     /// What the index holds, counted: `accent-cli stats`.
     stats() -> Stats;
     files_with_tag(tag: ref str) -> Vec<FileRow>;

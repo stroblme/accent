@@ -690,6 +690,28 @@ fn mcp_keeps_out_of_git_through_any_alias() {
     c.close();
 }
 
+/// A tag that only a file a symlink brings in from outside carries is not listed, and one it
+/// shares with the vault counts the vault's uses alone, every use once.
+#[test]
+fn list_tags_counts_only_the_files_it_shows() {
+    let scratch = Scratch::new("tags");
+    let write = |rel: &str, text: &str| std::fs::write(scratch.dir.join(rel), text).unwrap();
+    write("vault/c.md", "#shared and #shared again\n");
+    write("outside/tagged.md", "#outsider #shared\n");
+    let mut c = Client::start(&scratch, &[]);
+    c.initialize();
+
+    let (said, error) = c.call("list_tags", json!({}));
+    assert!(!error, "{said:?}");
+    assert_eq!(
+        said[0],
+        r#"[{"count":2,"tag":"shared"},{"count":1,"tag":"tag"}]"#
+    );
+    let (said, _) = c.call("list_tags", json!({"tag": "outsider"}));
+    assert_eq!(said[0], "[]");
+    c.close();
+}
+
 /// Explore ranks linked notes, returns whole cards for explicit paths, and respects its budget.
 #[test]
 fn explore_ranks_by_links_and_answers_a_path_with_its_card() {

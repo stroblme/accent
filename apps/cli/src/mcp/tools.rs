@@ -1,7 +1,8 @@
 //! The tools, each a façade call or two run on the blocking pool, and the arguments they take.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 
 use accent_api::{Error, Etag, FileKind, Read, fs};
@@ -527,13 +528,24 @@ impl Server {
         self.blocking(move |s| {
             let partial = s.ready.wait();
             let rows: Value = match &a.tag {
-                None => s
-                    .vault
-                    .tags()
-                    .map_err(fail)?
-                    .into_iter()
-                    .map(|(tag, count)| json!({"tag": tag, "count": count}))
-                    .collect(),
+                // Counted in the files shown alone: a tag only an external symlink target
+                // carries is none of the vault's.
+                None => {
+                    let mut shown = HashMap::new();
+                    let mut counts: BTreeMap<String, i64> = BTreeMap::new();
+                    for (tag, rel, uses) in s.vault.tag_uses().map_err(fail)? {
+                        if *shown.entry(rel).or_insert_with_key(|rel| s.shown(rel)) {
+                            *counts.entry(tag).or_default() += uses;
+                        }
+                    }
+                    // Most used first, by name among equals, as `Vault::tags` orders them.
+                    let mut counts: Vec<(String, i64)> = counts.into_iter().collect();
+                    counts.sort_by_key(|(_, count)| Reverse(*count));
+                    counts
+                        .into_iter()
+                        .map(|(tag, count)| json!({"tag": tag, "count": count}))
+                        .collect()
+                }
                 Some(tag) => s
                     .vault
                     .files_with_tag(tag.trim_start_matches('#'))
