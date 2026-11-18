@@ -3,12 +3,87 @@
 //! them, as draw.io's `mxGraph.extendParent` grows one, and a group with `transparentBounds=1`
 //! keeps its geometry at 0,0,0,0 as draw.io does, its box being what it holds.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use super::{remove_with_edges, translate};
 use crate::geom::Rect;
 use crate::model::{Cell, CellId, Page};
 use crate::style::Resolved;
+
+/// How the walks below find a cell and what it holds: a page reading itself, for an edit that
+/// looks up a few cells, or [`Indexed`], for one over a whole chain of groups, which a page would
+/// read once a group.
+pub(crate) trait Cells {
+    fn cell(&self, id: &str) -> Option<&Cell>;
+    fn children<'a>(&'a self, id: &'a str) -> impl Iterator<Item = &'a Cell>;
+    fn count(&self) -> usize;
+}
+
+impl Cells for Page {
+    fn cell(&self, id: &str) -> Option<&Cell> {
+        Page::cell(self, id)
+    }
+
+    fn children<'a>(&'a self, id: &'a str) -> impl Iterator<Item = &'a Cell> {
+        Page::children(self, id)
+    }
+
+    fn count(&self) -> usize {
+        self.cells.len()
+    }
+}
+
+/// Where each cell of a page is and what each holds, in document order, read once for the many
+/// lookups of an edit over a chain of groups. It holds while no cell is put in or taken out.
+struct Index {
+    at: HashMap<CellId, usize>,
+    held: HashMap<CellId, Vec<usize>>,
+    count: usize,
+}
+
+impl Index {
+    fn of(p: &Page) -> Index {
+        let (mut at, mut held) = (HashMap::new(), HashMap::<CellId, Vec<usize>>::new());
+        for (i, cell) in p.cells.iter().enumerate() {
+            // The first of a duplicate id, as `Page::cell` finds it.
+            at.entry(cell.id.clone()).or_insert(i);
+            if let Some(parent) = &cell.parent {
+                held.entry(parent.clone()).or_default().push(i);
+            }
+        }
+        let count = p.cells.len();
+        Index { at, held, count }
+    }
+
+    fn on<'a>(&'a self, page: &'a Page) -> Indexed<'a> {
+        Indexed { page, index: self }
+    }
+
+    fn cell_mut<'p>(&self, p: &'p mut Page, id: &str) -> Option<&'p mut Cell> {
+        self.at.get(id).map(|&i| &mut p.cells[i])
+    }
+}
+
+/// A page looked up through its [`Index`].
+struct Indexed<'a> {
+    page: &'a Page,
+    index: &'a Index,
+}
+
+impl Cells for Indexed<'_> {
+    fn cell(&self, id: &str) -> Option<&Cell> {
+        self.index.at.get(id).map(|&i| &self.page.cells[i])
+    }
+
+    fn children<'a>(&'a self, id: &'a str) -> impl Iterator<Item = &'a Cell> {
+        let held = self.index.held.get(id).into_iter().flatten();
+        held.map(|&i| &self.page.cells[i])
+    }
+
+    fn count(&self) -> usize {
+        self.page.cells.len()
+    }
+}
 
 /// Whether `cell` is a group with `transparentBounds=1` (`Graph.isTransparentBounds`).
 pub(super) fn is_transparent(cell: &Cell) -> bool {
@@ -35,13 +110,17 @@ pub(super) fn own_box(p: &Page, cell: &Cell) -> Option<Rect> {
 /// Sibling bounds in parent coordinates (`Graph.getBoundsForGroup`): vertex rectangles, a group
 /// with `transparentBounds=1` by what it holds, and edge endpoints and waypoints. Relative
 /// vertices do not contribute.
-pub(super) fn group_bounds(p: &Page, cells: &[CellId]) -> Option<Rect> {
-    held(p, cells.iter().filter_map(|id| p.cell(id)), p.cells.len())
+pub(super) fn group_bounds(p: &impl Cells, cells: &[CellId]) -> Option<Rect> {
+    held(p, cells.iter().filter_map(|id| p.cell(id)), p.count())
 }
 
 /// [`group_bounds`] of `cells`, going at most `depth` groups with `transparentBounds=1` deep,
 /// which only a `parent` loop in a hand-edited file would reach.
-fn held<'a>(p: &'a Page, cells: impl Iterator<Item = &'a Cell>, depth: usize) -> Option<Rect> {
+fn held<'a>(
+    p: &'a impl Cells,
+    cells: impl Iterator<Item = &'a Cell>,
+    depth: usize,
+) -> Option<Rect> {
     let mut bounds: Option<Rect> = None;
     let mut add = |r: Rect| bounds = Some(bounds.map_or(r, |b| b.union(&r)));
     for cell in cells {
@@ -69,7 +148,7 @@ fn held<'a>(p: &'a Page, cells: impl Iterator<Item = &'a Cell>, depth: usize) ->
 
 /// The box group `cell` with `transparentBounds=1` shows in its own frame: what it holds, grown
 /// by its `groupPadding`.
-fn transparent(p: &Page, cell: &Cell, depth: usize) -> Option<Rect> {
+fn transparent(p: &impl Cells, cell: &Cell, depth: usize) -> Option<Rect> {
     let inside = held(p, p.children(&cell.id), depth)?;
     Some(padded(inside, &cell.style.resolve(false)))
 }
@@ -103,7 +182,7 @@ fn padding(style: &Resolved) -> [f64; 4] {
 
 /// The cells whose geometry a move of cell `id` translates: itself, or for a group with
 /// `transparentBounds=1`, whose geometry stays at 0,0,0,0, what it holds (`Graph.translateCell`).
-pub(crate) fn moved_by(p: &Page, id: &str) -> Vec<CellId> {
+pub(crate) fn moved_by(p: &impl Cells, id: &str) -> Vec<CellId> {
     let (mut out, mut seen, mut next) = (Vec::new(), HashSet::new(), vec![id.to_string()]);
     while let Some(id) = next.pop() {
         match p.cell(&id) {
@@ -119,8 +198,17 @@ pub(crate) fn moved_by(p: &Page, id: &str) -> Vec<CellId> {
 
 /// Move cell `id` by (`dx`, `dy`) in its parent, as draw.io's `Graph.translateCell` does.
 pub(super) fn shift(p: &mut Page, id: &str, dx: f64, dy: f64) {
-    for id in moved_by(p, id) {
+    for id in moved_by(&*p, id) {
         if let Some(g) = p.cell_mut(&id).and_then(|c| c.geometry.as_mut()) {
+            translate(g, dx, dy);
+        }
+    }
+}
+
+/// [`shift`] through `index`.
+fn shift_in(p: &mut Page, index: &Index, id: &str, dx: f64, dy: f64) {
+    for id in moved_by(&index.on(p), id) {
+        if let Some(g) = index.cell_mut(p, &id).and_then(|c| c.geometry.as_mut()) {
             translate(g, dx, dy);
         }
     }
@@ -155,26 +243,45 @@ pub fn fit_groups(before: &Page, after: &mut Page) {
     let parents: HashMap<CellId, CellId> = (after.cells.iter())
         .filter_map(|c| Some((c.id.clone(), c.parent.clone()?)))
         .collect();
-    let depth = |id: &str| {
-        let mut at = parents.get(id);
-        let mut n = 0;
-        while let Some(parent) = at.filter(|_| n < parents.len()) {
-            (n, at) = (n + 1, parents.get(parent));
-        }
-        n
-    };
-    while let Some(id) = groups.iter().max_by_key(|id| depth(id)).cloned() {
-        groups.remove(&id);
-        if fit(after, &id, &changed) {
-            groups.extend(parents.get(&id).cloned());
+    let mut index = Index::of(after);
+    let depths = depths(after, &index);
+    let depth = |id: &CellId| depths.get(id).copied().unwrap_or(0);
+    // The deepest first, each once.
+    let mut next: BinaryHeap<(usize, CellId)> =
+        groups.iter().map(|g| (depth(g), g.clone())).collect();
+    while let Some((_, id)) = next.pop() {
+        if fit(after, &index, &id, &changed) {
+            let parent = parents.get(&id).filter(|p| groups.insert((*p).clone()));
+            next.extend(parent.map(|p| (depth(p), p.clone())));
             changed.insert(id);
+        }
+        // A group that went took its place, and maybe arrows, with it.
+        if after.cells.len() != index.count {
+            index = Index::of(after);
         }
     }
 }
 
-/// Fit group `id` as [`fit_groups`] says; whether its place or size changed, or it went.
-fn fit(p: &mut Page, id: &str, changed: &HashSet<CellId>) -> bool {
-    let Some(cell) = p.cell(id).filter(|c| c.vertex) else {
+/// How deep each cell of `p` is below its root, walked down from the roots, so that a cell in a
+/// `parent` loop, which no root holds, has none.
+fn depths(p: &Page, index: &Index) -> HashMap<CellId, usize> {
+    let roots = p.cells.iter().filter(|c| c.parent.is_none());
+    let mut next: Vec<(&Cell, usize)> = roots.map(|c| (c, 0)).collect();
+    let mut depths = HashMap::new();
+    let page = index.on(p);
+    while let Some((cell, depth)) = next.pop() {
+        if depths.insert(cell.id.clone(), depth).is_none() {
+            next.extend(page.children(&cell.id).map(|c| (c, depth + 1)));
+        }
+    }
+    depths
+}
+
+/// Fit group `id` as [`fit_groups`] says, looking cells up through `index`; whether its place or
+/// size changed, or it went.
+fn fit(p: &mut Page, index: &Index, id: &str, changed: &HashSet<CellId>) -> bool {
+    let page = index.on(p);
+    let Some(cell) = page.cell(id).filter(|c| c.vertex) else {
         return false;
     };
     let Some(g) = cell.geometry.clone().filter(|g| !g.relative) else {
@@ -185,13 +292,13 @@ fn fit(p: &mut Page, id: &str, changed: &HashSet<CellId>) -> bool {
     let bare = none("fillColor") && none("strokeColor") && style.get("image").is_none();
     let transparent = is_transparent(cell);
     // A table, a stack and what they lay out are placed by the layout.
-    let parent = cell.parent.as_deref().and_then(|id| p.cell(id));
+    let parent = cell.parent.as_deref().and_then(|id| page.cell(id));
     let in_layout = parent.is_some_and(|c| c.style.resolve(false).get("childLayout").is_some());
     let laid_out = in_layout || style.get("childLayout").is_some();
     if laid_out || cell.attr("collapsed") == Some("1") {
         return false;
     }
-    let members: Vec<CellId> = p.children(id).map(|c| c.id.clone()).collect();
+    let members: Vec<CellId> = page.children(id).map(|c| c.id.clone()).collect();
     if members.is_empty() {
         let empty = bare || transparent;
         if empty {
@@ -207,7 +314,7 @@ fn fit(p: &mut Page, id: &str, changed: &HashSet<CellId>) -> bool {
         return false;
     }
     let fitted = match bare && !is_container(&style) {
-        true => match group_bounds(p, &members) {
+        true => match group_bounds(&page, &members) {
             Some(inside) => padded(inside, &style),
             None => return false,
         },
@@ -215,8 +322,8 @@ fn fit(p: &mut Page, id: &str, changed: &HashSet<CellId>) -> bool {
             // Grown right and down, by the padding's right and bottom, to hold what changed.
             let [_, right, bottom, _] = padding(&style);
             let shapes = members.iter().filter(|m| changed.contains(*m));
-            let shapes = shapes.filter(|m| p.cell(m).is_some_and(|c| c.vertex));
-            let grown = shapes.filter_map(|m| group_bounds(p, std::slice::from_ref(m)));
+            let shapes = shapes.filter(|m| page.cell(m).is_some_and(|c| c.vertex));
+            let grown = shapes.filter_map(|m| group_bounds(&page, std::slice::from_ref(m)));
             let (w, h) = grown.fold((g.width, g.height), |(w, h), r| {
                 (w.max(r.right() + right), h.max(r.bottom() + bottom))
             });
@@ -228,14 +335,14 @@ fn fit(p: &mut Page, id: &str, changed: &HashSet<CellId>) -> bool {
     if moved.iter().all(|v| v.abs() < 1e-6) {
         return false;
     }
-    if let Some(geometry) = p.cell_mut(id).and_then(|c| c.geometry.as_mut()) {
+    if let Some(geometry) = index.cell_mut(p, id).and_then(|c| c.geometry.as_mut()) {
         (geometry.x, geometry.y) = (g.x + fitted.x, g.y + fitted.y);
         (geometry.width, geometry.height) = (fitted.w, fitted.h);
     }
     // Its members are placed from its corner, which has moved.
     if (fitted.x, fitted.y) != (0.0, 0.0) {
         for member in &members {
-            shift(p, member, -fitted.x, -fitted.y);
+            shift_in(p, index, member, -fitted.x, -fitted.y);
         }
     }
     true
@@ -265,20 +372,26 @@ pub(super) fn scale_children(p: &mut Page, id: &str, sx: f64, sy: f64) {
     // A list of the shapes still to scale instead of a recursion, as a file bounds no chain of
     // parents, each shape scaled once so that a `parent` loop ends.
     let (mut next, mut seen) = (vec![(id.to_string(), sx, sy)], HashSet::new());
+    let index = Index::of(p);
     while let Some((id, sx, sy)) = next.pop() {
         if seen.insert(id.clone()) {
-            scale_held(p, &id, sx, sy, &mut next);
+            scale_held(p, &index, &id, (sx, sy), &mut next);
         }
     }
 }
 
-/// One step of [`scale_children`], scaling what `id` holds and putting each shape whose size
-/// changed on `next` with its own factors.
-fn scale_held(p: &mut Page, id: &str, sx: f64, sy: f64, next: &mut Vec<(CellId, f64, f64)>) {
-    let held = p.children(id).flat_map(|c| moved_by(p, &c.id));
+/// One step of [`scale_children`], scaling what `id` holds by `(sx, sy)` and putting each shape
+/// whose size changed on `next` with its own factors.
+fn scale_held(p: &mut Page, index: &Index, id: &str, by: (f64, f64), next: &mut Vec<Scale>) {
+    let (sx, sy) = by;
+    let page = index.on(p);
+    let held = page.children(id).flat_map(|c| moved_by(&page, &c.id));
     let held: Vec<CellId> = held.collect();
     for child in held {
-        let Some(cell) = p.cell(&child) else { continue };
+        let page = index.on(p);
+        let Some(cell) = page.cell(&child) else {
+            continue;
+        };
         let Some(g) = cell.geometry.clone() else {
             continue;
         };
@@ -316,7 +429,7 @@ fn scale_held(p: &mut Page, id: &str, sx: f64, sy: f64, next: &mut Vec<(CellId, 
         let ratio = |new: f64, old: f64| if old != 0.0 { new / old } else { 1.0 };
         let inner = (ratio(s.width, g.width), ratio(s.height, g.height));
         let vertex = cell.vertex;
-        if let Some(c) = p.cell_mut(&child) {
+        if let Some(c) = index.cell_mut(p, &child) {
             c.geometry = Some(s);
         }
         if vertex && inner != (1.0, 1.0) {
@@ -324,6 +437,9 @@ fn scale_held(p: &mut Page, id: &str, sx: f64, sy: f64, next: &mut Vec<(CellId, 
         }
     }
 }
+
+/// A shape still to scale, by its factors across and down.
+type Scale = (CellId, f64, f64);
 
 /// Whether a shape of `style` holds its shapes as a container (`Graph.isContainer`): a swimlane
 /// or a table unless `container=0`, anything else with `container=1`.

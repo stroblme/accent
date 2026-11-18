@@ -259,19 +259,24 @@ impl Page {
     /// Edges do not offset their children this way.
     pub fn origin_of(&self, id: &str) -> Point {
         let mut at = Point::default();
-        let mut cell = self.cell(id);
+        let mut i = self.index_of(id);
         // A chain longer than the page has cells has walked a `parent` loop — which a hand-edited
         // file can hold, draw.io writing none — and a cell in one is measured from the page, as a
         // cell under a layer is. Counted rather than remembered: this runs per vertex per scene.
         let mut left = self.cells.len();
-        while let Some(parent) = cell
-            .and_then(|c| c.parent.as_deref())
-            .and_then(|p| self.cell(p))
-        {
+        // Each parent is looked for back from what it holds first, where draw.io writes it, so
+        // that a chain of groups thousands deep is read in one pass of the page.
+        let parent_of = |i: usize| {
+            let parent = self.cells[i].parent.as_deref()?;
+            let before = self.cells[..i].iter().rposition(|c| c.id == parent);
+            before.or_else(|| self.index_of(parent))
+        };
+        while let Some(j) = i.and_then(parent_of) {
             match left.checked_sub(1) {
                 Some(rest) => left = rest,
                 None => return Point::default(),
             }
+            let parent = &self.cells[j];
             if parent.vertex
                 && let Some(g) = &parent.geometry
                 && !g.relative
@@ -279,7 +284,7 @@ impl Page {
                 at.x += g.x;
                 at.y += g.y;
             }
-            cell = Some(parent);
+            i = Some(j);
         }
         at
     }
