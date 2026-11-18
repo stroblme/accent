@@ -298,6 +298,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - Every folder is listed, the ones the index does not walk included (`node_modules`, a `.venv`, a cargo `target/`): a listing that silently leaves a folder out cannot be trusted.
   So is a folder link the walk does not follow, to a folder the vault holds already, to one of its own parents or to a second name for a linked folder, listed as a gitignored folder is.
   A link to nothing is listed too, dimmed under `action-unavailable-symbolic` in place of its file's icon, and a click on it says the file it links to is missing (user decision 2026-11-17).
+  A dot-named one is not, Show Hidden Files on or off, since it is an editor's lock such as Emacs's `.#note.md` that comes and goes while a note is edited (user decision 2026-11-17).
   Those rows are read off the disk one level per expansion, stay out of the index and every query, and are dimmed, search not reaching them.
 - A dependency tree (`node_modules`, a `.venv`, a marked `target/`, Lean's `.lake`, gigabytes with Mathlib and no marker file) lists and opens but is never changed — its menu holds only what reads it (Open and Open in New Window, or Open in Terminal and Reload, Copy Name, the paths, Show in Files or Download…), and it takes no drop and is marked and dragged only whole: it is somebody else's.
   A tab on one of its files offers the same names and ways out, with Reveal in Sidebar, and nothing that changes the file (user decision 2026-11-03).
@@ -315,7 +316,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A remote vault lists the same way, the merge happening on the host.
 - Dot-named files and folders are listed, dimmed: a vault holds dotfiles people edit, and they are still hidden files.
   Show Hidden Files, on by default, is a preference (Preferences → Files) and a palette command with no chord (`Ctrl+H` is Replace), and on no tree menu: it shapes the whole listing, not the row clicked.
-  Off, it leaves out every dot-named path the index holds and every dot-named link to nothing, an editor's lock such as Emacs's `.#note.md` that comes and goes while a note is edited, while the skipped trees still list, `.venv` included.
+  Off, it leaves out every dot-named path the index holds, while the skipped trees still list, `.venv` included.
   Every window follows it.
 - **A changed file's name is tinted, as VS Code tints it** (user decision 2026-10-10): the accent for a change, staged or not, a conflict included (the Git pane gives a conflict no colour of its own), and the green of an added line for a file new to git, untracked or only added; the change bars' colours (Colour).
   A folder takes the strongest tint under it, a change over a new file, so a shut folder still says there is something inside; it is rolled up from git's changed paths, each walking up its own folders, never from a walk of the tree (`tree::roll_up`).

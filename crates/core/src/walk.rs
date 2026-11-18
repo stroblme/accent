@@ -427,8 +427,10 @@ pub fn unindexed_children(
             _ => match std::fs::metadata(&path) {
                 Ok(meta) => meta.is_dir(),
                 // A link to nothing, or to itself, is listed too, so a folder's listing is whole:
-                // an editor's lock (Emacs's `.#note.md`) is one, a link whose file moved another.
-                // Inside a dependency tree it stays one of that tree's rows.
+                // a link whose file moved is one. A dot-named one is not, as it is an editor's
+                // lock (Emacs's `.#note.md`) coming and going while a note is edited. Inside a
+                // dependency tree it stays one of that tree's rows.
+                Err(_) if link && name.starts_with('.') => continue,
                 Err(_) if link && inside != Some(Unindexed::Dependency) => {
                     out.push((rel_path, classify(&name), Unindexed::Dangling));
                     continue;
@@ -1508,22 +1510,23 @@ mod tests {
     }
 
     /// A link to nothing is listed beside the files the index holds, marked, unless it is one of a
-    /// dependency tree's rows.
+    /// dependency tree's rows or dot-named, an editor's lock.
     #[test]
     fn unindexed_children_lists_a_dangling_link() {
         let vault = skipped_vault();
         let link = |rel: &str| std::os::unix::fs::symlink("gone.md", vault.path().join(rel));
         link(".#note.md").unwrap();
+        link("moved.md").unwrap();
         link("node_modules/pkg/bin.js").unwrap();
         let why = |rel| {
             unindexed_children(vault.path(), rel, &HashSet::new(), false)
                 .unwrap()
                 .into_iter()
                 .map(|(rel, _, why)| (rel, why))
-                .filter(|(rel, _)| rel.ends_with(".#note.md") || rel.ends_with("bin.js"))
+                .filter(|(rel, _)| rel.ends_with(".md") || rel.ends_with("bin.js"))
                 .collect::<Vec<_>>()
         };
-        assert_eq!(why(""), [(".#note.md".into(), Unindexed::Dangling)]);
+        assert_eq!(why(""), [("moved.md".into(), Unindexed::Dangling)]);
         assert_eq!(
             why("node_modules/pkg"),
             [("node_modules/pkg/bin.js".into(), Unindexed::Dependency)]

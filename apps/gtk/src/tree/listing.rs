@@ -136,8 +136,8 @@ fn splice(
         .into_iter()
         // `id == 0` is `Vault::list_dir` saying this row came off the disk rather than out of
         // the index.
-        // A link to nothing hides as a file the index holds does: it is no skipped tree, and an
-        // editor's lock (`.#note.md`) comes and goes as a note is edited.
+        // A link to nothing hides as a file the index holds does: it is no skipped tree. A
+        // dot-named one never comes this far (`walk::unindexed_children`).
         .filter(|r| !hidden(r.kind, &r.rel_path, r.id != 0 || r.dangling, show_hidden))
         .map(|r| encode(r.kind, &r.rel_path, r.id != 0, r.dependency, r.dangling))
         .collect();
