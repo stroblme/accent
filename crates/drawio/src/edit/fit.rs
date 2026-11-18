@@ -16,7 +16,6 @@ use crate::style::Resolved;
 pub(crate) trait Cells {
     fn cell(&self, id: &str) -> Option<&Cell>;
     fn children<'a>(&'a self, id: &'a str) -> impl Iterator<Item = &'a Cell>;
-    fn count(&self) -> usize;
 }
 
 impl Cells for Page {
@@ -26,10 +25,6 @@ impl Cells for Page {
 
     fn children<'a>(&'a self, id: &'a str) -> impl Iterator<Item = &'a Cell> {
         Page::children(self, id)
-    }
-
-    fn count(&self) -> usize {
-        self.cells.len()
     }
 }
 
@@ -79,10 +74,6 @@ impl Cells for Indexed<'_> {
         let held = self.index.held.get(id).into_iter().flatten();
         held.map(|&i| &self.page.cells[i])
     }
-
-    fn count(&self) -> usize {
-        self.page.cells.len()
-    }
 }
 
 /// Whether `cell` is a group with `transparentBounds=1` (`Graph.isTransparentBounds`).
@@ -102,7 +93,8 @@ pub fn bounds(p: &Page, cell: &Cell) -> Option<Rect> {
 pub(super) fn own_box(p: &Page, cell: &Cell) -> Option<Rect> {
     let g = cell.geometry.as_ref()?;
     match is_transparent(cell) {
-        true => transparent(p, cell, p.cells.len()),
+        // What it holds may be thousands of groups deep, each looked up once.
+        true => transparent(&Index::of(p).on(p), cell),
         false => Some(Rect::new(0.0, 0.0, g.width, g.height)),
     }
 }
@@ -111,16 +103,20 @@ pub(super) fn own_box(p: &Page, cell: &Cell) -> Option<Rect> {
 /// with `transparentBounds=1` by what it holds, and edge endpoints and waypoints. Relative
 /// vertices do not contribute.
 pub(super) fn group_bounds(p: &impl Cells, cells: &[CellId]) -> Option<Rect> {
-    held(p, cells.iter().filter_map(|id| p.cell(id)), p.count())
+    let cells: Vec<&Cell> = cells.iter().filter_map(|id| p.cell(id)).collect();
+    let nested = cells.iter().filter(|c| nests(c));
+    let boxes = nested.filter_map(|c| Some((c.id.as_str(), transparent(p, c)?)));
+    held(cells.iter().copied(), &boxes.collect())
 }
 
-/// [`group_bounds`] of `cells`, going at most `depth` groups with `transparentBounds=1` deep,
-/// which only a `parent` loop in a hand-edited file would reach.
-fn held<'a>(
-    p: &'a impl Cells,
-    cells: impl Iterator<Item = &'a Cell>,
-    depth: usize,
-) -> Option<Rect> {
+/// Whether `cell` is a group with `transparentBounds=1` that what holds it measures by what it
+/// holds in turn.
+fn nests(cell: &Cell) -> bool {
+    is_transparent(cell) && cell.geometry.as_ref().is_some_and(|g| !g.relative)
+}
+
+/// [`group_bounds`] of `cells`, those with `transparentBounds=1` by their `boxes`.
+fn held<'a>(cells: impl Iterator<Item = &'a Cell>, boxes: &HashMap<&str, Rect>) -> Option<Rect> {
     let mut bounds: Option<Rect> = None;
     let mut add = |r: Rect| bounds = Some(bounds.map_or(r, |b| b.union(&r)));
     for cell in cells {
@@ -136,21 +132,34 @@ fn held<'a>(
             }
         } else if cell.vertex && !g.relative && !is_transparent(cell) {
             add(g.rect());
-        } else if cell.vertex && !g.relative {
-            let inner = depth.checked_sub(1).and_then(|d| transparent(p, cell, d));
-            if let Some(r) = inner {
-                add(r.translate(g.x, g.y));
-            }
+        } else if let Some(r) = boxes.get(cell.id.as_str()).filter(|_| nests(cell)) {
+            add(r.translate(g.x, g.y));
         }
     }
     bounds
 }
 
 /// The box group `cell` with `transparentBounds=1` shows in its own frame: what it holds, grown
-/// by its `groupPadding`.
-fn transparent(p: &impl Cells, cell: &Cell, depth: usize) -> Option<Rect> {
-    let inside = held(p, p.children(&cell.id), depth)?;
-    Some(padded(inside, &cell.style.resolve(false)))
+/// by its `groupPadding`. The groups with `transparentBounds=1` it holds are measured first,
+/// innermost first, from a list instead of a recursion, as a file bounds no chain of them, and
+/// each once, so that a `parent` loop ends.
+fn transparent(p: &impl Cells, cell: &Cell) -> Option<Rect> {
+    // Each group after every one it holds, once the list is turned round.
+    let (mut order, mut next, mut seen) = (Vec::new(), vec![cell], HashSet::new());
+    while let Some(group) = next.pop() {
+        if seen.insert(group.id.as_str()) {
+            order.push(group);
+            next.extend(p.children(&group.id).filter(|c| nests(c)));
+        }
+    }
+    let mut boxes: HashMap<&str, Rect> = HashMap::new();
+    for group in order.into_iter().rev() {
+        if let Some(inside) = held(p.children(&group.id), &boxes) {
+            let style = group.style.resolve(false);
+            boxes.insert(group.id.as_str(), padded(inside, &style));
+        }
+    }
+    boxes.get(cell.id.as_str()).copied()
 }
 
 /// `r` grown by the room `style`'s `groupPadding` keeps round what a group holds, which draw.io

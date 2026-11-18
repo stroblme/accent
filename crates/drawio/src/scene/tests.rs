@@ -756,9 +756,9 @@ fn a_stencil_s_text_and_pictures_move_with_its_lines() {
     assert_eq!(label, Some(None));
 }
 
-/// `depth` boxes on one page, each inside the one before it, as a file holds them. The cells are
-/// flat in the XML, so its nesting cap leaves their parents as deep as the file has cells.
-fn nested(depth: usize) -> String {
+/// `depth` boxes of `style` on one page, each inside the one before it, as a file holds them. The
+/// cells are flat in the XML, so its nesting cap leaves their parents as deep as the file has cells.
+fn nested(depth: usize, style: &str) -> Page {
     use std::fmt::Write;
     let mut xml =
         String::from(r#"<mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/>"#);
@@ -767,33 +767,42 @@ fn nested(depth: usize) -> String {
         let geometry = r#"<mxGeometry x="1" y="1" width="10" height="10" as="geometry"/>"#;
         write!(
             xml,
-            r#"<mxCell id="{i}" parent="{parent}" vertex="1">{geometry}</mxCell>"#
+            r#"<mxCell id="{i}" parent="{parent}" style="{style}" vertex="1">{geometry}</mxCell>"#
         )
         .unwrap();
     }
-    xml + "</root></mxGraphModel>"
+    let xml = xml + "</root></mxGraphModel>";
+    File::from_bytes(xml.as_bytes()).unwrap().pages.remove(0)
 }
 
-/// Boxes nested deeper than a recursion over them has stack for are drawn, and resized with what
-/// they hold. One ran out of a test thread's stack below 5,000 boxes drawn and 1,000 resized, and
-/// 20,000 take a file of 2 MB. Running out of stack aborts the whole process, so the work runs in
-/// this test binary started again as a child.
+/// Boxes nested deeper than a recursion over them has stack for are drawn, resized with what they
+/// hold, and as groups with `transparentBounds=1` measured by what they hold. A recursion ran out of
+/// a test thread's stack below 5,000 boxes drawn, 1,000 resized and 5,000 measured, and 20,000 take
+/// a file of 2 MB. Running out of stack aborts the whole process, so the work runs in this test
+/// binary started again as a child.
 #[test]
-fn boxes_nested_deeper_than_a_stack_holds_are_drawn_and_resized() {
+fn boxes_nested_deeper_than_a_stack_holds_are_drawn_resized_and_measured() {
     const CHILD: &str = "ACCENT_TEST_DEEP_NESTING";
     if std::env::var_os(CHILD).is_some() {
-        let file = File::from_bytes(nested(20_000).as_bytes()).unwrap();
-        let drawn = scene(&file.pages[0]).prims.len();
-        // Resizing looks each box up by a walk of the page, so the chain is shorter.
-        let mut page = File::from_bytes(nested(2_000).as_bytes())
-            .unwrap()
-            .pages
-            .remove(0);
+        let drawn = scene(&nested(20_000, "")).prims.len();
+        // A resize and a measure cost more a box in a debug build, so their chains are shorter.
+        let mut page = nested(2_000, "");
         crate::edit::resize(&mut page, "2", Rect::new(1.0, 1.0, 20.0, 20.0), false).unwrap();
         let inner = page.cells.last().and_then(|c| c.geometry.as_ref()).unwrap();
-        return println!("\ndrawn {drawn} innermost {}", inner.width);
+        let mut groups = nested(5_000, "group;transparentBounds=1;");
+        let leaf = Rect::new(0.0, 0.0, 10.0, 10.0);
+        groups
+            .cells
+            .push(Cell::new_vertex("leaf", "5001", leaf, "", ""));
+        let measured = crate::edit::bounds(&groups, groups.cell("2").unwrap()).unwrap();
+        let said = format!(
+            "drawn {drawn} innermost {} measured {}",
+            inner.width, measured.x
+        );
+        return println!("\n{said}");
     }
-    let this = "scene::tests::boxes_nested_deeper_than_a_stack_holds_are_drawn_and_resized";
+    let this =
+        "scene::tests::boxes_nested_deeper_than_a_stack_holds_are_drawn_resized_and_measured";
     let out = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", this, "--nocapture"])
         .env(CHILD, "1")
@@ -801,5 +810,9 @@ fn boxes_nested_deeper_than_a_stack_holds_are_drawn_and_resized() {
         .unwrap();
     let said = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "{out:?}");
-    assert!(said.contains("drawn 20000 innermost 20"), "{said}");
+    // The leaf is a unit in from each group's corner, 5,000 of them.
+    assert!(
+        said.contains("drawn 20000 innermost 20 measured 5000"),
+        "{said}"
+    );
 }
