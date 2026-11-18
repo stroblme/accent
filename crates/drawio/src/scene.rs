@@ -499,15 +499,21 @@ struct Builder<'a> {
     children: HashMap<&'a str, Vec<usize>>,
 }
 
+/// A cell still to paint in [`Builder::walk`], by index into `page.cells`, with the origin and
+/// lock it takes from its parent.
+type Next = (usize, Point, bool);
+
 impl<'a> Builder<'a> {
     fn cell(&self, id: &str) -> Option<&'a Cell> {
         self.index.get(id).map(|&i| &self.page.cells[i])
     }
 
-    /// Paint the children of `parent`, whose own top-left is `origin`.
+    /// Paint the children of `parent`, whose own top-left is `origin`, each before what it holds.
+    /// It keeps a stack of the cells still to paint instead of recursing, since a file holds its
+    /// cells flat and nothing bounds how deep their parents go.
     fn walk(&mut self, parent: &str, origin: Point, locked: bool) {
-        let children = self.children.get(parent).cloned().unwrap_or_default();
-        for i in children {
+        let mut next: Vec<Next> = self.held(parent, origin, locked).collect();
+        while let Some((i, origin, locked)) = next.pop() {
             let cell = &self.page.cells[i];
             if !cell.is_visible() {
                 continue;
@@ -515,15 +521,21 @@ impl<'a> Builder<'a> {
             let locked = locked || cell.style.get("locked") == Some("1");
             if cell.edge {
                 self.edge(cell, origin, locked);
-                self.walk(&cell.id, origin, locked);
+                next.extend(self.held(&cell.id, origin, locked));
             } else if cell.vertex {
                 let Some(rect) = self.vertex_rect(cell, origin) else {
                     continue;
                 };
                 self.vertex(cell, rect, locked);
-                self.walk(&cell.id, Point::new(rect.x, rect.y), locked);
+                next.extend(self.held(&cell.id, Point::new(rect.x, rect.y), locked));
             }
         }
+    }
+
+    /// The children of `parent` for [`Builder::walk`]'s stack, the first in document order last.
+    fn held(&self, parent: &str, origin: Point, locked: bool) -> impl Iterator<Item = Next> {
+        let children = self.children.get(parent).into_iter().flatten().rev();
+        children.map(move |&i| (i, origin, locked))
     }
 
     /// A vertex's absolute rectangle: its geometry from its parent's top-left, or for a

@@ -262,6 +262,19 @@ pub(super) fn scales_children(p: &Page, cell: &Cell) -> bool {
 /// `resizable=0` its size. What a group with `transparentBounds=1` holds is scaled with its
 /// group's other cells, the group keeping its 0,0,0,0, where draw.io leaves it as it is.
 pub(super) fn scale_children(p: &mut Page, id: &str, sx: f64, sy: f64) {
+    // A list of the shapes still to scale instead of a recursion, as a file bounds no chain of
+    // parents, each shape scaled once so that a `parent` loop ends.
+    let (mut next, mut seen) = (vec![(id.to_string(), sx, sy)], HashSet::new());
+    while let Some((id, sx, sy)) = next.pop() {
+        if seen.insert(id.clone()) {
+            scale_held(p, &id, sx, sy, &mut next);
+        }
+    }
+}
+
+/// One step of [`scale_children`], scaling what `id` holds and putting each shape whose size
+/// changed on `next` with its own factors.
+fn scale_held(p: &mut Page, id: &str, sx: f64, sy: f64, next: &mut Vec<(CellId, f64, f64)>) {
     let held = p.children(id).flat_map(|c| moved_by(p, &c.id));
     let held: Vec<CellId> = held.collect();
     for child in held {
@@ -307,7 +320,7 @@ pub(super) fn scale_children(p: &mut Page, id: &str, sx: f64, sy: f64) {
             c.geometry = Some(s);
         }
         if vertex && inner != (1.0, 1.0) {
-            scale_children(p, &child, inner.0, inner.1);
+            next.push((child, inner.0, inner.1));
         }
     }
 }
