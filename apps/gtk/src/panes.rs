@@ -676,6 +676,11 @@ impl Pane {
         widget.insert_after(&self.overlay, Some(&self.tabs));
     }
 
+    /// The document area, which presentation's laser pointer draws over (`laser.rs`).
+    pub fn area(&self) -> &gtk::Overlay {
+        &self.overlay
+    }
+
     /// The document area, whose size the drop zones are measured in.
     pub fn size(&self) -> (f64, f64) {
         (

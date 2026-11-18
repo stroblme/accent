@@ -107,6 +107,7 @@ impl App {
                 doc.as_ref().and_then(rendered::Note::of),
                 Some(rendered::Note::Editor(_))
             ),
+            presenting: self.presenting.get().is_some(),
         }
     }
 
@@ -705,6 +706,7 @@ impl App {
             }
             "insert-template" => self.insert_template(),
             "present" => self.set_presenting(self.presenting.get().is_none()),
+            "laser" => self.toggle_laser(),
             "fullscreen" => self.window.set_fullscreened(!self.window.is_fullscreen()),
             "preferences" => self.preferences(),
             "shortcuts" => shortcuts::present(

@@ -76,6 +76,8 @@ pub struct Context {
     /// The tab is a terminal editor's, and on a note, which Toggle Preview renders.
     pub editor: bool,
     pub editor_note: bool,
+    /// The window is in presentation mode, where the laser pointer is.
+    pub presenting: bool,
 }
 
 /// Actions another sync enables, on state of its own that changes with no tab change: SyncTeX's
@@ -209,6 +211,7 @@ pub fn applies(action: &str, cx: &Context) -> bool {
         "win.toggle-wrap" => text || front == Some(Diff),
         "win.fold" | "win.unfold" | "win.fold-all" | "win.unfold-all" | "win.minimap" => text,
         "win.view-mode" => note || preview || notebook || cx.editor_note,
+        "win.laser" => cx.presenting,
         "win.insert-template" => note && vault,
         "win.insert-sketch" => markdown && cx.file == Some(File::Vault),
         "win.zoom-in" | "win.zoom-out" | "win.zoom-reset" => {
@@ -328,6 +331,19 @@ mod tests {
         assert!(!org.contains(&"win.insert-sketch"));
         // A notebook opens a preview tab as a note does.
         assert!(listed(&vault_file(Front::Notebook)).contains(&"win.view-mode"));
+    }
+
+    /// Laser Pointer is presentation's, over whatever is presented.
+    #[test]
+    fn the_laser_is_listed_only_while_presenting() {
+        assert!(!listed(&vault_file(Front::Pdf)).contains(&"win.laser"));
+        for front in [Front::Pdf, Front::Diagram, Front::Terminal] {
+            let presenting = Context {
+                presenting: true,
+                ..vault_file(front)
+            };
+            assert!(listed(&presenting).contains(&"win.laser"));
+        }
     }
 
     /// Show Changes is a commit's file's, in front: a staged change's comparison has no toggle.

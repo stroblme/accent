@@ -167,6 +167,22 @@ impl App {
             if let Some(notebook) = self.active_notebook() {
                 notebook.set_presenting(true);
             }
+            // The laser goes with the presented pane, should a held `Ctrl+Tab` change it.
+            if let Some(laser) = self.laser.get().filter(|laser| laser.is_on()) {
+                laser.lay_over(active.area());
+            }
+        }
+    }
+
+    /// Put presentation's laser pointer up over the presented document, or away (`laser.rs`).
+    pub(crate) fn toggle_laser(&self) {
+        if self.presenting.get().is_none() {
+            return;
+        }
+        let laser = self.laser.get_or_init(laser::Laser::new);
+        match laser.is_on() {
+            true => laser.take_off(),
+            false => laser.lay_over(self.pane().area()),
         }
     }
 
@@ -209,6 +225,9 @@ impl App {
             }
             (false, Some(before)) => {
                 self.presenting.set(None);
+                if let Some(laser) = self.laser.get() {
+                    laser.take_off();
+                }
                 // Each PDF gets the zoom it had back, those a held `Ctrl+Tab` presented too, and
                 // each diagram its zoom and its ring.
                 for pdf in self.pdfs() {
@@ -240,6 +259,8 @@ impl App {
         }
         // The bar searches the rendered note while one is presented, which its toggles say.
         self.retarget_find(&self.pane());
+        // Laser Pointer is presentation's alone.
+        self.sync_applicable();
     }
 
     /// Reveal the presentation status bar while `at` is over its bottom strip.

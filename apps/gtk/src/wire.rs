@@ -1125,6 +1125,18 @@ pub fn wire_window(app: &Rc<App>) {
                 app.set_presenting(false);
                 return glib::Propagation::Stop;
             }
+            // `L` puts the laser pointer up or away over the presented document, here ahead of
+            // a presented diagram, which takes every key, unless what has the keyboard there
+            // types it (`laser::types`), where the palette's Laser Pointer does.
+            if app.presenting.get().is_some()
+                && laser::is_key(key, state)
+                && gtk::prelude::GtkWindowExt::focus(&app.window).is_some_and(|focus| {
+                    focus.is_ancestor(app.pane().widget()) && !laser::types(&focus)
+                })
+            {
+                let _ = WidgetExt::activate_action(&app.window, "win.laser", None);
+                return glib::Propagation::Stop;
+            }
             glib::Propagation::Proceed
         }
     ));

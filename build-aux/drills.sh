@@ -572,6 +572,36 @@ drill_outline_hover() {
 
 # The vault's root in each sort, with a folder left open staying open. Each file's creation time
 # is the order it was written in, c, a then B, apart by more than a coarse clock's tick.
+# Presentation's laser pointer over a presented diagram, PDF and note, put up and away by a real
+# `L`: a drag's stroke held, fading, brought back by a press and gone, the document under it
+# neither turning its page nor selecting, and `l` typed into the find bar and a code tab there,
+# where the palette's Laser Pointer puts it up (DESIGN.md, Views).
+drill_laser() {
+	test -e "$pdfium" || { echo "SKIPPED the laser drill: no libpdfium"; return 0; }
+	launch 90 ACCENT_BENCH_CHROME=laser >"$dir/laser"
+	for kind in diagram pdf note; do
+		has "$dir/laser" \
+			"bench laser $kind on=true" \
+			"bench laser $kind drawing strokes=1 strength=full marked=true" \
+			"bench laser $kind held strokes=1 strength=full marked=true" \
+			"bench laser $kind fading strokes=1 strength=fading" \
+			"bench laser $kind again strokes=2 strength=full marked=true" \
+			"bench laser $kind gone strokes=0 strength=none marked=false" \
+			"bench laser $kind off on=false"
+	done
+	has "$dir/laser" \
+		'bench laser diagram kept=true page=1 selected=[]' \
+		'bench laser diagram clicked page=2 selected=[]' \
+		'bench laser pdf kept=true page=Some("Page 1 of 1")' \
+		'bench laser note kept=true scrollY=0 selected=Some(false)' \
+		'bench laser find query="l" on=false' \
+		'bench laser find closed on=true' \
+		'bench laser left presenting=false on=false' \
+		'bench laser code text=Some("x = 1l\n") on=false' \
+		'bench laser code palette on=true' \
+		'bench laser code left on=false'
+}
+
 drill_sort() {
 	mkdir "$vault/Alpha" "$vault/beta"
 	for f in c a B beta/inner; do

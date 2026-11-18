@@ -332,6 +332,234 @@ pub(super) fn bench_present(app: &Rc<App>, rels: &str) {
     });
 }
 
+/// The diagram [`bench_laser`] writes: a page that is one link to a second, so a press reaching
+/// it turns the page.
+const LINKED: &str = r#"<mxfile host="accent">
+  <diagram name="One" id="laser-1"><mxGraphModel page="0"><root><mxCell id="0"/><mxCell id="1" parent="0"/>
+    <UserObject label="Two" link="data:page/id,laser-2" id="go"><mxCell style="rounded=0;" parent="1" vertex="1"><mxGeometry x="0" y="0" width="400" height="300" as="geometry"/></mxCell></UserObject>
+  </root></mxGraphModel></diagram>
+  <diagram name="Two" id="laser-2"><mxGraphModel page="0"><root><mxCell id="0"/><mxCell id="1" parent="0"/>
+    <mxCell id="back" value="One" style="rounded=0;" parent="1" vertex="1"><mxGeometry x="0" y="0" width="400" height="300" as="geometry"/></mxCell>
+  </root></mxGraphModel></diagram>
+</mxfile>
+"#;
+
+/// `ACCENT_BENCH_CHROME=laser` writes `laser.drawio` ([`LINKED`]), a blank `laser.pdf`, a note
+/// and `laser.py` into a scratch vault, then presents the diagram, the PDF and the note in turn
+/// and puts the laser pointer up over each with a real `L` (DESIGN.md, Views). A drag across the middle prints the strokes while the
+/// button is down (`<kind> drawing`), just after it is let go (`held`), into the fade (`fading`),
+/// as a press there brings them back (`again`) and once they are gone (`gone`), then whether what
+/// is presented stayed as it was (`kept`) and that `L` takes the pointer away (`off`); the
+/// diagram's link then turns its page to a plain click (`clicked`). Under F5 an `l` typed into
+/// the find bar is the query's and one typed into the code tab is its text, the palette's Laser
+/// Pointer reaching the pointer there, and F5 leaves with it away. With `ACCENT_BENCH_SHOTS` set,
+/// the window at each moment goes to `laser-<kind>-<moment>.png` there.
+pub(super) fn bench_laser(app: &Rc<App>) {
+    scratch_only(app, "ACCENT_BENCH_CHROME=laser");
+    let pdf = accent_core::pdf::blank_pdf((595.0, 842.0)).unwrap_or_default();
+    let rels = ["laser.drawio", "laser.pdf", "laser.md", "laser.py"];
+    let texts: [&[u8]; 4] = [
+        LINKED.as_bytes(),
+        &pdf,
+        b"# Laser\n\nA line to point at.\n",
+        b"x = 1\n",
+    ];
+    for (rel, text) in rels.iter().zip(texts) {
+        std::fs::write(app.root().join(rel), text).expect("bench fixture");
+    }
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        // A file written a moment ago is only in the vault once the watcher has seen it.
+        glib::timeout_future(Duration::from_millis(1500)).await;
+        for rel in &rels {
+            app.open_path(rel);
+        }
+        let all = || rels.iter().all(|rel| app.doc_for(rel).is_some());
+        until("laser", "opened", 20_000, all).await;
+        super::git::xtest("move 600 400; focus").await;
+        until("laser", "focus", 10_000, || app.window.is_active()).await;
+        for (kind, rel) in ["diagram", "pdf", "note"].into_iter().zip(&rels) {
+            present(&app, rel).await;
+            stroke(&app, kind).await;
+            // The rendered note is where the find bar is tried.
+            if kind != "note" {
+                app.set_presenting(false);
+            }
+        }
+        super::git::xtest("key ctrl+f").await;
+        super::git::xtest("type l").await;
+        println!(
+            "bench laser find query={:?} on={}",
+            app.pane().find.query_text(),
+            laser_on(&app)
+        );
+        super::git::xtest("key Escape; sleep 0.3; key l").await;
+        println!("bench laser find closed on={}", laser_on(&app));
+        super::git::xtest("key F5").await;
+        println!(
+            "bench laser left presenting={} on={}",
+            app.presenting.get().is_some(),
+            laser_on(&app)
+        );
+        present(&app, rels[3]).await;
+        super::git::xtest("key End; key l").await;
+        let text = app.active().map(|tab| tab.text());
+        println!("bench laser code text={text:?} on={}", laser_on(&app));
+        let _ = WidgetExt::activate_action(&app.window, "win.laser", None);
+        println!("bench laser code palette on={}", laser_on(&app));
+        super::git::xtest("key F5").await;
+        println!("bench laser code left on={}", laser_on(&app));
+        bench_quit(&app);
+    });
+}
+
+/// Bring `rel`'s tab to the front with the keyboard in it, and present it.
+async fn present(app: &Rc<App>, rel: &str) {
+    if let Some(doc) = app.doc_for(rel) {
+        app.reveal_page(doc.page());
+    }
+    glib::timeout_future(Duration::from_millis(500)).await;
+    app.focus_document(&app.pane());
+    glib::timeout_future(Duration::from_millis(300)).await;
+    app.set_presenting(true);
+    glib::timeout_future(Duration::from_millis(1200)).await;
+}
+
+/// [`bench_laser`]'s strokes over the presented `kind`, by XTEST from `L` on.
+async fn stroke(app: &Rc<App>, kind: &str) {
+    super::git::xtest("key l").await;
+    println!("bench laser {kind} on={}", laser_on(app));
+    let before = presented(app);
+    let Some(area) = app.pane().area().compute_bounds(&app.window) else {
+        println!("bench laser {kind} no area");
+        return;
+    };
+    let (dx, dy) = app.window.surface_transform();
+    let (x, y) = (
+        f64::from(area.center().x()) + dx,
+        f64::from(area.center().y()) + dy,
+    );
+    let plain = red(app);
+    // A pause between the moves, or GTK would make one motion of them.
+    let path = format!(
+        "move {} {y}; down; sleep 0.05; move {} {}; sleep 0.05; move {x} {y}; sleep 0.05; \
+         move {} {}; sleep 0.05; move {} {y}",
+        x - 150.0,
+        x - 75.0,
+        y - 40.0,
+        x + 75.0,
+        y + 40.0,
+        x + 150.0
+    );
+    super::git::xtest_now(&path).await;
+    glib::timeout_future(Duration::from_millis(100)).await;
+    moment(app, kind, "drawing", Some(plain));
+    super::git::xtest_now("up").await;
+    let released = Instant::now();
+    glib::timeout_future(Duration::from_millis(100)).await;
+    moment(app, kind, "held", Some(plain));
+    // The fade's first frames, half a second after the release.
+    let fading = || app.laser.get().is_some_and(|laser| laser.strength() < 1.0);
+    until("laser", "fade", 3_000, fading).await;
+    let held = released.elapsed().as_millis();
+    println!("bench laser detail {kind} held_ms={held}");
+    moment(app, kind, "fading", None);
+    super::git::xtest_now("down").await;
+    glib::timeout_future(Duration::from_millis(50)).await;
+    moment(app, kind, "again", Some(plain));
+    super::git::xtest_now("up").await;
+    glib::timeout_future(Duration::from_millis(1500)).await;
+    moment(app, kind, "gone", Some(plain));
+    let after = presented(app);
+    println!("bench laser {kind} kept={} {after}", after == before);
+    super::git::xtest("key l").await;
+    println!("bench laser {kind} off on={}", laser_on(app));
+    if kind == "diagram" {
+        super::git::xtest(&format!("move {x} {y}; down; up")).await;
+        println!("bench laser {kind} clicked {}", presented(app));
+    }
+}
+
+fn laser_on(app: &App) -> bool {
+    app.laser.get().is_some_and(|laser| laser.is_on())
+}
+
+/// The strokes up and how strong they are drawn at `moment`, and with the window's red before the
+/// drag in `plain`, whether they are on screen; the exact numbers go on a line of their own, which
+/// timing moves. A shot of the window goes to `$ACCENT_BENCH_SHOTS`.
+fn moment(app: &App, kind: &str, moment: &str, plain: Option<usize>) {
+    let Some(laser) = app.laser.get() else {
+        return println!("bench laser {kind} {moment} none");
+    };
+    let (strokes, strength) = (laser.strokes(), laser.strength());
+    let shown = match strength {
+        _ if strokes.is_empty() => "none",
+        s if s >= 1.0 => "full",
+        _ => "fading",
+    };
+    let now = red(app);
+    let marked = plain
+        .map(|plain| format!(" marked={}", now > plain + 1000))
+        .unwrap_or_default();
+    println!(
+        "bench laser {kind} {moment} strokes={} strength={shown}{marked}",
+        strokes.len()
+    );
+    println!(
+        "bench laser detail {kind} {moment} points={strokes:?} strength={strength:.2} red={now}"
+    );
+    if let Ok(dir) = std::env::var("ACCENT_BENCH_SHOTS") {
+        let shot = Path::new(&dir).join(format!("laser-{kind}-{moment}.png"));
+        super::minimap::window_png(&app.window, &shot);
+    }
+}
+
+/// What a press reaching the presented document would change: a diagram's page and selection, a
+/// PDF's page, the rendered note's scroll and selection.
+fn presented(app: &App) -> String {
+    if let Some(tab) = app.active_diagram() {
+        return format!(
+            "page={} selected={:?}",
+            tab.page_index() + 1,
+            tab.selection()
+        );
+    }
+    if let Some(pdf) = app.active_pdf() {
+        return format!("page={:?}", pdf.page_label());
+    }
+    match app.preview.borrow().as_ref() {
+        Some(preview) => format!(
+            "scrollY={} selected={:?}",
+            preview.scroll_y(),
+            (preview.focus_target().downcast_ref::<gtk::TextView>())
+                .map(|view| view.buffer().has_selection())
+        ),
+        None => "none".into(),
+    }
+}
+
+/// How many of the window's pixels are the laser's red on screen now.
+fn red(app: &App) -> usize {
+    let window = app.window.upcast_ref::<gtk::Widget>();
+    let (w, h) = (f64::from(window.width()), f64::from(window.height()));
+    let snapshot = gtk::Snapshot::new();
+    gtk::WidgetPaintable::new(Some(window)).snapshot(&snapshot, w, h);
+    let (Some(node), Some(renderer)) = (snapshot.to_node(), app.window.renderer()) else {
+        return 0;
+    };
+    let mut downloader = gdk::TextureDownloader::new(&renderer.render_texture(&node, None));
+    downloader.set_format(gdk::MemoryFormat::R8g8b8a8);
+    let (bytes, _) = downloader.download_bytes();
+    let pixels = bytes.as_chunks::<4>().0;
+    pixels
+        .iter()
+        .filter(|[r, g, b, _]| {
+            let (r, g, b) = (i32::from(*r), i32::from(*g), i32::from(*b));
+            r - g > 90 && r - b > 90
+        })
+        .count()
+}
+
 /// How far the presented note is scrolled, or which page of the presented PDF is in view.
 async fn position(app: &Rc<App>) -> String {
     if let Some(pdf) = app.active_pdf() {

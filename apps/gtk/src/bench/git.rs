@@ -868,13 +868,18 @@ fn moved(row: &(f32, String), now: &[(f32, String)]) -> String {
 
 /// Run `build-aux/xtest.py` on this display, then wait out the buttons' 250 ms slide.
 pub(super) async fn xtest(steps: &str) {
+    xtest_now(steps).await;
+    glib::timeout_future(Duration::from_millis(600)).await;
+}
+
+/// Run `build-aux/xtest.py` on this display, back as soon as its last step is done.
+pub(super) async fn xtest_now(steps: &str) {
     let script = concat!(env!("CARGO_MANIFEST_DIR"), "/../../build-aux/xtest.py");
     let display = std::env::var("DISPLAY").unwrap_or_default();
     let argv = ["python3", script, &display, steps].map(std::ffi::OsStr::new);
     if let Ok(run) = gio::Subprocess::newv(&argv, gio::SubprocessFlags::NONE) {
         let _ = run.wait_future().await;
     }
-    glib::timeout_future(Duration::from_millis(600)).await;
 }
 
 /// The changes list's row for `path`, a file or a folder. A header row keeps whatever tooltip its

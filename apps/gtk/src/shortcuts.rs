@@ -34,10 +34,11 @@ const SECTIONS: [&str; 19] = [
 ];
 
 /// The keys a PDF tab, a diagram's canvas or a notebook answers itself (`PdfTab::wire_keys`,
-/// `DiagramTab::wire_keys`, `NotebookTab::wire_keys`) with these commands, which carry none in the
-/// table: a bare `space` or `Delete` there would be taken from every entry (DESIGN.md, PDF and
-/// Diagram). A presented diagram's paging keys are left out, being its only keys then.
-const TAB_KEYS: [(&str, &[&str]); 30] = [
+/// `DiagramTab::wire_keys`, `NotebookTab::wire_keys`), and presentation's `L` the window hears
+/// (`wire::wire_window`), with these commands, which carry none in the table: a bare `space` or
+/// `Delete` there would be taken from every entry (DESIGN.md, PDF and Diagram). A presented
+/// diagram's paging keys are left out, being its only keys then.
+const TAB_KEYS: [(&str, &[&str]); 31] = [
     ("win.bib-undo", &["<Primary>z"]),
     ("win.bib-redo", &["<Primary><Shift>z", "<Primary>y"]),
     ("win.pdf-next-page", &["space", "n", "Right"]),
@@ -71,6 +72,7 @@ const TAB_KEYS: [(&str, &[&str]); 30] = [
     ("win.notebook-move-down", &["<Primary><Shift>Down"]),
     ("win.notebook-split", &["<Primary><Shift>minus"]),
     ("win.notebook-run-advance", &["<Shift>Return"]),
+    ("win.laser", &["l"]),
 ];
 
 /// Commands a diagram or a notebook in front runs on another command's chord
@@ -116,7 +118,7 @@ fn section(action: &str) -> Option<&'static str> {
         "follow-link" | "quick-fix" | "source-action" | "fold" | "unfold" | "fold-all"
         | "unfold-all" | "lsp-restart-file" | "python-environment" => "Code",
         _ if starts(&["debug-"]) => "Debugging",
-        "view-mode" | "minimap" | "present" => "Views",
+        "view-mode" | "minimap" | "present" | "laser" => "Views",
         "fullscreen" | "preferences" | "shortcuts" | "menu" | "about" => "Window",
         "copy-name" | "copy-relative-path" | "copy-absolute-path" | "show-in-files"
         | "reveal-in-sidebar" | "move-to-new-window" | "pin-tab" | "unpin-tab"
@@ -256,6 +258,11 @@ mod tests {
         assert_eq!(
             accels_of(&shown, "Run Cell"),
             Some(vec!["<Primary>Return".into()])
+        );
+        // Presentation's own key, under Views.
+        assert_eq!(
+            accels_under(&shown, "Views", "Laser Pointer"),
+            Some(vec!["l".into()])
         );
 
         // A rebind shows, under its heading; an unbind hides; a borrowed chord follows its lender.

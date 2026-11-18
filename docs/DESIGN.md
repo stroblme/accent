@@ -2362,7 +2362,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 
 ### Views
 
-- Toggle Preview `Ctrl+M` (a note's or a notebook's preview tab and back, Preview and Notebook), Toggle Minimap (unbound), Presentation `F5`, which is Continue while a debug session runs (Debugging).
+- Toggle Preview `Ctrl+M` (a note's or a notebook's preview tab and back, Preview and Notebook), Toggle Minimap (unbound), Presentation `F5`, which is Continue while a debug session runs (Debugging), and Laser Pointer `L` while presenting.
 - Presentation hides the sidebar, the other panes, the tab bars and both header bars, and shows the note rendered.
   The presented pane stays where it is in the pane tree with the branches beside it hidden, so its find bar and its `Ctrl+Tab` card stay its own and every divider is where it was afterwards; the rendered note is the preview laid over the pane's tabs.
   A tab that draws its own document — a source file, a PDF, a diagram, a notebook, an image, a diff, a terminal, a note's preview tab — is presented as it is; a PDF fits a whole page meanwhile and gets its zoom back afterwards.
@@ -2372,6 +2372,10 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
   A presented diagram is read only: a click selects nothing and follows a shape's link, a drag moves the page rather than what is on it, its menu stays shut and its keys do nothing but page, `Ctrl+G` going to a page and `Ctrl+F` finding a label as they do over a PDF, so only paging, finding, links, zoom and panning are left.
   What is presented has the keyboard, from F5 and from each tab a held `Ctrl+Tab` steps to — the rendered note, a source file, a PDF, a diagram, an image, a shell — so Space, Page Down, the arrows, Home and End read it as they do outside presentation and a shell takes typing; F5 and `Esc` still leave it, ahead of a presented shell too, which gets neither, though `Esc` closes the find bar first while it is up.
   Leaving gives the keyboard back to the document in front.
+- `L` puts a laser pointer over whatever is presented and takes it away again, as leaving presentation does, Xournal++'s laser highlighter (user decision 2026-11-18).
+  A press and drag draws a translucent red stroke 21 px wide over the pane and never on the document, which meanwhile neither selects, follows a link nor moves its page, though the wheel and the keys still read it.
+  The pointer keeps the document's own cursor, and the strokes stay half a second after the last one ends before they fade out together, unless a press brings them all back first.
+  Where the keyboard types the letter, in a presented shell or source file, the find bar or a dialog, `L` types it and the palette's Laser Pointer puts the pointer up instead.
 - It does not resize the window: fullscreen stays `F11`'s, so the two compose.
 - The bars go through `AdwToolbarView::set_reveal_top_bars(false)`, not the opacity fade, which would leave an empty band; the pointer-motion reveal is off meanwhile.
 - The status bar alone comes back while the pointer rests on its strip at the bottom of the document column, over the document rather than pushing it up, so nothing reflows under the pointer; it goes when the pointer leaves the strip or the window.
@@ -2382,7 +2386,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 ### Window
 
 - Fullscreen `F11`, Preferences `Ctrl+comma`, Keyboard Shortcuts `Ctrl+?`, Primary Menu `F10`, About accent (unbound); `F11` and `F10` are Step Into and Step Over while a debug session runs (Debugging).
-- **Keyboard Shortcuts** is libadwaita's shortcuts dialog over this table as it stands (`shortcuts.rs`): every bound command under this chapter's headings, a rebound one with its new chord, an unbound one left out, and the keys a PDF, a diagram's canvas or a notebook answers itself beside their commands (a presented diagram's paging aside), Duplicate Selection, Group and Run Cell with the chords they borrow.
+- **Keyboard Shortcuts** is libadwaita's shortcuts dialog over this table as it stands (`shortcuts.rs`): every bound command under this chapter's headings, a rebound one with its new chord, an unbound one left out, and the keys a PDF, a diagram's canvas, a notebook or presentation answers itself beside their commands (a presented diagram's paging aside), Duplicate Selection, Group and Run Cell with the chords they borrow.
   The palette's command mode lists every command that applies to the window as it stands, bound or not, and is where one is rebound.
 
 ### Tab menu
@@ -2535,6 +2539,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
   A notebook's cell buttons fade in beside each cell they come to and fade out where they stood when they go, the one fade out besides a toast's and a revealer's: one shared column, faded by one animation that turns round where it is, so a pointer sweeping the cells starts no fade per cell (Notebook).
   Nothing else fades in: not a reload (a LaTeX build rewrites its PDF every few seconds), a restore, a tab landing in another pane, or a layout change (F9, a split).
 - Focus mode fades as the chrome's CSS transition does, over 250 ms of `ease`, its line fade and a notebook's outputs eased the same (Chrome auto-hide); Reveal in Sidebar's outline holds a second and fades over two.
+- The laser pointer's strokes keep Xournal++'s timing instead, holding half a second and fading over another half at an even pace, and with animations off they go at the end of the hold (Views).
 - `gtk-enable-animations` off stops all of it, read as each motion starts, so a change to it holds at once: libadwaita's and GTK's animations skip to their end, GTK runs no stylesheet transition, and our own ramps check it themselves; the outline then holds the three seconds and goes at once.
   The other timings we own are debounces, which keep the main loop free.
 - A mouse wheel's notch eases over 200 ms, ease-out cubic, as GTK eases a page key or a scrollbar press (`widgets::smooth_wheel`): GTK moves a notch's whole step at once, which reads as a stutter over text.
@@ -2574,6 +2579,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 | Autosave | 1 s idle | `editor/mod.rs::AUTOSAVE` |
 | Show in PDF's mark on the line of text | 1.5 s | `pdf/source.rs::MARK` |
 | Reveal in Sidebar's outline holds, then fades | 1 s, then 2 s | `tree/mod.rs::FLASH_HOLD`, `FLASH_FADE_MS` |
+| The laser pointer's strokes hold, then fade | 500 ms, then 510 ms | `laser.rs::HOLD`, `FADE_MS` |
 
 ## Material 3 mapping
 

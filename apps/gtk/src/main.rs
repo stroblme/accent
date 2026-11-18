@@ -42,6 +42,7 @@ mod goals;
 mod highlight;
 mod hover;
 mod lang;
+mod laser;
 mod layout;
 mod loading;
 mod look;
@@ -385,6 +386,8 @@ struct App {
     zoom: Cell<f64>,
     /// `Some` while presenting, holding what to restore on the way out.
     presenting: Cell<Option<Presenting>>,
+    /// Presentation's laser pointer, built the first time `L` puts it up.
+    laser: OnceCell<Rc<laser::Laser>>,
     /// `Some` while the window is too narrow for the sidebar (`layout::COLLAPSE`), holding what
     /// widening it puts back, which is also what the session saves.
     collapsed: Cell<Option<Collapsed>>,

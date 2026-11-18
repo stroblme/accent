@@ -486,6 +486,9 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ),
     ("win.insert-template", "Insert Template…", &[]),
     ("win.present", "Presentation Mode", &["F5"]),
+    // Presentation's own `L`, heard by the window while presenting (`wire::wire_window`): a bare
+    // letter in the table would be taken from every entry.
+    ("win.laser", "Laser Pointer", &[]),
     ("win.fullscreen", "Fullscreen", &["F11"]),
     ("win.preferences", "Preferences", &["<Primary>comma"]),
     // GNOME's chord for it (`Ctrl+?`); `F1`, help, is on the never-bind list.

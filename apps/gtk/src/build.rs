@@ -338,6 +338,7 @@ pub fn build_window(
         content: content.clone(),
         zoom: Cell::new(1.0),
         presenting: Cell::new(None),
+        laser: OnceCell::new(),
         collapsed: Cell::new(None),
         chrome_hidden: Cell::new(false),
         navigating: Cell::new(false),
