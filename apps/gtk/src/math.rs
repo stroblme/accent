@@ -49,9 +49,57 @@ type Key = (String, bool, u32);
 
 thread_local! {
     static FONTS: OnceCell<Rc<Fonts>> = const { OnceCell::new() };
-    // ponytail: every formula laid out is kept for the app's life, by TeX, display and size;
-    // forgetting the ones nothing has painted for a while is the upgrade if that ever weighs.
-    static FORMULAS: RefCell<HashMap<Key, Option<Rc<Layout>>>> = RefCell::default();
+    static FORMULAS: RefCell<Kept> = RefCell::default();
+}
+
+/// What the formulas laid out or asked for lately may weigh before the ones asked for before
+/// them are let go of: about 4,800 formulas of some 870 bytes, a long note's at one zoom with room
+/// to spare, where laying 2,000 out again takes about 45 ms (2026-11-18).
+const GENERATION: usize = 4 << 20;
+
+/// The formulas laid out, `None` for one that does not, in two generations by weight: the newer
+/// takes each formula laid out or asked for again, and once it weighs [`GENERATION`] it becomes
+/// the older, the older let go of. So a formula asked for once a generation stays, and what edits
+/// and zooms leave behind goes. A view holds its own layout, which going from here does not take.
+#[derive(Default)]
+struct Kept {
+    new: HashMap<Key, Option<Rc<Layout>>>,
+    old: HashMap<Key, Option<Rc<Layout>>>,
+    /// What `new` weighs.
+    bytes: usize,
+}
+
+impl Kept {
+    fn get(&mut self, key: &Key) -> Option<Option<Rc<Layout>>> {
+        if let Some(laid) = self.new.get(key) {
+            return Some(laid.clone());
+        }
+        let (key, laid) = self.old.remove_entry(key)?;
+        self.insert(key, laid.clone());
+        Some(laid)
+    }
+
+    fn insert(&mut self, key: Key, laid: Option<Rc<Layout>>) {
+        self.bytes += weight(&key, laid.as_deref());
+        self.new.insert(key, laid);
+        if self.bytes > GENERATION {
+            self.old = std::mem::take(&mut self.new);
+            self.bytes = 0;
+        }
+    }
+}
+
+/// About the bytes a kept formula takes: its entry, its key's text, and its layout's items.
+fn weight(key: &Key, laid: Option<&Layout>) -> usize {
+    let items = laid.map_or(0, |laid| {
+        let text = |item: &Item| match item {
+            Item::Text { text, .. } => text.len(),
+            _ => 0,
+        };
+        let items = laid.items.iter();
+        items.map(|item| size_of::<Item>() + text(item)).sum()
+    });
+    size_of::<(Key, Option<Rc<Layout>>, Layout)>() + key.0.len() + items
 }
 
 /// The math font, found the first time a formula is laid out, through `widget`'s font map.
@@ -168,7 +216,7 @@ fn lay_out(
     mathml: impl FnOnce() -> Option<String>,
 ) -> Option<Rc<Layout>> {
     let key = (source.to_string(), display, size.to_bits());
-    if let Some(kept) = FORMULAS.with_borrow(|laid| laid.get(&key).cloned()) {
+    if let Some(kept) = FORMULAS.with_borrow_mut(|kept| kept.get(&key)) {
         return kept;
     }
     let fonts = fonts(widget.as_ref());
@@ -186,7 +234,7 @@ fn lay_out(
         tracing::warn!("laying out {source:?} panicked; its source is shown");
         None
     });
-    FORMULAS.with_borrow_mut(|laid_out| laid_out.insert(key, laid.clone()));
+    FORMULAS.with_borrow_mut(|kept| kept.insert(key, laid.clone()));
     laid
 }
 
@@ -482,5 +530,66 @@ mod imp {
             let baseline = (f.ascent * scale).ceil();
             paint(snapshot, f, (0.0, baseline), scale, &ink, colour);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Formulas laid out at zoom after zoom weigh at most about two generations, while one asked
+    /// for at every zoom stays kept, and one a view holds stays whole once it has gone.
+    #[test]
+    fn kept_formulas_are_bounded_by_weight() {
+        let laid = |i: usize| {
+            let rule = Item::Rule {
+                x: 0.0,
+                y: 0.0,
+                w: 1.0,
+                h: 1.0,
+                color: None,
+            };
+            let items = vec![rule; 1 + i % 50];
+            let (width, ascent, descent) = (1.0, 1.0, 0.0);
+            Some(Rc::new(Layout {
+                width,
+                ascent,
+                descent,
+                items,
+            }))
+        };
+        let mut kept = Kept::default();
+        let shown = ("x^2".to_string(), false, 16f32.to_bits());
+        let held = laid(0);
+        kept.insert(shown.clone(), held.clone());
+        let first = ("\\frac{a}{b}".to_string(), false, 8f32.to_bits());
+        let gone = laid(1);
+        kept.insert(first.clone(), gone.clone());
+        let (mut laid_out, mut most) = (0, 0);
+        for size in 8..40 {
+            for i in 0..2000 {
+                let key = (
+                    format!("\\frac{{a + {i}}}{{b}}"),
+                    false,
+                    (size as f32).to_bits(),
+                );
+                if kept.get(&key).is_none() {
+                    let laid = laid(i);
+                    laid_out += weight(&key, laid.as_deref());
+                    kept.insert(key, laid);
+                }
+                // As a view lays its formula out again, a zoom or an edit beside it.
+                if i % 100 == 0 {
+                    let again = kept.get(&shown).flatten();
+                    assert!(again.is_some_and(|again| Rc::ptr_eq(&again, held.as_ref().unwrap())));
+                    let all = kept.new.iter().chain(&kept.old);
+                    most = most.max(all.map(|(k, l)| weight(k, l.as_deref())).sum());
+                }
+            }
+        }
+        assert!(laid_out > 8 * GENERATION, "{laid_out}");
+        assert!(most <= 2 * GENERATION + 2 * weight(&first, laid(49).as_deref()));
+        assert!(kept.get(&first).is_none());
+        assert_eq!(gone.unwrap().items.len(), 2);
     }
 }
