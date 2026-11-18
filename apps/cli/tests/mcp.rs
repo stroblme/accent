@@ -2,7 +2,7 @@
 //! stdin, in both of the protocol's lifecycles, and gone once its stdin is.
 
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -634,6 +634,59 @@ fn mcp_writes_only_over_what_it_read() {
     assert!(!error, "{said:?}");
     assert_eq!(said[0], r#"{"created":true,"path":"Days/Day.md"}"#);
     assert_eq!(scratch.read("Days/Day.md"), "# Made\n");
+    c.close();
+}
+
+/// No alias reaches into `.git`: a symlink to the folder, to a file in it or to a file not there
+/// yet is refused for reads, for writes over what is there and for new files, as the plain path
+/// is, and nothing in it is listed.
+#[test]
+fn mcp_keeps_out_of_git_through_any_alias() {
+    let scratch = Scratch::new("git");
+    let vault = scratch.dir.join("vault");
+    std::fs::create_dir_all(vault.join(".git/hooks")).unwrap();
+    let config = "[core]\n\tbare = false\n# quince\n";
+    std::fs::write(vault.join(".git/config"), config).unwrap();
+    let link = |target: &str, name: &str| {
+        std::os::unix::fs::symlink(vault.join(target), vault.join(name)).unwrap()
+    };
+    link(".git", "g");
+    link(".git/config", "cfg");
+    link(".git/hooks/post-commit", "hook");
+    let mut c = Client::start(&scratch, &[]);
+    c.initialize();
+
+    for path in ["g/config", "cfg"] {
+        let (said, error) = c.call("read_note", json!({"path": path}));
+        assert!(error, "{path} was read: {said:?}");
+        let patch = json!({"path": path, "mode": "append", "content": "x"});
+        let (said, error) = c.call("patch_note", patch);
+        assert!(error, "{path} was patched: {said:?}");
+        // The etag the file has, so that only the path stands between the write and the file.
+        let m = std::fs::metadata(vault.join(".git/config")).unwrap();
+        let mtime_ns = m.mtime() * 1_000_000_000 + m.mtime_nsec();
+        let etag = format!("{mtime_ns}-{}-{}", m.size(), m.ino());
+        let write = json!({"path": path, "content": "x", "etag": etag});
+        let (said, error) = c.call("write_note", write);
+        assert!(error, "{path} was written: {said:?}");
+    }
+    assert_eq!(scratch.read(".git/config"), config);
+    for (path, lands) in [
+        ("g/new.md", ".git/new.md"),
+        ("hook", ".git/hooks/post-commit"),
+    ] {
+        let (said, error) = c.call("write_note", json!({"path": path, "content": "x"}));
+        assert!(error, "{path} was made: {said:?}");
+        assert!(!vault.join(lands).exists(), "{lands} was made");
+    }
+
+    let (said, _) = c.call("search_notes", json!({"query": "quince"}));
+    assert_eq!(said[0], "[]");
+    let (said, _) = c.call("list_dir", json!({}));
+    for path in ["g", "cfg"] {
+        let row = format!(r#""path":"{path}""#);
+        assert!(!said[0].contains(&row), "{path} was listed: {said:?}");
+    }
     c.close();
 }
 

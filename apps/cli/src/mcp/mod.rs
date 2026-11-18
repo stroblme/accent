@@ -146,8 +146,9 @@ struct Shared {
 
 impl Shared {
     /// `rel` if it names a place inside the vault's real root, or why not: no absolute path, no
-    /// `..`, nothing in `.git`, and nothing a symlink takes outside the root. A file not there
-    /// yet is held to where its nearest folder is.
+    /// `..`, nothing in `.git`, and nothing a symlink takes outside the root or into `.git`. A
+    /// file not there yet is held to the real place of its nearest existing entry, and a link to
+    /// nothing, which has none, is refused.
     fn inside(&self, rel: &str) -> Result<String, String> {
         let plain = !rel.is_empty()
             && Path::new(rel)
@@ -160,11 +161,14 @@ impl Shared {
         let path = self.vault.resolve(rel).map_err(|_| outside())?;
         let real = path
             .ancestors()
-            .find_map(|p| p.canonicalize().ok())
+            .find(|p| p.symlink_metadata().is_ok())
+            .and_then(|p| p.canonicalize().ok())
             .ok_or_else(outside)?;
-        match real.starts_with(self.vault.root()) {
-            true => Ok(rel.to_string()),
-            false => Err(outside()),
+        match real.strip_prefix(self.vault.root()) {
+            Ok(within) if within.components().all(|c| c.as_os_str() != ".git") => {
+                Ok(rel.to_string())
+            }
+            _ => Err(outside()),
         }
     }
 
