@@ -557,8 +557,11 @@ pub struct Sheet {
     pub grid: Option<f64>,
     /// Whether a move shows guides.
     pub guides: bool,
-    /// Each cell's parent, up to but not including its layer.
+    /// Each cell's parent, up to but not including its layer, for the cells a layer holds, so that
+    /// every walk up through them ends.
     parents: HashMap<CellId, CellId>,
+    /// Each cell a layer holds, at any depth, with that layer and whether it shows ([`placed`]).
+    placed: HashMap<CellId, (CellId, bool)>,
     /// The rectangle of every vertex, absolute and unrotated: what resizing works on.
     rects: HashMap<CellId, Rect>,
     edges: HashSet<CellId>,
@@ -609,6 +612,7 @@ impl Sheet {
             page_rect,
             grid: page.grid(),
             guides: page.guides(),
+            placed: placed(page),
             ..Sheet::default()
         };
         for cell in &page.cells {
@@ -618,7 +622,7 @@ impl Sheet {
             if layers.contains(cell.id.as_str()) {
                 continue;
             }
-            if !layers.contains(parent) {
+            if !layers.contains(parent) && sheet.placed.contains_key(&cell.id) {
                 sheet.parents.insert(cell.id.clone(), parent.to_string());
             }
             if cell.edge {
@@ -820,33 +824,15 @@ impl Sheet {
     /// Visible, non-relative vertices on `id`'s layer, including `id`, with visible
     /// ancestors. Unlike draw.io's insertion-layer guides, these use the moved cell's layer.
     fn layer_shapes(&self, id: &str) -> Vec<&accent_drawio::Cell> {
-        let page = &self.page;
-        let cells: HashMap<&str, &accent_drawio::Cell> =
-            page.cells.iter().map(|c| (c.id.as_str(), c)).collect();
-        // A cell's layer: the parent of its outermost ancestor below one.
-        let layer_of = |id: &str| {
-            let mut top = id;
-            while let Some(p) = self.parent(top) {
-                top = p;
-            }
-            cells.get(top).and_then(|c| c.parent.as_deref())
+        let layer = self.placed.get(id).map(|(layer, _)| layer);
+        let on = |c: &accent_drawio::Cell| {
+            let placed = self.placed.get(&c.id);
+            placed.is_some_and(|(at, shown)| *shown && Some(at) == layer)
         };
-        let shown = |id: &str| {
-            let mut at = cells.get(id).copied();
-            while let Some(cell) = at {
-                if !cell.is_visible() {
-                    return false;
-                }
-                at = cell.parent.as_deref().and_then(|p| cells.get(p).copied());
-            }
-            true
-        };
-        let layer = layer_of(id);
-        page.cells
-            .iter()
-            .filter(|c| c.vertex && c.geometry.as_ref().is_some_and(|g| !g.relative))
-            .filter(|c| shown(&c.id) && layer_of(&c.id) == layer)
-            .collect()
+        let shapes = self.page.cells.iter();
+        let shapes =
+            shapes.filter(|c| c.vertex && c.geometry.as_ref().is_some_and(|g| !g.relative));
+        shapes.filter(|c| on(c)).collect()
     }
 
     /// Resolve click selection and drag target at `p`. Clicks enter groups one level
@@ -1180,6 +1166,34 @@ impl Sheet {
         }
         drawn
     }
+}
+
+/// Each cell a layer of `page` holds, at any depth, with that layer and whether it shows: it, its
+/// layer, the root and every cell between them visible. Walked down from the root, so that a cell
+/// in a `parent` loop, which a hand-edited file can hold, is under no layer.
+fn placed(page: &Page) -> HashMap<CellId, (CellId, bool)> {
+    let mut held: HashMap<&str, Vec<&accent_drawio::Cell>> = HashMap::new();
+    for cell in &page.cells {
+        if let Some(parent) = cell.parent.as_deref() {
+            held.entry(parent).or_default().push(cell);
+        }
+    }
+    let children = |id: &str| held.get(id).into_iter().flatten().copied();
+    let mut placed = HashMap::new();
+    let Some(root) = page.root() else {
+        return placed;
+    };
+    let layers =
+        children(&root.id).map(|l| (l, l.id.as_str(), root.is_visible() && l.is_visible()));
+    let mut next: Vec<(&accent_drawio::Cell, &str, bool)> = layers.collect();
+    while let Some((cell, layer, shown)) = next.pop() {
+        for child in children(&cell.id) {
+            let shown = shown && child.is_visible();
+            placed.insert(child.id.clone(), (layer.to_string(), shown));
+            next.push((child, layer, shown));
+        }
+    }
+    placed
 }
 
 #[cfg(test)]
@@ -1856,5 +1870,33 @@ mod tests {
         assert_eq!((nw.right(), nw.bottom()), (r.right(), r.bottom()));
         let snapped = resize_by(&r, Handle::SouthEast, Point::new(4.0, 4.0), Some(10.0));
         assert_eq!((snapped.right(), snapped.bottom()), (110.0, 60.0));
+    }
+
+    /// Two shapes each other's parent, which a hand-edited file can hold and draw.io never
+    /// writes, are under no layer: a move's and a resize's guides, a click and the group a
+    /// selection opens all end, and leave them out.
+    #[test]
+    fn a_parent_loop_is_left_out_and_ends_every_walk_up() {
+        let xml = r#"<mxfile><diagram name="P" id="p"><mxGraphModel><root>
+            <mxCell id="0"/><mxCell id="1" parent="0"/>
+            <mxCell id="s" parent="1" vertex="1" style=""><mxGeometry x="0" y="0" width="10" height="10" as="geometry"/></mxCell>
+            <mxCell id="t" parent="1" vertex="1" style=""><mxGeometry x="40" y="0" width="10" height="10" as="geometry"/></mxCell>
+            <mxCell id="a" parent="b" vertex="1" style=""><mxGeometry x="100" y="0" width="10" height="10" as="geometry"/></mxCell>
+            <mxCell id="b" parent="a" vertex="1" style=""><mxGeometry x="200" y="0" width="10" height="10" as="geometry"/></mxCell>
+            </root></mxGraphModel></diagram></mxfile>"#;
+        let file = accent_drawio::File::from_bytes(xml.as_bytes()).unwrap();
+        let sheet = Sheet::of(&file.pages()[0], &Context::default());
+        let ids = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+        let t = sheet.guide_box("t");
+        assert_eq!(sheet.guide_boxes(&ids(&["s"]), "s"), [t.unwrap()]);
+        let area = Rect::new(-1000.0, -1000.0, 2000.0, 2000.0);
+        assert_eq!(sheet.size_guides("s", &area).len(), 1, "t alone");
+        assert!(!sheet.is_within("a", "s") && !sheet.is_within("a", "b"));
+        assert_eq!(
+            sheet.pick(Point::new(5.0, 5.0), 1.0, &[]).unwrap().cell,
+            "s"
+        );
+        assert_eq!(sheet.open_group(&ids(&["a", "b"])), None);
+        assert_eq!(sheet.all(), ["s", "t"]);
     }
 }
