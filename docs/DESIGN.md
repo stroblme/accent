@@ -890,7 +890,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - A focused shell keeps every chord the Keyboard section does not reserve, and with Forward All Keys on nearly all of those too: a terminal that answers only half of readline is not a terminal.
 - Foreground, background and all sixteen ANSI colours come from `theme.rs`, one palette per theme: VTE's own is arithmetic (its blue is 1.41:1 on our dark background), and a colour read off the widget does not follow Solarized.
   `vte_terminal_set_colors` takes all sixteen or none.
-  A program that turned on DEC mode 2031, as Claude Code's Auto theme does, hears of every theme switch from VTE (0.82 on), and the holder keeps that mode across an attach and has the new terminal report its scheme once.
+  A program that turned on DEC mode 2031, as Claude Code's Auto theme does, hears of every theme switch from VTE (0.82 on).
+  The holder keeps that mode and focus reports (1004) across an attach, and while a program runs in the foreground it has the new terminal report its scheme once.
 - The monospace font, scaled by the terminal's own zoom; an underline cursor, so the character under it stays readable.
 - Inset 12 px either side, not by the 48 px page gutter: that measure is for prose, and a terminal is a grid.
 - Opening one focuses the shell, so it can be typed into without a click.

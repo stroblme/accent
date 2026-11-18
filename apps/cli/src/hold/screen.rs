@@ -1,5 +1,5 @@
 //! Capture shell output with `vt100::Parser` and replay history, screen, cursor, input modes
-//! and colour scheme reports on attach. Scroll margins, character sets, cursor shape, and OSC 7
+//! and focus and colour scheme reports on attach. Scroll margins, character sets, cursor shape, and OSC 7
 //! working directory are not restored; full-screen programs are asked to redraw. Soft wraps
 //! return as hard wraps.
 
@@ -8,11 +8,13 @@
 pub const SCROLLBACK: usize = 10_000;
 
 /// What a replay restores beside vt100's screen: the window title the shell last set (OSC 0 or
-/// 2), and whether a program asked to hear of colour scheme changes (DEC mode 2031), which
-/// vt100 does not model.
+/// 2), and the reports a program asked for that vt100 does not model.
 #[derive(Default)]
 pub struct Kept {
     pub title: Vec<u8>,
+    /// DEC mode 1004: focus gained and lost, as `CSI I` and `CSI O`.
+    pub focus_reports: bool,
+    /// DEC mode 2031: colour scheme changes, as `CSI ? 997 ; 1|2 n`.
     pub scheme_reports: bool,
 }
 
@@ -29,8 +31,15 @@ impl vt100::Callbacks for Kept {
         params: &[&[u16]],
         c: char,
     ) {
-        if i1 == Some(b'?') && matches!(c, 'h' | 'l') && params.iter().any(|p| *p == [2031]) {
-            self.scheme_reports = c == 'h';
+        if i1 != Some(b'?') || !matches!(c, 'h' | 'l') {
+            return;
+        }
+        for param in params {
+            match param {
+                [1004] => self.focus_reports = c == 'h',
+                [2031] => self.scheme_reports = c == 'h',
+                _ => {}
+            }
         }
     }
 }
@@ -65,8 +74,9 @@ pub fn resize(p: &mut Parser, rows: u16, cols: u16) {
 
 /// The bytes that turn an empty terminal of the parser's size into the shell's: the history,
 /// then the screen, and with a full-screen program running, the shell's screen hidden behind
-/// the program's, so that quitting it shows what was there before.
-pub fn replay(p: &mut Parser) -> Vec<u8> {
+/// the program's, so that quitting it shows what was there before. `program` says a program, not
+/// the shell itself, runs in the foreground.
+pub fn replay(p: &mut Parser, program: bool) -> Vec<u8> {
     let alt = p.screen().alternate_screen();
     let mut out = Vec::new();
     if alt {
@@ -85,10 +95,17 @@ pub fn replay(p: &mut Parser) -> Vec<u8> {
         out.extend(&kept.title);
         out.push(b'\x07');
     }
-    // The terminal attached now has the mode off, and its scheme may have changed meanwhile:
-    // asked for the scheme, it reports the one it has (`CSI ? 997 ; 1|2 n`), as on a change.
+    // The terminal attached now has both modes off.
+    if kept.focus_reports {
+        out.extend(b"\x1b[?1004h");
+    }
     if kept.scheme_reports {
-        out.extend(b"\x1b[?2031h\x1b[?996n");
+        out.extend(b"\x1b[?2031h");
+        // Its scheme may have changed meanwhile: asked, it reports the one it has, as on a
+        // change. A bare shell left with the mode on would get the report typed at its prompt.
+        if program {
+            out.extend(b"\x1b[?996n");
+        }
     }
     out
 }
@@ -129,7 +146,7 @@ mod tests {
     fn replayed(live: &mut Parser) -> Parser {
         let (rows, cols) = live.screen().size();
         let mut terminal = parser(rows, cols);
-        terminal.process(&replay(live));
+        terminal.process(&replay(live, false));
         terminal
     }
 
@@ -181,15 +198,19 @@ mod tests {
     }
 
     #[test]
-    fn colour_scheme_reports_come_back_with_the_scheme_asked_for() {
+    fn focus_and_colour_scheme_reports_come_back() {
         let mut live = parser(3, 20);
-        live.process(b"\x1b[?2031h$ ");
-        assert!(replay(&mut live).ends_with(b"\x1b[?2031h\x1b[?996n"));
-        assert!(replayed(&mut live).callbacks().scheme_reports);
-        // Off again, among other modes, as a program leaving does it.
-        live.process(b"\x1b[?1004;2031l");
-        assert!(!replayed(&mut live).callbacks().scheme_reports);
-        assert!(!replay(&mut live).ends_with(b"\x1b[?996n"));
+        live.process(b"\x1b[?1004;2031h$ ");
+        // The scheme is asked for only on a program's behalf, never at a bare shell's prompt.
+        assert!(replay(&mut live, true).ends_with(b"\x1b[?1004h\x1b[?2031h\x1b[?996n"));
+        assert!(replay(&mut live, false).ends_with(b"\x1b[?1004h\x1b[?2031h"));
+        let kept = replayed(&mut live);
+        assert!(kept.callbacks().focus_reports && kept.callbacks().scheme_reports);
+        // Off again, as a program leaving does it.
+        live.process(b"\x1b[?1004l\x1b[?2031l");
+        let kept = replayed(&mut live);
+        assert!(!kept.callbacks().focus_reports && !kept.callbacks().scheme_reports);
+        assert!(!replay(&mut live, true).ends_with(b"\x1b[?996n"));
     }
 
     #[test]

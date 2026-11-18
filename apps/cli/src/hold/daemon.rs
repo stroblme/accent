@@ -662,7 +662,8 @@ impl Shell {
         }
         let _ = conn.set_write_timeout(Some(STALL));
         let alt = term.parser.screen().alternate_screen();
-        for piece in screen::replay(&mut term.parser).chunks(CHUNK) {
+        let program = self.foreground().is_some();
+        for piece in screen::replay(&mut term.parser, program).chunks(CHUNK) {
             if protocol::write_frame(&mut conn, OUTPUT, piece).is_err() {
                 return false;
             }
