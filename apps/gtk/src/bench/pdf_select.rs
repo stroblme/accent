@@ -1,9 +1,10 @@
 //! The Select tool's drill, `ACCENT_BENCH_PDF=select:<rel>[,<n>]`: on the first page, two lines,
 //! a rectangle and a text of ours written into the file first, then through XTEST a lasso, a
 //! move by a line lying along the box's edge and its Undo, a Ctrl+drag's copies and a Shift+drag
-//! along one axis, each undone, a copy pasted a step off it, a pick and a delete, Ctrl+click, a
-//! cut pasted in place, a click away and Escape, a group stretched by its corner, a duplicate and
-//! the arrows, the lines and the text recoloured through the ring's Colour and through the
+//! along one axis, each undone, a copy pasted a step off it, lassos drawn from a stroke not held,
+//! with and without Ctrl, a pick and a delete, Ctrl+click, a cut pasted in place, a click away
+//! and Escape, a group stretched by its corner, a duplicate and the arrows, the lines and the
+//! text recoloured through the ring's Colour and through the
 //! palette's Recolour Selection, each against the file. Pictures of the lasso, the group and the
 //! Colour swatches, light and dark, go to `$TMPDIR`. Then a line drawn with Shift keeps to 45°,
 //! and last another editor's stroke, in a file of its own beside it, is recoloured and drawn again
@@ -246,6 +247,63 @@ pub(super) fn bench_pdf_select(app: &Rc<App>, arg: &str) {
         );
         undo(false).await;
         println!("bench select paste_undone {}", filed(&path) == drawn);
+
+        // Only what is held moves (user decision 2026-11-18): a drag from the rectangle's edge,
+        // which is not held, draws a lasso round the two lines and moves nothing, and with Ctrl
+        // one round the text adds it to them.
+        let through = |points: &[(f32, f32)]| {
+            let mut steps = vec![to(points[0]), "down".to_string()];
+            for leg in points.windows(2) {
+                let ((x0, y0), (x1, y1)) = (leg[0], leg[1]);
+                for k in 1..=10 {
+                    let t = k as f32 / 10.0;
+                    steps.push(to((x0 + (x1 - x0) * t, y0 + (y1 - y0) * t)));
+                    steps.push("sleep 0.01".to_string());
+                }
+            }
+            steps.push("up".to_string());
+            steps.join("; ")
+        };
+        super::git::xtest(&click((300.0, 700.0))).await;
+        let edge = (RECT.0, 240.0);
+        let round_lines = [
+            edge,
+            (80.0, 290.0),
+            (80.0, 170.0),
+            (230.0, 170.0),
+            (300.0, 210.0),
+        ];
+        super::git::xtest(&through(&round_lines)).await;
+        save().await;
+        println!(
+            "bench select lassoed_from_rect picked={} unmoved={}",
+            picked(),
+            filed(&path) == drawn
+        );
+        // The pointer says so: the move cursor over a line held, the arrow over the rectangle.
+        let cursor = async |p: (f32, f32)| {
+            super::git::xtest(&format!("{}; sleep 0.1", to(p))).await;
+            let cursor = reader.cursor();
+            cursor.and_then(|c| c.name()).map(|n| n.to_string())
+        };
+        let (held, not_held) = (cursor((120.0, LEFT[0])).await, cursor(edge).await);
+        println!("bench select cursor held={held:?} not_held={not_held:?}");
+        let round_text = [
+            edge,
+            (90.0, 320.0),
+            (90.0, 360.0),
+            (200.0, 360.0),
+            (250.0, 300.0),
+        ];
+        let steps = format!("keydown ctrl; {}; keyup ctrl", through(&round_text));
+        super::git::xtest(&steps).await;
+        save().await;
+        println!(
+            "bench select ctrl_lassoed_from_rect picked={} unmoved={}",
+            picked(),
+            filed(&path) == drawn
+        );
+        super::git::xtest(&click((300.0, 700.0))).await;
 
         // The rectangle picked by its edge, and deleted; its empty middle picks nothing.
         super::git::xtest(&click((RECT.0, 240.0))).await;

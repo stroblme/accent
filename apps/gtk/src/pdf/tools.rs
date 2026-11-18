@@ -557,6 +557,8 @@ pub struct Lasso {
     pub page: usize,
     pub points: Vec<(f32, f32)>,
     pub add: bool,
+    /// What the press was on, not held, which a release that did not move takes instead.
+    pub click: Option<Picked>,
 }
 
 /// A stroke as the widget holds it while it is being drawn.

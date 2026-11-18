@@ -147,14 +147,14 @@ pub(super) fn bench_pdf_text(app: &Rc<App>, rel: &str) {
             filed(&pdf, page)
         );
 
-        // Moved by Select 40 px down, and back by Undo.
+        // Picked by Select, which alone lets a drag move it, moved 40 px down, and back by Undo.
         app.pdf_mode(pdfview::Mode::Select);
         glib::timeout_future(Duration::from_secs(1)).await;
         if let Some((x, y)) = first() {
             let (x, y) = on_screen(x, y);
             let steps = format!(
-                "move {x:.0} {y:.0}; down; sleep 0.1; move {x:.0} {:.0}; sleep 0.1; \
-                 move {x:.0} {:.0}; sleep 0.1; up",
+                "move {x:.0} {y:.0}; down; up; sleep 0.6; down; sleep 0.1; move {x:.0} {:.0}; \
+                 sleep 0.1; move {x:.0} {:.0}; sleep 0.1; up",
                 y + 20.0,
                 y + 40.0
             );

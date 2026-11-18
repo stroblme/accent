@@ -355,11 +355,10 @@ impl PdfView {
     }
 
     /// The Select tool's press. The rotate ring, a corner or an edge of what it holds takes hold
-    /// of all of it, and so does a press on one of its items or anywhere in their box; a stroke
-    /// or a text of ours not held is picked alone, held by its middle, so a drag moves it at once.
-    /// With Ctrl a stroke or a text not held is added at once and one held is let go of on a
-    /// click, a drag moving or copying all that is held. Anywhere else starts a lasso, which with
-    /// Ctrl adds to what is held.
+    /// of all of it, and so does a press on one of its items or anywhere in their box, a drag
+    /// moving or with Ctrl copying all that is held, and a Ctrl+click on an item held letting go
+    /// of it. Anywhere else starts a lasso, which with Ctrl adds to what is held, and a click on a
+    /// stroke, a text or a picture not held picks it, alone or with Ctrl added.
     fn select_press(&self, x: f64, y: f64, ctrl: bool) {
         let Some((page, at)) = self.nearest_page_point(x, y) else {
             return;
@@ -374,26 +373,19 @@ impl PdfView {
         };
         let grab = match (handle, hit, ctrl) {
             (Some(h), _, false) if h != Handle::Move => Some(h),
-            (_, Some(item), true) => {
-                match picked.as_mut().filter(|s| s.page == page) {
-                    Some(s) if s.items.iter().any(|i| i.id == item.id) => {
-                        self.imp().let_go.set(Some(item.id))
-                    }
-                    Some(s) => s.items.push(item),
-                    None => *picked = Some(Selection::of(page, vec![item])),
-                }
+            (_, Some(item), true) if held(item.id) => {
+                self.imp().let_go.set(Some(item.id));
                 Some(Handle::Move)
             }
-            (_, Some(item), false) if !held(item.id) => {
-                *picked = Some(Selection::of(page, vec![item]));
-                Some(Handle::Move)
-            }
-            (_, Some(_), false) | (Some(Handle::Move), None, false) => Some(Handle::Move),
-            _ => {
+            (_, Some(item), _) if held(item.id) => Some(Handle::Move),
+            (Some(Handle::Move), None, false) => Some(Handle::Move),
+            // Only what is held moves (user decision 2026-11-18).
+            (_, click, add) => {
                 let lasso = Lasso {
                     page,
                     points: vec![at],
-                    add: ctrl,
+                    add,
+                    click,
                 };
                 self.imp().lasso.replace(Some(lasso));
                 None
@@ -534,8 +526,11 @@ impl PdfView {
     fn select_release(&self, moved: bool, copy: bool) {
         let let_go = self.imp().let_go.take();
         if let Some(lasso) = self.imp().lasso.take() {
-            // A click's lasso, a point or a shaky few, encloses nothing.
-            let taken = self.lassoed(&lasso);
+            // A click's lasso, a point or a shaky few, encloses nothing, and takes what it was on.
+            let taken = match lasso.click.clone().filter(|_| !moved) {
+                Some(item) => vec![item],
+                None => self.lassoed(&lasso),
+            };
             let mut picked = self.imp().picked.borrow_mut();
             match picked
                 .as_mut()
@@ -611,20 +606,25 @@ impl PdfView {
     }
 
     /// Under the Select tool the pointer says what a press would do: a handle's own cursor, the
-    /// move cursor over a stroke or a text, the arrow elsewhere. Set only when that changes.
+    /// move cursor over what is held and inside its box, the arrow elsewhere, a stroke or a text
+    /// not held included. Set only when that changes.
     fn hover(&self, x: f64, y: f64) {
         let imp = self.imp();
         if imp.mode.get() != Mode::Select || imp.dot.get() || imp.drag_from.get().is_some() {
             return;
         }
-        let picks = || {
+        // Whether what is under the pointer is held, as `select_press` asks.
+        let held = || {
             let (page, at) = self.nearest_page_point(x, y)?;
-            self.pick_at(page, at)
+            let item = self.pick_at(page, at)?;
+            let picked = imp.picked.borrow();
+            let s = picked.as_ref().filter(|s| s.page == page);
+            Some(s.is_some_and(|s| s.items.iter().any(|i| i.id == item.id)))
         };
-        let name = match self.handle_under(x, y) {
-            Some(handle) => handle.cursor(),
-            None if picks().is_some() => "move",
-            None => "default",
+        let name = match (self.handle_under(x, y), held()) {
+            (Some(handle), _) if handle != Handle::Move => handle.cursor(),
+            (_, Some(true)) | (Some(_), None) => "move",
+            _ => "default",
         };
         if self.cursor().and_then(|c| c.name()).as_deref() != Some(name) {
             self.set_cursor_from_name(Some(name));
