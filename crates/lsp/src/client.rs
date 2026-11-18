@@ -13,7 +13,7 @@ use std::time::Duration;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::runtime::runtime;
@@ -107,12 +107,9 @@ impl Client {
         };
 
         // Servers log freely on stderr; a full pipe would block them, so it is always drained.
-        runtime().spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                tracing::debug!(target: "accent_lsp::stderr", "{line}");
-            }
-        });
+        runtime().spawn(codec::lines(stderr, |line| {
+            tracing::debug!(target: "accent_lsp::stderr", "{line}");
+        }));
 
         let (client, notifications) = Client::new(stdout, stdin);
         let _ = client.inner.configuration.set(configuration);

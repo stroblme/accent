@@ -14,7 +14,7 @@ use accent_lsp::{codec, runtime};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::process::ChildStderr;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -283,11 +283,11 @@ async fn write_loop(
 }
 
 async fn drain(inner: Arc<Inner>, stderr: ChildStderr) {
-    let mut lines = BufReader::new(stderr).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
+    codec::lines(stderr, |line| {
         tracing::debug!(target: "accent_dap::stderr", "{line}");
         *lock(&inner.last_words) = Some(line);
-    }
+    })
+    .await;
 }
 
 async fn read_loop(
