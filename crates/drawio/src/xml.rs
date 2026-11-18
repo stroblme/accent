@@ -21,17 +21,18 @@ pub fn parse(bytes: &[u8]) -> Result<File, Error> {
 /// What one file may hold, every page of it being read in and kept, as the bytes its compressed
 /// pages inflate to and the elements of its XML and theirs. Each page once had the bytes to
 /// itself, so that twelve pages of a file of 100 kB held 72 MiB of labels, and bytes alone leave
-/// out what an element costs, an empty cell taking some 670 bytes where it inflates from 15.
+/// out what an element costs, an empty cell taking some 670 bytes where it inflates from 15. The
+/// stencils packed into styles share one too (`Stencil::of`).
 #[derive(Clone, Copy)]
-struct Budget {
-    inflated: usize,
-    elements: usize,
+pub(crate) struct Budget {
+    pub(crate) inflated: usize,
+    pub(crate) elements: usize,
 }
 
 impl Budget {
     /// 64 MiB inflated, and a million elements, seven times as many as an uncompressed file of
     /// 16 MiB holds in ordinary shapes.
-    const FILE: Budget = Budget {
+    pub(crate) const FILE: Budget = Budget {
         inflated: MAX_INFLATED,
         elements: 1 << 20,
     };
@@ -214,19 +215,19 @@ fn page(diagram: Element, budget: &mut Budget) -> Result<Page, Error> {
     Ok(model_page(attrs, model))
 }
 
-/// What the compressed pages of one file, or a stencil in a style, may inflate to, to bound
-/// memory use when reading them.
+/// What the compressed pages of one file, or the stencils packed into styles together, may inflate
+/// to, to bound memory use when reading them.
 const MAX_INFLATED: usize = 64 << 20;
 
-/// A compressed page's model, or a stencil in a style: base64 of raw deflate of
-/// `encodeURIComponent` of the XML (`Graph.decompress`).
-pub(crate) fn decompress(text: &str) -> Result<String, Error> {
-    let mut left = MAX_INFLATED;
-    decompress_within(text, &mut left)
+/// A stencil packed into a style, inflated and read within `budget`.
+pub(crate) fn unpack(text: &str, budget: &mut Budget) -> Result<Element, Error> {
+    let xml = decompress_within(text, &mut budget.inflated)?;
+    tree_within(&xml, budget)
 }
 
-/// [`decompress`], refusing a page that inflates to more than the `left` bytes and taking what it
-/// inflates to from them.
+/// A compressed page's model, or a stencil in a style, base64 of raw deflate of
+/// `encodeURIComponent` of the XML (`Graph.decompress`), refusing one that inflates to more than
+/// the `left` bytes and taking what it inflates to from them.
 fn decompress_within(text: &str, left: &mut usize) -> Result<String, Error> {
     let broken = |what: &str| Error::Format(format!("a compressed page is not valid {what}"));
     let deflated = crate::base64::decode(text).ok_or_else(|| broken("base64"))?;

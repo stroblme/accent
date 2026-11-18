@@ -13,6 +13,7 @@ use crate::model::Element;
 use crate::route::Constraint;
 use crate::scene::{Align, Cap, DEFAULT_FONTFAMILY, DEFAULT_FONTSIZE, Font, Join, Stroke, VAlign};
 use crate::style::{Color, Resolved, parse_num};
+use crate::xml::Budget;
 
 /// A shape as its XML describes it, ready to draw at any size.
 #[derive(Debug, Clone, PartialEq)]
@@ -145,6 +146,55 @@ struct Hue {
     default: Option<String>,
 }
 
+/// The stencils read so far, a miss too, by the shape that names them, as a scene asks again for
+/// every cell at every paint. Those packed into styles share `left` until the cache empties, a file
+/// being read whole with each of them, so that many cannot each inflate to all a file may hold. One
+/// past it is not read, and remembered so.
+// ponytail: emptied when full rather than evicting the oldest; an LRU if a session ever
+// holds this many shapes at once.
+struct Cache {
+    shapes: HashMap<String, Option<Arc<Stencil>>>,
+    budget: Budget,
+    left: Budget,
+}
+
+impl Cache {
+    /// The shapes it holds before it empties.
+    const ROOM: usize = 4096;
+
+    fn new(budget: Budget) -> Cache {
+        let shapes = HashMap::new();
+        Cache {
+            shapes,
+            budget,
+            left: budget,
+        }
+    }
+
+    fn get(&mut self, shape: &str) -> Option<Arc<Stencil>> {
+        if let Some(known) = self.shapes.get(shape) {
+            return known.clone();
+        }
+        if self.shapes.len() >= Cache::ROOM {
+            self.shapes.clear();
+            self.left = self.budget;
+        }
+        let stencil = match shape.strip_prefix("stencil(") {
+            Some(packed) => {
+                // `Graph.js` cuts the last character off, whatever it is.
+                let mut packed = packed.chars();
+                packed.next_back();
+                let shape = crate::xml::unpack(packed.as_str(), &mut self.left);
+                shape.ok().and_then(Stencil::read)
+            }
+            None => library::source(shape).and_then(|xml| Stencil::parse(&xml)),
+        };
+        let stencil = stencil.map(Arc::new);
+        self.shapes.insert(shape.to_string(), stencil.clone());
+        stencil
+    }
+}
+
 /// Includes nested deeper than this are not drawn, which ends a shape that includes itself.
 const MAX_INCLUDES: usize = 8;
 
@@ -152,41 +202,25 @@ impl Stencil {
     /// The stencil a cell's `shape` is: one written into the style, or a library shape whose pack
     /// is installed. `None` for every other shape and for a stencil that cannot be read.
     pub fn of(shape: &str) -> Option<Arc<Stencil>> {
-        let packed = shape.strip_prefix("stencil(");
-        if packed.is_none() && !shape.starts_with("mxgraph.") {
+        if !shape.starts_with("stencil(") && !shape.starts_with("mxgraph.") {
             return None;
         }
-        // Read once, a miss too: a scene asks again for every cell at every paint.
-        // ponytail: emptied when full rather than evicting the oldest; an LRU if a session ever
-        // holds this many shapes at once.
-        static CACHE: LazyLock<Mutex<HashMap<String, Option<Arc<Stencil>>>>> =
-            LazyLock::new(Mutex::default);
-        const ROOM: usize = 4096;
-        let mut cache = CACHE.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(known) = cache.get(shape) {
-            return known.clone();
-        }
-        let xml = match packed {
-            Some(packed) => {
-                // `Graph.js` cuts the last character off, whatever it is.
-                let mut packed = packed.chars();
-                packed.next_back();
-                crate::xml::decompress(packed.as_str()).ok()
-            }
-            None => library::source(shape),
-        };
-        let stencil = xml.and_then(|xml| Stencil::parse(&xml)).map(Arc::new);
-        if cache.len() >= ROOM {
-            cache.clear();
-        }
-        cache.insert(shape.to_string(), stencil.clone());
-        stencil
+        static CACHE: LazyLock<Mutex<Cache>> =
+            LazyLock::new(|| Mutex::new(Cache::new(Budget::FILE)));
+        CACHE
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(shape)
     }
 
     /// Read a `<shape>` element (`mxStencil.parseDescription`, `parseConstraints`). `None` for
     /// XML that is broken or is some other element.
     pub fn parse(xml: &str) -> Option<Stencil> {
-        let shape = crate::xml::tree(xml).ok()?;
+        Stencil::read(crate::xml::tree(xml).ok()?)
+    }
+
+    /// [`Stencil::parse`] of the element read.
+    fn read(shape: Element) -> Option<Stencil> {
         if shape.name != "shape" {
             return None;
         }
@@ -976,5 +1010,32 @@ mod tests {
         // The long way round is three quarters, and no radius is no arc.
         assert_eq!(arc_to_curves(from, 1.0, 1.0, 0.0, true, false, to).len(), 3);
         assert!(arc_to_curves(from, 0.0, 1.0, 0.0, false, true, to).is_empty());
+    }
+
+    /// Stencils packed into styles share one budget until the cache empties: three that each fit
+    /// alone, the third past what the first two left.
+    #[test]
+    fn packed_stencils_share_one_budget() {
+        let packed = |w: u32| {
+            let xml = format!(
+                r#"<shape w="{w}" h="10"><foreground><rect x="0" y="0" w="10" h="10"/><fillstroke/></foreground></shape>"#
+            );
+            let deflated = miniz_oxide::deflate::compress_to_vec(xml.as_bytes(), 6);
+            (
+                format!("stencil({})", crate::base64::encode(&deflated)),
+                xml.len(),
+            )
+        };
+        let ((a, len), (b, _), (c, _)) = (packed(10), packed(11), packed(12));
+        let two = Budget {
+            inflated: 2 * len,
+            elements: usize::MAX,
+        };
+        let mut cache = Cache::new(two);
+        assert!(cache.get(&c).is_some(), "each fits alone");
+        let mut cache = Cache::new(two);
+        assert!(cache.get(&a).is_some() && cache.get(&b).is_some());
+        assert!(cache.get(&c).is_none(), "the third is past what they left");
+        assert!(cache.get(&a).is_some(), "what was read stays");
     }
 }

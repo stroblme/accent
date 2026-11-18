@@ -1534,6 +1534,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A change on disk under unsaved edits raises a banner whose Resolve… asks Reload or Overwrite: there is no comparison of two diagrams to offer.
 - A file is read whole with all its pages kept, so the file as a whole is bounded and not each page, its compressed pages inflating to 64 MiB together and its XML and theirs holding a million elements (2026-11-18).
   A file past either opens on Not a Diagram with the reason, and the index then finds it by its name alone.
+  The stencils packed into styles share one such budget until the stencil cache of 4,096 shapes empties, and one past it is drawn as the dashed box a shape not yet ported is.
 
 ### Notebook
 
