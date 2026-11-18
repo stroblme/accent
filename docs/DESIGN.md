@@ -1142,6 +1142,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - Each window builds its dialog once, on idle after it opens, and presents that one again: an open held the main thread about 60 ms before its animation could run, a stutter, and a dialog shown before holds it about 30 (release, Xvfb, `ACCENT_BENCH_SWITCHER=prefs`).
   Its rows follow the config rather than being built again (`settings::Rows`): a value moved while it was closed (a hand edit, the palette) is set in the row showing it as the dialog opens, and Restore Defaults sets its rows in place, since a new page cost an opening as much as the first one did.
   Its first opening draws Appearance and Match Colours in the frame that shows it and the groups below one a frame after, as it fades in, since GTK styles and lays out a page never shown in the frame that shows it (`settings::stage`).
+  That opening is as tall as a reopening all the same, which the window's height gives it until the rest are in, since measuring the two groups alone opened it at their height.
 - This Vault holds three folder rows: Templates, New Files and Attachments.
   The Attachments row keeps `./` and `/` as typed, those being the note's folder and the vault root.
 - A font's Reset is an icon button (`edit-clear-symbolic`, as GNOME Settings' Reset Shortcut is) left of its font button: the font button already shows the whole font name, and a text button would leave it nowhere to go.

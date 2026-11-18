@@ -166,7 +166,7 @@ pub fn reload(dialog: &adw::Dialog) {
 }
 
 /// How many groups the dialog's first opening shows in the frame that shows it: Appearance and
-/// Match Colours, what the top of the dialog holds.
+/// Match Colours, the top of the dialog.
 const SHOWN_FIRST: usize = 2;
 
 /// Build the dialog's one page from `config`; from then on its rows follow the config ([`Rows`]).
@@ -211,7 +211,7 @@ fn fill(
     for group in &groups {
         page.add(group);
     }
-    stage(&page, &groups[SHOWN_FIRST..]);
+    stage(dialog, &page, &groups[SHOWN_FIRST..]);
     crate::widgets::smooth_wheels(page.upcast_ref());
     dialog.add(&page);
     rows
@@ -221,15 +221,33 @@ fn fill(
 /// out a page never shown in the frame that shows it, which held the dialog's first opening about
 /// three times as long as a reopening before its animation could run (main-thread CPU,
 /// `ACCENT_BENCH_SWITCHER=prefs`); the groups below the first screen come in while it fades in.
-fn stage(page: &adw::PreferencesPage, later: &[adw::PreferencesGroup]) {
+///
+/// `dialog` takes its height from the page as it is presented, which opened it at the height of
+/// the groups shown first: that frame gives it the window's instead, which the sheet fits into the
+/// window as it fits a reopening's whole page, and once every group is in it measures the page
+/// again.
+fn stage(
+    dialog: &adw::PreferencesDialog,
+    page: &adw::PreferencesPage,
+    later: &[adw::PreferencesGroup],
+) {
     for group in later {
         group.set_visible(false);
     }
     let later: RefCell<Vec<_>> = RefCell::new(later.iter().rev().map(|g| g.downgrade()).collect());
     let first = Cell::new(true);
-    // A tick callback runs from the frame that shows the page first, its first opening.
-    page.add_tick_callback(move |_, _| {
+    // Weak: the page holds this callback and the dialog holds the page.
+    let dialog = dialog.downgrade();
+    // A tick callback runs from the frame that shows the page first, its first opening, ahead of
+    // that frame's layout.
+    page.add_tick_callback(move |page, _| {
+        let Some(dialog) = dialog.upgrade() else {
+            return glib::ControlFlow::Break;
+        };
         if first.replace(false) {
+            if let Some(window) = page.root() {
+                dialog.set_content_height(window.height());
+            }
             return glib::ControlFlow::Continue;
         }
         match later.borrow_mut().pop() {
@@ -239,7 +257,10 @@ fn stage(page: &adw::PreferencesPage, later: &[adw::PreferencesGroup]) {
                 }
                 glib::ControlFlow::Continue
             }
-            None => glib::ControlFlow::Break,
+            None => {
+                dialog.set_content_height(-1);
+                glib::ControlFlow::Break
+            }
         }
     });
 }
