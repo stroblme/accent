@@ -2157,6 +2157,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
   The band is drawn at the zoom the PDF is read at, so it reads as the page will once the link is followed, though never below 100 % where it would be unreadable again, and it is as wide as the page and three eighths as tall, about a quarter of a portrait page.
   The preview stays inside the PDF pane, above the link or below it where there is no room above and slid along to keep clear of the sides, and a page too wide for the pane is drawn smaller to fit.
   The page's stand-in shows under the band until it is drawn, and a zoom takes the preview away.
+  The band's corners are rounded to run alongside the popover's, 7 px inside Adwaita's 15 px corner and 8 px padding, as a diagram link's thumbnail is (`pdf::preview::paint`).
   Ctrl+click on a link follows it; anywhere else on a LaTeX build's page it is Go to Source.
 - Fit Width and Fit Height from the zoom readout's right-click and the palette; Invert PDF Colours from the palette, and over an image Invert Image Colours and Copy Image.
 - Drawing `Ctrl+Shift+I` opens the ring.

@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 use accent_core::pdf::{self, LinkTarget};
 use adw::prelude::*;
-use gtk::{gdk, glib, graphene};
+use gtk::{gdk, glib, graphene, gsk};
 
 use super::geometry::PT_TO_PX;
 use super::protocol::Request;
@@ -17,6 +17,10 @@ const TALL: f32 = 0.375;
 
 /// What a link preview keeps clear of its pane's edges, a PDF's or a diagram's, in logical pixels.
 const MARGIN: i32 = 12;
+
+/// The radius a link preview's picture is rounded by: Adwaita's popover corner (15 px) less the
+/// popover's padding (8 px), so the picture's corners run alongside the popover's.
+const CORNER: f32 = 7.0;
 
 /// The part of a page a link preview shows: drawn at `scale` logical pixels to a point, `size`
 /// logical pixels large, and starting `offset` of them down the page.
@@ -397,8 +401,9 @@ fn put_band(picture: &gtk::Picture, band: Band, texture: &gdk::MemoryTexture, sf
     paint(picture, band.size, texture, at);
 }
 
-/// Paint `texture` into `picture` over `at`, cut to a band `size` logical pixels large: the band
-/// itself, a page's stand-in stretched under it, or a diagram page's thumbnail cut to the room.
+/// Paint `texture` into `picture` over `at`, cut to a band `size` logical pixels large with
+/// [`CORNER`]s: the band itself, a page's stand-in stretched under it, or a diagram page's
+/// thumbnail cut to the room.
 pub(crate) fn paint(
     picture: &gtk::Picture,
     size: (i32, i32),
@@ -407,7 +412,8 @@ pub(crate) fn paint(
 ) {
     let (w, h) = (size.0 as f32, size.1 as f32);
     let snapshot = gtk::Snapshot::new();
-    snapshot.push_clip(&graphene::Rect::new(0.0, 0.0, w, h));
+    let band = graphene::Rect::new(0.0, 0.0, w, h);
+    snapshot.push_rounded_clip(&gsk::RoundedRect::from_rect(band, CORNER));
     snapshot.append_texture(texture, &at);
     snapshot.pop();
     // A paintable of the band's logical size: a texture's own is its pixels, which a display of
