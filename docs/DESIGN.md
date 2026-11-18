@@ -2222,6 +2222,8 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
   A two-finger scroll with Ctrl takes a step every 40 px of it, about what a wheel notch scrolls, so a swipe zooms a few tenths and never a tenth an event (`zoom::wheel_steps`).
   A step is taken from the zoom asked for, never read back off the rendered pixels, and counted in whole percent, so a zoom a hair off its tenth still moves.
 - A wheel notch keeps what is under the pointer under it on a PDF page, an image and a notebook alike, and a pinch what is between the fingers.
+  A PDF stops coasting before it zooms, after a fling or back off an edge, because GTK coasts in the pixels of the scale it began at and would carry the page off to another.
+  A touchpad's pinch can begin with such a coast, since libinput may take up to its first 300 ms for a two-finger scroll.
   A chord, having no pointer, keeps a PDF's reading position, the view's top-left corner, the line at the top of a notebook's view, and the middle of an image's view, as a diagram's.
   A page or an image narrower than the view is centred in it, so that point stays put only once it fills the view.
 - The range is a tenth to eight times for a page or an image, a half to triple for the document font.

@@ -15,6 +15,7 @@ impl PdfView {
         let Some((x, y)) = at else {
             return self.set_zoom(zoom);
         };
+        self.stop_coasting();
         let (ox, oy) = self.scroll_offset();
         let (old_w, old_h) = {
             let layout = self.imp().layout.borrow();
@@ -43,6 +44,21 @@ impl PdfView {
             ));
         }
         self.zoomed();
+    }
+
+    /// Stop the scrolled window coasting, after a fling or back off an edge, ahead of a zoom.
+    /// GTK coasts in the pixels of the layout it began in and writes them back every frame over
+    /// any value of ours, so a zoom made during it lands at the old offset at the new scale, on
+    /// another page. A touchpad's pinch can begin with one: libinput may take up to its first
+    /// 300 ms for a two-finger scroll, whose end sets GTK coasting. Turning kinetic scrolling off
+    /// is the only public way to stop it, and it goes straight back on.
+    pub(super) fn stop_coasting(&self) {
+        if let Some(scroller) = self.parent().and_downcast::<gtk::ScrolledWindow>()
+            && scroller.is_kinetic_scrolling()
+        {
+            scroller.set_kinetic_scrolling(false);
+            scroller.set_kinetic_scrolling(true);
+        }
     }
 
     /// Where the reader is now.

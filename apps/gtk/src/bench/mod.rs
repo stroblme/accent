@@ -267,6 +267,9 @@ use user_commands::bench_commands;
 ///   `bookmarks:<rel_path>[,<rel_diagram>]` (outline following),
 ///   `render:<rel_path>` (tiles/thumbnail bursts; hundreds of heavy pages),
 ///   `zoom:<rel_path>[,<shot_directory>]` (immediate zoom quality and time to sharp tiles),
+///   `pinch:<rel_path>` (a pinch after an Outline row's jump, after a scroll, and while the
+///   scrolled window coasts back off the top from an XTEST wheel, keeps the page under the
+///   fingers; generated `Attachments/pages.pdf`),
 ///   `scroll:<rel_path>` (wheel input and continuous PDF frame pacing, then Alt+wheel paging, `n`
 ///   at the end and Ctrl+wheel zoom),
 ///   `broken:<rel_path or absolute path>` (truncation/recovery; scratch file),
@@ -737,6 +740,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(arg) = rel.strip_prefix("zoom:") {
                 return pdf_zoom::run(&app, arg);
+            }
+            if let Some(rel) = rel.strip_prefix("pinch:") {
+                return pdf_zoom::pinch(&app, rel);
             }
             if let Some(rel) = rel.strip_prefix("scroll:") {
                 return pdf_scroll::run(&app, rel);

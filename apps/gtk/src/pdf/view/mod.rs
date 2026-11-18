@@ -65,15 +65,25 @@ impl PdfView {
             glib::clone!(
                 #[weak]
                 view,
-                move |zoom, at| {
-                    let zoom = PdfZoom::Scale(crate::zoom::clamp_scale(zoom));
-                    if view.zoom() != zoom {
-                        view.zoom_around(zoom, Some(at));
-                    }
-                }
+                move |zoom, at| view.pinched(zoom, at)
             ),
         );
         view
+    }
+
+    /// Zoom to `zoom`, the multiple of the page's natural size a pinch has reached, keeping what
+    /// is under `at`, between the fingers, where it is.
+    pub fn pinched(&self, zoom: f64, at: (f64, f64)) {
+        let zoom = PdfZoom::Scale(crate::zoom::clamp_scale(zoom));
+        if self.zoom() != zoom {
+            self.zoom_around(zoom, Some(at));
+        }
+    }
+
+    /// The zoom a pinch begins from. Only `ACCENT_BENCH_PDF=pinch:` asks, standing in for GTK's.
+    #[cfg(feature = "bench")]
+    pub fn pinch_from(&self) -> f64 {
+        self.zoom_factor()
     }
 
     /// A narrow view of the same document: low-resolution pages only, with the one being read
@@ -120,6 +130,7 @@ impl PdfView {
         if self.imp().zoom.get() == zoom {
             return;
         }
+        self.stop_coasting();
         self.imp().zoom.set(zoom);
         self.relayout();
         self.zoomed();
