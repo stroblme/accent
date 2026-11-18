@@ -1075,6 +1075,9 @@ impl Worker {
             return;
         }
         self.burst.extend(added.iter().cloned());
+        // Past `BULK_ADDED` none of the burst counts, whatever else comes, so a sync of thousands
+        // keeps no more of it, nor makes each rename `follow` scans them all.
+        self.burst.truncate(BULK_ADDED + 1);
         self.burst_ends = Some(Instant::now() + DEBOUNCE);
         self.emit(Event::FilesAdded(added));
     }
