@@ -1,26 +1,44 @@
-//! Capture shell output with `vt100::Parser` and replay history, screen, cursor, and input
-//! modes on attach. Scroll margins, character sets, cursor shape, and OSC 7 working
-//! directory are not restored; full-screen programs are asked to redraw. Soft wraps
+//! Capture shell output with `vt100::Parser` and replay history, screen, cursor, input modes
+//! and colour scheme reports on attach. Scroll margins, character sets, cursor shape, and OSC 7
+//! working directory are not restored; full-screen programs are asked to redraw. Soft wraps
 //! return as hard wraps.
 
 /// History lines per shell, matching VTE scrollback. At 120 columns, a full history uses about
 /// 38 MB.
 pub const SCROLLBACK: usize = 10_000;
 
-/// The window title the shell last set (OSC 0 or 2).
+/// What a replay restores beside vt100's screen: the window title the shell last set (OSC 0 or
+/// 2), and whether a program asked to hear of colour scheme changes (DEC mode 2031), which
+/// vt100 does not model.
 #[derive(Default)]
-pub struct Title(pub Vec<u8>);
+pub struct Kept {
+    pub title: Vec<u8>,
+    pub scheme_reports: bool,
+}
 
-impl vt100::Callbacks for Title {
+impl vt100::Callbacks for Kept {
     fn set_window_title(&mut self, _: &mut vt100::Screen, title: &[u8]) {
-        self.0 = title.to_vec();
+        self.title = title.to_vec();
+    }
+
+    fn unhandled_csi(
+        &mut self,
+        _: &mut vt100::Screen,
+        i1: Option<u8>,
+        _: Option<u8>,
+        params: &[&[u16]],
+        c: char,
+    ) {
+        if i1 == Some(b'?') && matches!(c, 'h' | 'l') && params.iter().any(|p| *p == [2031]) {
+            self.scheme_reports = c == 'h';
+        }
     }
 }
 
-pub type Parser = vt100::Parser<Title>;
+pub type Parser = vt100::Parser<Kept>;
 
 pub fn parser(rows: u16, cols: u16) -> Parser {
-    Parser::new_with_callbacks(rows, cols, SCROLLBACK, Title::default())
+    Parser::new_with_callbacks(rows, cols, SCROLLBACK, Kept::default())
 }
 
 /// On shrink, move rows above the cursor into history and keep the cursor with its text.
@@ -61,11 +79,16 @@ pub fn replay(p: &mut Parser) -> Vec<u8> {
         p.process(b"\x1b[?47h");
     }
     out.extend(p.screen().state_formatted());
-    let title = &p.callbacks().0;
-    if !title.is_empty() {
+    let kept = p.callbacks();
+    if !kept.title.is_empty() {
         out.extend(b"\x1b]2;");
-        out.extend(title);
+        out.extend(&kept.title);
         out.push(b'\x07');
+    }
+    // The terminal attached now has the mode off, and its scheme may have changed meanwhile:
+    // asked for the scheme, it reports the one it has (`CSI ? 997 ; 1|2 n`), as on a change.
+    if kept.scheme_reports {
+        out.extend(b"\x1b[?2031h\x1b[?996n");
     }
     out
 }
@@ -154,7 +177,19 @@ mod tests {
     fn the_title_comes_back() {
         let mut live = parser(3, 20);
         live.process(b"\x1b]2;make test\x07$ ");
-        assert_eq!(replayed(&mut live).callbacks().0, b"make test");
+        assert_eq!(replayed(&mut live).callbacks().title, b"make test");
+    }
+
+    #[test]
+    fn colour_scheme_reports_come_back_with_the_scheme_asked_for() {
+        let mut live = parser(3, 20);
+        live.process(b"\x1b[?2031h$ ");
+        assert!(replay(&mut live).ends_with(b"\x1b[?2031h\x1b[?996n"));
+        assert!(replayed(&mut live).callbacks().scheme_reports);
+        // Off again, among other modes, as a program leaving does it.
+        live.process(b"\x1b[?1004;2031l");
+        assert!(!replayed(&mut live).callbacks().scheme_reports);
+        assert!(!replay(&mut live).ends_with(b"\x1b[?996n"));
     }
 
     #[test]

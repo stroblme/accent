@@ -494,7 +494,7 @@ impl Daemon {
             let cwd = cwd_of(shell.pid);
             let (title, attached, shared_with) = {
                 let term = lock(&shell.screen);
-                let title = String::from_utf8_lossy(&term.parser.callbacks().0).into_owned();
+                let title = String::from_utf8_lossy(&term.parser.callbacks().title).into_owned();
                 (title, term.client.is_some(), term.shared_with.clone())
             };
             let line = serde_json::json!({
