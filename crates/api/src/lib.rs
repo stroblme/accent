@@ -86,9 +86,10 @@ pub enum Event {
     /// in the order the index took them in. Never a file a move brought, nor one the vault's
     /// opening walk found.
     FilesAdded(Vec<String>),
-    /// Those of the [`FilesAdded`](Self::FilesAdded) just sent the window counts as used: none of
-    /// a batch of more than a few, and never a hidden file, a conflict copy or a file git ignores
-    /// that is no note (`Worker::emit_added`).
+    /// Those of the [`FilesAdded`](Self::FilesAdded) the window counts as used, sent once a burst
+    /// of them has ended, a debounce with none added, under the names they have by then: none of a
+    /// burst of more than a few, and never a hidden file, a conflict copy, a file git ignores that
+    /// is no note, or one gone since (`Worker::emit_used`).
     FilesUsed(Vec<String>),
     FileRemoved(String),
     FileRenamed {

@@ -6,6 +6,7 @@ use crate::tests::*;
 use crate::{Etag, Event, VaultConfig, fs};
 use accent_core::index::Index;
 use accent_core::watch::VaultEvent;
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU8;
@@ -193,8 +194,9 @@ fn a_new_file_is_reported_as_added_and_an_edit_or_a_move_is_not() {
     );
 }
 
-/// More than `BULK_ADDED` files added at once, a checkout's, count as used none of them, so the
-/// files the reader used stay; and of a few, a hidden file or a non-note git ignores never does.
+/// More than `BULK_ADDED` files added at once, a checkout's, count as used none of them, in
+/// however many parts they come, so the files the reader used stay; and of a few, a hidden file
+/// or a non-note git ignores never does.
 #[test]
 fn a_bulk_or_a_hidden_or_an_ignored_file_is_not_reported_as_added() {
     let root = tempfile::tempdir().unwrap();
@@ -226,6 +228,25 @@ fn a_bulk_or_a_hidden_or_an_ignored_file_is_not_reported_as_added() {
     std::fs::rename(&bulk, f.vault.root().join("bulk")).unwrap();
     assert_eq!(added_until("bulk"), Vec::<String>::new(), "a bulk");
 
+    // Twenty new files and a folder of three moved in beside them are one burst, in however many
+    // parts the debouncer hands it over: half a debounce apart, they mostly come in two, a tick
+    // of its apart.
+    let three = outside.path().join("three");
+    std::fs::create_dir(&three).unwrap();
+    for i in 0..3 {
+        std::fs::write(three.join(format!("{i}.md")), "x\n").unwrap();
+    }
+    for i in 0..20 {
+        f.write(&format!("new-{i}.md"), "x\n");
+    }
+    std::thread::sleep(Duration::from_millis(150));
+    std::fs::rename(&three, f.vault.root().join("three")).unwrap();
+    assert_eq!(
+        added_until("three"),
+        Vec::<String>::new(),
+        "a burst in parts"
+    );
+
     let few = outside.path().join("few");
     std::fs::create_dir(&few).unwrap();
     for rel in [
@@ -239,6 +260,84 @@ fn a_bulk_or_a_hidden_or_an_ignored_file_is_not_reported_as_added() {
     }
     std::fs::rename(&few, f.vault.root().join("few")).unwrap();
     assert_eq!(added_until("few"), ["few/draft-1.md", "few/kept.png"]);
+}
+
+/// Hand-overs less than a debounce apart are one burst, counted once it ends: a folder of three
+/// and twenty new files handed over apart, either first, count as used none of them, while two
+/// files a second apart count each. The hand-overs are the test's own, so the split is too.
+#[test]
+fn a_burst_handed_over_in_parts_is_counted_whole() {
+    let root = tempfile::tempdir().unwrap();
+    let root_path = root.path().canonicalize().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let (tx, rx) = channel();
+    let (events, event_rx) = channel();
+    let worker = spawn(
+        root_path.clone(),
+        Index::open(&cache.path().join("index.db")).unwrap(),
+        rx,
+        tx.clone(),
+        events,
+        false,
+        Arc::new(AtomicU8::new(RUN)),
+        Arc::new(Ignored::new(PathBuf::new())),
+        None,
+    )
+    .unwrap();
+    assert!(wait_for(&event_rx, |e| matches!(e, Event::Reconciled(_)), BUDGET).is_some());
+    // What counts as used, kept from every wait below.
+    let used = std::cell::RefCell::new(Vec::new());
+    let keep = |e: &Event| {
+        if let Event::FilesUsed(rels) = e {
+            used.borrow_mut().extend(rels.iter().cloned());
+        }
+    };
+    // Write `rels` and hand their news over at once, as the debouncer would.
+    let hand_over = |rels: Vec<String>| {
+        for rel in &rels {
+            let path = root_path.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "x\n").unwrap();
+        }
+        let news = rels.iter().map(|rel| match rel.split_once('/') {
+            Some((dir, _)) => root_path.join(dir),
+            None => root_path.join(rel),
+        });
+        let news: BTreeSet<PathBuf> = news.collect();
+        tx.send(Msg::Watched(
+            news.into_iter().map(VaultEvent::Changed).collect(),
+        ))
+        .unwrap();
+        let added = |e: &Event| {
+            keep(e);
+            matches!(e, Event::FilesAdded(_))
+        };
+        assert!(
+            wait_for(&event_rx, added, BUDGET).is_some(),
+            "a hand-over added nothing"
+        );
+    };
+    // What counted as used once a second, three debounces, has passed without news.
+    let counted = || {
+        while let Ok(e) = event_rx.recv_timeout(Duration::from_secs(1)) {
+            keep(&e);
+        }
+        std::mem::take(&mut *used.borrow_mut())
+    };
+    let folder = |dir: &str| -> Vec<String> { (0..3).map(|i| format!("{dir}/{i}.md")).collect() };
+    let files = |at: &str| -> Vec<String> { (0..20).map(|i| format!("{at}-{i}.md")).collect() };
+    hand_over(folder("box"));
+    hand_over(files("new"));
+    assert_eq!(counted(), Vec::<String>::new(), "the folder first");
+    hand_over(files("more"));
+    hand_over(folder("crate"));
+    assert_eq!(counted(), Vec::<String>::new(), "the files first");
+    for rel in ["one.md", "two.md"] {
+        hand_over(vec![rel.to_string()]);
+        assert_eq!(counted(), [rel], "a burst of its own");
+    }
+    tx.send(Msg::Shutdown).unwrap();
+    worker.join().unwrap();
 }
 
 /// Depends on real inotify events.

@@ -144,6 +144,9 @@ impl<W: notify::Watcher> notify::Watcher for Kept<W> {
     }
 }
 
+/// How long a path stays quiet before the debouncer hands its news over.
+pub const DEBOUNCE: Duration = Duration::from_millis(300);
+
 /// How long [`Renames`] keeps a rename's source, past the longest a debouncer window holds it.
 const RENAMED_FOR: Duration = Duration::from_secs(1);
 
@@ -251,7 +254,7 @@ impl Watcher {
             }
         };
 
-        let debounce = Duration::from_millis(300);
+        let debounce = DEBOUNCE;
         // How often the debouncer looks for events that have stood that long, waking whether or
         // not it holds any: its default, a quarter of the debounce, was 13 wakeups a second of an
         // idle window. Half of it reports a change 300 to 450 ms after it, not 300 to 375.

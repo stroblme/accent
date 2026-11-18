@@ -16,7 +16,7 @@ use crate::Result;
 use accent_core::index::{Change, Index};
 use accent_core::path::{is_note, is_under, parent_dir};
 use accent_core::walk::{self, FileKind, ScanOptions};
-use accent_core::watch::{VaultEvent, Watcher};
+use accent_core::watch::{DEBOUNCE, VaultEvent, Watcher};
 
 use crate::local::Ignored;
 use crate::paths::{conflict_original_rel, conflict_pairs};
@@ -58,6 +58,8 @@ pub(crate) fn spawn(
         links: HashMap::new(),
         stop,
         walked: false,
+        burst: Vec::new(),
+        burst_ends: None,
         paused: false,
         next_walk: Instant::now(),
         due: None,
@@ -89,10 +91,12 @@ pub(crate) fn spawn(
 /// into one scan at its end; later requests run immediately.
 const WALK_FLOOR: Duration = Duration::from_secs(2);
 
-/// The most files one batch, with the walk it asks for, may add and still count as used
-/// ([`Event::FilesUsed`]). A download (its file and the `.part` beside it), a few pictures pasted
-/// or an agent's turn stay under it, while a checkout, a sync or a folder copied in goes over;
-/// and a batch of ten takes at most a fifth of the fifty files the window keeps as used.
+/// The most files one burst may add and still count as used ([`Event::FilesUsed`]): the batches
+/// that add files less than the watcher's [`DEBOUNCE`] apart, with the walks they ask for, as the
+/// debouncer may hand a checkout over in parts ([`Worker::burst`]). A download (its file and the
+/// `.part` beside it), a few pictures pasted or an agent's turn stay under it, while a checkout, a
+/// sync or a folder copied in goes over; and a burst of ten takes at most a fifth of the fifty
+/// files the window keeps as used.
 const BULK_ADDED: usize = 10;
 
 /// What `stop` says: walk on.
@@ -203,6 +207,13 @@ struct Worker {
     /// Whether a walk of the whole vault has finished since the worker started. Before one, a row
     /// added is a file the index had not reached yet rather than a new one ([`Event::FilesAdded`]).
     walked: bool,
+    /// The files added by batches that follow each other less than a [`DEBOUNCE`] apart, as the
+    /// parts the debouncer hands a checkout over in do: told as added at once
+    /// ([`Event::FilesAdded`]) and counted as used together once no more have come for a debounce
+    /// ([`Worker::emit_used`]), under the names the window has been told since.
+    burst: Vec<String>,
+    /// When the burst ends unless more files are added: a [`DEBOUNCE`] after the last were.
+    burst_ends: Option<Instant>,
     /// Whether indexing is paused; only [`Msg::Resume`] restarts it in this session.
     /// Not persisted: reopening the vault resumes by diffing the partial index.
     paused: bool,
@@ -255,17 +266,26 @@ impl Worker {
             // and therefore one event for the UI. What the last walk held back came first.
             let mut batch = std::mem::take(&mut self.held);
             if batch.is_empty() {
-                let wait = self.next_walk.saturating_duration_since(Instant::now());
-                let first = match self.due.is_some() {
-                    true => match self.rx.recv_timeout(wait) {
+                // Woken for whichever comes first: the walk that waits out the floor, or the end
+                // of a burst, which an inbox still holding news puts off.
+                let walk = self.due.is_some().then_some(self.next_walk);
+                let first = match walk.into_iter().chain(self.burst_ends).min() {
+                    Some(at) => match self
+                        .rx
+                        .recv_timeout(at.saturating_duration_since(Instant::now()))
+                    {
                         Ok(msg) => msg,
+                        Err(RecvTimeoutError::Timeout) if self.burst_ends == Some(at) => {
+                            self.emit_used();
+                            continue;
+                        }
                         // Cleared here as well as by the walk: a paused vault drops the rescan.
                         Err(RecvTimeoutError::Timeout) => {
                             Msg::Rescan(self.due.take().unwrap_or_default())
                         }
                         Err(RecvTimeoutError::Disconnected) => break,
                     },
-                    false => match self.rx.recv() {
+                    None => match self.rx.recv() {
                         Ok(msg) => msg,
                         Err(_) => break,
                     },
@@ -414,9 +434,10 @@ impl Worker {
                         if self.moved(&from) {
                             moved.insert(to.clone());
                         }
-                        self.emit(Event::FileRenamed { from, to });
+                        self.renamed(from, to);
                     }
-                    if let Msg::Moved { to, .. } = msg {
+                    if let Msg::Moved { from, to } = msg {
+                        self.follow(from, to);
                         moved.insert(to.clone());
                     }
                 }
@@ -443,6 +464,7 @@ impl Worker {
                 | Msg::Settled(_) => {}
                 Msg::Update { rel, own } => self.posted(rel, own, &mut batched),
                 Msg::Moved { from, to } => {
+                    self.follow(&from, &to);
                     batched.moved.insert(to.clone());
                     self.posted(from, true, &mut batched);
                     self.posted(to, true, &mut batched);
@@ -869,7 +891,7 @@ impl Worker {
                     self.update(&to, false, b);
                     b.dirs.insert(parent_dir(&from).to_string());
                     b.dirs.insert(parent_dir(&to).to_string());
-                    self.emit(Event::FileRenamed { from, to });
+                    self.renamed(from, to);
                 }
             }
             VaultEvent::ConflictAppeared(p) => {
@@ -1004,24 +1026,46 @@ impl Worker {
     }
 
     /// Tell the window of `added`, the files one batch and its walk added ([`Event::FilesAdded`]),
-    /// and which of them count as used ([`Event::FilesUsed`]), none of more than [`BULK_ADDED`].
-    /// Nothing before the vault's opening walk has ended, which finds what the index had not
-    /// reached yet, new or not.
-    fn emit_added(&self, added: Vec<String>) {
+    /// and add them to the burst ([`Worker::burst`]). Nothing before the vault's opening walk has
+    /// ended, which finds what the index had not reached yet, new or not.
+    fn emit_added(&mut self, added: Vec<String>) {
         if !self.walked || added.is_empty() {
             return;
         }
-        let used: Vec<String> = match added.len() > BULK_ADDED {
-            true => Vec::new(),
-            false => added
-                .iter()
-                .filter(|rel| self.counts(rel))
-                .cloned()
-                .collect(),
-        };
+        self.burst.extend(added.iter().cloned());
+        self.burst_ends = Some(Instant::now() + DEBOUNCE);
         self.emit(Event::FilesAdded(added));
+    }
+
+    /// End the burst: tell the window which of its files count as used ([`Event::FilesUsed`]),
+    /// none of more than [`BULK_ADDED`], nor one gone since.
+    fn emit_used(&mut self) {
+        self.burst_ends = None;
+        let burst = std::mem::take(&mut self.burst);
+        if burst.len() > BULK_ADDED {
+            return;
+        }
+        let used: Vec<String> = (burst.into_iter())
+            .filter(|rel| self.counts(rel) && matches!(self.index.get_file(rel), Ok(Some(_))))
+            .collect();
         if !used.is_empty() {
             self.emit(Event::FilesUsed(used));
+        }
+    }
+
+    /// Tell the window `from` was renamed `to`, and the burst too ([`Worker::follow`]).
+    fn renamed(&mut self, from: String, to: String) {
+        self.follow(&from, &to);
+        self.emit(Event::FileRenamed { from, to });
+    }
+
+    /// Give the files of the burst at `from` or under it their names under `to`, as the window,
+    /// told of the move, gives the files it counts as used.
+    fn follow(&mut self, from: &str, to: &str) {
+        for rel in &mut self.burst {
+            if is_under(rel, from) {
+                *rel = format!("{to}{}", &rel[from.len()..]);
+            }
         }
     }
 
