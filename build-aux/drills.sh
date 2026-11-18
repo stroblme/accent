@@ -466,8 +466,8 @@ drill_diagram_render() {
 	has "$dir/render" 'bench diagram render size=102x1568 line=[255, 0, 255] hairline=true'
 }
 
-# What real clicks and bands select among a diagram's groups, as draw.io selects, and how the
-# groups fit what they hold (DESIGN.md, Diagram).
+# What real clicks and bands select among a diagram's groups, as draw.io selects, a drag moving
+# only what is selected, and how the groups fit what they hold (DESIGN.md, Diagram).
 drill_diagram_select() {
 	launch 60 ACCENT_BENCH_DIAGRAM=select:select.drawio >"$dir/select"
 	has "$dir/select" \
@@ -489,6 +489,15 @@ drill_diagram_select() {
 		'bench diagram select click t1 again ["tb"]' \
 		'bench diagram select tb frame (300.0, 280.0, 200.0, 60.0)' \
 		'bench diagram select click t1 a third time ["t1"]' \
+		'bench diagram select band from lane p over p1 ["p1"]' \
+		'bench diagram select band from p moved=false history=(false, false)' \
+		'bench diagram select ctrl band from lane p over p1 ["s1", "p1"]' \
+		'bench diagram select click s2 moving 2 px ["s2"]' \
+		'bench diagram select cursor s2=Some("move") p1=None' \
+		'bench diagram select drag selected s2 unmoved_before=true s2=Some((600.0, 160.0)) history=(true, false)' \
+		'bench diagram select drag c of selected g ["g"]' \
+		'bench diagram select drag c of selected g g=Some((40.0, 80.0))' \
+		'bench diagram select undone true' \
 		'bench diagram select select all ["g", "c", "d", "G", "g1", "c1", "c2", "g2", "d1", "d2", "p", "p1", "tb", "t1", "t2", "s1", "s2", "x", "xl"]' \
 		'bench diagram select open inside g Some("g")' \
 		'bench diagram select paste inside g [Some("g")] open=Some("g")' \

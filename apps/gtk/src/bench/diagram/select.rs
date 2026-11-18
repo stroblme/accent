@@ -40,7 +40,8 @@ const GROUPS: &str = r#"<mxfile host="accent">
 /// and on to a sibling, into a nested group and on to a cousin, a click and a band from a
 /// selected group's empty middle, first clicks under the three parents draw.io's
 /// `isPropagateSelectionCell` treats apart, the clicks out of a group whose bounds are its
-/// shapes' and back, Select All, and pastes inside a group and outside it. Then it prints how
+/// shapes' and back, drags from a cell not selected banding and from a selected one moving it,
+/// Select All, and pastes inside a group and outside it. Then it prints how
 /// the groups fit what they hold as the keys move a shape out of one and delete what it holds,
 /// move the group whose bounds are its shapes', and a group's handle scales what it holds.
 pub(super) fn select(app: &Rc<App>, rel: &str) {
@@ -132,6 +133,56 @@ pub(super) fn select(app: &Rc<App>, rel: &str) {
         println!("bench diagram select tb frame {:?}", (r.x, r.y, r.w, r.h));
         click(on("t1")).await;
         say("click t1 a third time");
+        // Only what is selected moves (user decision 2026-11-18): a drag from the lane's body,
+        // which is not selected, bands over p1 and moves nothing, and with Ctrl adds p1 to s1; a
+        // click on s2 that travels 2 px selects it, and a drag from it then moves it, as one from
+        // c moves the group g it selected.
+        let frames = || ["p", "p1", "s2", "g"].map(|id| tab.frame_of(id).map(|r| (r.x, r.y)));
+        let still = frames();
+        let lane = band((200.0, 300.0), (50.0, 370.0));
+        tab.select(Vec::new());
+        super::super::git::xtest(&lane).await;
+        say("band from lane p over p1");
+        let moved = frames() != still;
+        println!(
+            "bench diagram select band from p moved={moved} history={:?}",
+            tab.history()
+        );
+        tab.select(vec!["s1".into()]);
+        super::super::git::xtest(&format!("keydown ctrl; {lane}; keyup ctrl")).await;
+        say("ctrl band from lane p over p1");
+        tab.select(Vec::new());
+        let r = tab.to_widget(&tab.frame_of("s2").unwrap_or_default());
+        let (x, y) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        let to = on_screen(&app, &tab.key_target(), x + 2.0, y).unwrap_or_default();
+        super::super::git::xtest(&format!("move {}; down; move {to}; up", on("s2"))).await;
+        say("click s2 moving 2 px");
+        // The pointer says so: the move cursor over s2, and none over p1, clear of the ring.
+        let cursor = async |id: &str| {
+            super::super::git::xtest(&format!("move {}; sleep 0.1", on(id))).await;
+            let cursor = tab.key_target().cursor();
+            cursor.and_then(|c| c.name()).map(|n| n.to_string())
+        };
+        let (over, beside) = (cursor("s2").await, cursor("p1").await);
+        println!("bench diagram select cursor s2={over:?} p1={beside:?}");
+        let unmoved = frames() == still;
+        super::super::git::xtest(&band((600.0, 190.0), (640.0, 190.0))).await;
+        println!(
+            "bench diagram select drag selected s2 unmoved_before={unmoved} s2={:?} history={:?}",
+            tab.frame_of("s2").map(|r| (r.x, r.y)),
+            tab.history()
+        );
+        tab.undo();
+        tab.select(Vec::new());
+        click(on("c")).await;
+        super::super::git::xtest(&band((80.0, 70.0), (80.0, 110.0))).await;
+        say("drag c of selected g");
+        println!(
+            "bench diagram select drag c of selected g g={:?}",
+            tab.frame_of("g").map(|r| (r.x, r.y))
+        );
+        tab.undo();
+        println!("bench diagram select undone {}", frames() == still);
         super::super::git::xtest("key ctrl+a").await;
         say("select all");
         // A group is open while the selection is inside it: its outline shows and a paste goes

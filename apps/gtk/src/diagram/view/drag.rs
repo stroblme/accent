@@ -102,12 +102,12 @@ pub(super) enum Drag {
         rect: Rect,
     },
     /// A band from `from`, adding what it takes to the selection with `add`; a release that
-    /// did not move selects `open` instead, when there is one (a click on a selected group's
-    /// empty middle).
+    /// did not move selects `click` instead, when there is one (a click on a cell not selected,
+    /// or on a selected group's empty middle).
     Band {
         from: Point,
         add: bool,
-        open: Option<Vec<CellId>>,
+        click: Option<Vec<CellId>>,
     },
     Draw {
         tool: Tool,
@@ -193,38 +193,45 @@ impl DiagramView {
                 let Some(pick) = sheet.pick(p, tolerance, &selection) else {
                     // A click on a selected group's empty middle opens it, where draw.io's lets go
                     // of the selection (user decision 2026-11-15); a drag still draws a band.
-                    let open = sheet.opened_at(p, &selection).filter(|_| !add);
-                    if !add && open.is_none() {
+                    let click = sheet.opened_at(p, &selection).filter(|_| !add);
+                    if !add && click.is_none() {
                         self.emit(Edit::Select(Vec::new()));
                     }
-                    return Some(Drag::Band { from: p, add, open });
+                    return Some(Drag::Band {
+                        from: p,
+                        add,
+                        click,
+                    });
                 };
-                // The cell under the pointer, whose parent and edges pick the guides.
-                let pressed = pick.held.clone().unwrap_or(pick.cell.clone());
-                let (ids, click) = match (&pick.held, add) {
-                    // With Ctrl a cell not held is added at once and one held is let go of on a
-                    // click, a drag moving or copying the whole selection either way.
-                    (Some(held), true) => {
-                        let rest = selection.iter().filter(|s| *s != held).cloned();
-                        let rest = rest.collect();
-                        (selection, Some(rest))
-                    }
-                    (None, true) => {
-                        let mut next = selection;
-                        next.push(pick.cell);
-                        self.emit(Edit::Select(next.clone()));
-                        (next, None)
-                    }
-                    (Some(_), false) => {
-                        let click = pick.clicked(&selection);
-                        (selection, click)
-                    }
-                    (None, false) => {
-                        self.emit(Edit::Select(vec![pick.cell.clone()]));
-                        (vec![pick.cell], None)
-                    }
+                // Only what is selected moves, so a drag from a cell not selected draws a band,
+                // while a click on it selects it, alone or with Ctrl added (user decision
+                // 2026-11-18).
+                let Some(pressed) = pick.held.clone() else {
+                    let click = match add {
+                        true => [selection, vec![pick.cell]].concat(),
+                        false => vec![pick.cell],
+                    };
+                    let click = Some(click);
+                    return Some(Drag::Band {
+                        from: p,
+                        add,
+                        click,
+                    });
                 };
-                let ids: Vec<CellId> = ids.into_iter().filter(|id| !sheet.is_pinned(id)).collect();
+                // The selected cell under the pointer, whose parent and edges pick the guides, is
+                // let go of by a click with Ctrl, and a click without it goes one level in; a
+                // drag moves or copies the whole selection either way.
+                let click = match add {
+                    true => {
+                        let rest = selection.iter().filter(|s| **s != pressed).cloned();
+                        Some(rest.collect())
+                    }
+                    false => pick.clicked(&selection),
+                };
+                let ids: Vec<CellId> = selection
+                    .into_iter()
+                    .filter(|id| !sheet.is_pinned(id))
+                    .collect();
                 let bounds = ids
                     .iter()
                     .filter_map(|id| sheet.guide_box(id))
@@ -624,7 +631,7 @@ impl DiagramView {
                 }
             }
             Drag::Band {
-                open: Some(ids), ..
+                click: Some(ids), ..
             } if !moved => self.emit(Edit::Select(ids)),
             Drag::Band { from, add, .. } if moved => {
                 let mut ids = sheet.band(Rect::from_corners(from, p));
@@ -677,7 +684,11 @@ impl DiagramView {
                     Some((Grip::Rotate, _)) => Some("grab"),
                     // A turned handle shows the cursor of the way it now points.
                     Some((Grip::Resize(h), rotation)) => Some(h.turned(rotation).cursor()),
-                    None => sheet.scene.hit(p, TOLERANCE / frame.scale).map(|_| "move"),
+                    // Only over what is selected, which alone a drag moves.
+                    None => sheet
+                        .pick(p, TOLERANCE / frame.scale, &selection)
+                        .filter(|pick| pick.held.is_some())
+                        .map(|_| "move"),
                 }
             }
             Tool::Image => None,
