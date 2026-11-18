@@ -130,6 +130,10 @@ pub struct ReconcileStats {
     /// files it leaves out are ([`crate::walk::ignored_files`]). Not serialized, as `changed`.
     #[serde(skip)]
     pub ignored_dirs: Vec<String>,
+    /// The symlinks to nothing the walk found, vault-relative, which the index never holds: the
+    /// vault's worker looks at them again as files appear. Not serialized, as `changed`.
+    #[serde(skip)]
+    pub dangling: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

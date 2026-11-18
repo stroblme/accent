@@ -625,6 +625,22 @@ drill_sort() {
 		'bench sort session modified-new'
 }
 
+# Links to nothing in the root, Show Hidden Files on: one marked, an editor's lock never listed
+# (one there from the start and one made while open), a dot-named link to a file outside listed,
+# and the marked one indexed and listed as a file once its file is written, with no reload.
+drill_dangling() {
+	mkdir "$vault/real"
+	ln -s real/x.md "$vault/link.md"
+	ln -s user@host.1:1 "$vault/.#note.md"
+	echo "# Outside" >"$dir/outside.md"
+	ln -s "$dir/outside.md" "$vault/.linked.md"
+	launch 60 ACCENT_BENCH_DANGLING=1 >"$dir/dangling"
+	has "$dir/dangling" \
+		'bench dangling open show_hidden=Some(true) link.md=b .#note.md=- .linked.md=f' \
+		'bench dangling made gone.md=b .#other.md=-' \
+		'bench dangling target link.md=f indexed=true'
+}
+
 if [ -n "${HEADLESS_DIR-}" ]; then
 	# Inside the launch headless.sh set up for the one drill named.
 	dir=$HEADLESS_DIR vault=$HEADLESS_DIR/vault

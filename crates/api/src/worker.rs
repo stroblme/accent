@@ -56,6 +56,7 @@ pub(crate) fn spawn(
         held: Vec::new(),
         own: HashMap::new(),
         links: HashMap::new(),
+        dangling: BTreeSet::new(),
         stop,
         walked: false,
         burst: Vec::new(),
@@ -201,6 +202,11 @@ struct Worker {
     /// The vault's own symlinks to files, by canonical target, routed the target's news. See
     /// [`Worker::apply_linked`].
     links: HashMap<PathBuf, Vec<String>>,
+    /// The vault's symlinks to nothing, which the index never holds: what the walk found
+    /// (`ReconcileStats::dangling`) and what news has left pointing at nothing since. Each is
+    /// looked at again after every batch, the watcher hearing of a target in its own folder alone,
+    /// and taken in once its target is there ([`Worker::found_targets`]).
+    dangling: BTreeSet<String>,
     /// Set by [`Local::stop_indexing`](crate::local::Local::stop_indexing) and by the vault's
     /// `Drop` from another thread, and read inside the walk: the inbox cannot be reached from there.
     stop: Arc<AtomicU8>,
@@ -480,6 +486,7 @@ impl Worker {
                 Msg::Panic => panic!("the test's own panic"),
             }
         }
+        self.found_targets(&mut batched);
         // A new directory is watched from now on, not from the next reconcile: watches are
         // per-directory, so `mkdir Ideas` followed by a write into it would otherwise be silent.
         if batched.rewatch {
@@ -674,6 +681,10 @@ impl Worker {
                     let found = std::mem::take(&mut stats.ignored_dirs);
                     self.ignored.found(&stats.dir, found);
                     self.wake_pdf_text();
+                    let dir = stats.dir.as_str();
+                    self.dangling
+                        .retain(|rel| !dir.is_empty() && !is_under(rel, dir));
+                    self.dangling.extend(std::mem::take(&mut stats.dangling));
                 }
                 // What the walk took in before the watcher's news of it could arrive, which then
                 // reads as no change (`Worker::unchanged`): in an unwatched vault, an open tab
@@ -915,7 +926,37 @@ impl Worker {
         b.removed.insert(rel.to_string());
         b.dirs.insert(parent_dir(rel).to_string());
         self.seen_conflicts.remove(rel);
+        self.dangles(rel);
         self.emit(Event::FileRemoved(rel.to_string()));
+    }
+
+    /// Keep `rel` among the links to nothing if it is one now: made so, or left so by its target
+    /// going ([`Worker::dangling`]).
+    fn dangles(&mut self, rel: &str) {
+        let path = self.root.join(rel);
+        if path.is_symlink() && !path.exists() {
+            self.dangling.insert(rel.to_string());
+        }
+    }
+
+    /// Take in each link to nothing whose target has come since, wherever it came from, as news
+    /// of the link: its row is written and its folder listed again. Watched from then on as the
+    /// vault's other links to files are ([`watch`]). A link no longer there leaves the set.
+    fn found_targets(&mut self, b: &mut Batch) {
+        let root = &self.root;
+        self.dangling.retain(|rel| root.join(rel).is_symlink());
+        let found: Vec<String> = (self.dangling.iter())
+            .filter(|rel| root.join(rel).exists())
+            .cloned()
+            .collect();
+        for rel in found {
+            self.dangling.remove(&rel);
+            // News of its target routed through `links` may have taken it in already.
+            if !matches!(self.index.get_file(&rel), Ok(Some(_))) {
+                self.update(&rel, false, b);
+                b.rewatch = true;
+            }
+        }
     }
 
     /// Bring one path in line with the disk. `own` marks a change we made ourselves, which must
@@ -959,6 +1000,7 @@ impl Worker {
             Ok(Change::Removed) => {
                 b.dirs.insert(parent_dir(rel).to_string());
                 b.removed.insert(rel.to_string());
+                self.dangles(rel);
             }
             Ok(Change::Updated(kind)) => {
                 // Every kind but a directory reports: a PDF rebuilt by a tool or a source file

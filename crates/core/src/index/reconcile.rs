@@ -147,15 +147,17 @@ impl Index {
             stats.stopped = true;
             return Ok(stats);
         }
-        stats.ignored_dirs = scan
-            .skipped
-            .iter()
-            .filter(|s| s.reason == walk::SkipReason::GitIgnored)
-            .filter_map(|s| {
-                let rel = s.path.strip_prefix(root).ok()?;
-                Some(rel.to_string_lossy().into_owned())
-            })
-            .collect();
+        let skipped = |reason| {
+            (scan.skipped.iter())
+                .filter(|s| s.reason == reason)
+                .filter_map(|s| {
+                    let rel = s.path.strip_prefix(root).ok()?;
+                    Some(rel.to_string_lossy().into_owned())
+                })
+                .collect()
+        };
+        stats.ignored_dirs = skipped(walk::SkipReason::GitIgnored);
+        stats.dangling = skipped(walk::SkipReason::Dangling);
         on_progress(
             self,
             Progress {

@@ -162,7 +162,10 @@ pub enum SkipReason {
     DependencyTree,
     /// A directory git ignores. Not walked, and opened by hand in the file tree instead.
     GitIgnored,
-    /// Broken symlink, permission denied, vanished mid-walk.
+    /// A symlink whose target is not there, which the vault's worker looks at again as files
+    /// appear (`ReconcileStats::dangling`).
+    Dangling,
+    /// Permission denied, vanished mid-walk.
     Io,
 }
 
@@ -175,6 +178,7 @@ impl std::fmt::Display for SkipReason {
             SkipReason::SystemTree => "symlink target is a system tree or a FUSE mount",
             SkipReason::DependencyTree => "dependency or build tree",
             SkipReason::GitIgnored => "git ignores this directory",
+            SkipReason::Dangling => "symlink to nothing",
             SkipReason::Io => "io error",
         })
     }
@@ -845,7 +849,10 @@ fn walk_pass(
                         m
                     }
                     Err(_) => {
-                        io_skip(&tx); // broken symlink
+                        let _ = tx.send(Msg::Skip(Skipped {
+                            path: path.to_path_buf(),
+                            reason: SkipReason::Dangling,
+                        }));
                         return WalkState::Skip;
                     }
                 }

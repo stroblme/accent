@@ -340,6 +340,47 @@ fn a_burst_handed_over_in_parts_is_counted_whole() {
     worker.join().unwrap();
 }
 
+/// A link to nothing, one the walk found or one made since, is indexed once its target appears,
+/// and its folder listed again, though the watcher hears of the target in the target's folder
+/// alone; and one whose target goes is one again, indexed once more when it comes back.
+/// Depends on real inotify events.
+#[test]
+fn a_link_to_nothing_is_indexed_once_its_target_appears() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("real")).unwrap();
+    std::os::unix::fs::symlink("real/a.md", root.path().join("a.md")).unwrap();
+    let f = Fixture::open_dir(root, VaultConfig::default());
+    let root = f.vault.root().to_path_buf();
+    let indexed = |rel: &str| f.vault.file_paths(false).unwrap().iter().any(|p| p == rel);
+    let root_listed =
+        |e: &Event| matches!(e, Event::DirsChanged(dirs) if dirs.iter().any(String::is_empty));
+    std::os::unix::fs::symlink("real/b.md", root.join("b.md")).unwrap();
+    assert!(f.wait(root_listed).is_some(), "the new link went unheard");
+
+    f.write("real/a.md", "a\n");
+    f.write("real/b.md", "b\n");
+    assert!(
+        f.wait(root_listed).is_some(),
+        "the links' folder was not listed again"
+    );
+    assert!(
+        poll_until(|| indexed("a.md") && indexed("b.md"), BUDGET),
+        "a link stayed out of the index"
+    );
+
+    std::fs::remove_file(root.join("real/a.md")).unwrap();
+    assert!(
+        f.wait(|e| matches!(e, Event::FileRemoved(p) if p == "a.md"))
+            .is_some(),
+        "the link outlived its target"
+    );
+    f.write("real/a.md", "again\n");
+    assert!(
+        poll_until(|| indexed("a.md"), BUDGET),
+        "the target came back unheard"
+    );
+}
+
 /// Depends on real inotify events.
 #[test]
 fn external_write_emits_file_changed_and_becomes_searchable() {
