@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, BufReader};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::process::{Child, ChildStderr};
 use tokio::sync::{mpsc, watch};
 
@@ -402,15 +402,15 @@ fn random<const N: usize>() -> io::Result<[u8; N]> {
 
 /// Kernels log freely on stderr; a full pipe would block them, so it is always drained.
 async fn drain(stderr: ChildStderr, last_words: Arc<Mutex<Option<String>>>) {
-    let mut lines = BufReader::new(stderr).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
+    accent_lsp::codec::lines(stderr, |line| {
         tracing::debug!(target: "accent_jupyter::stderr", "{line}");
         if !line.trim().is_empty()
             && let Ok(mut words) = last_words.lock()
         {
             *words = Some(line);
         }
-    }
+    })
+    .await;
 }
 
 /// Wait for the kernel's end and say so: the one way its death is heard.
@@ -510,6 +510,24 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(!live.exists());
+    }
+
+    /// A kernel's stderr is read on through bytes that are no UTF-8, so its last words still
+    /// come in and its pipe never fills.
+    #[test]
+    fn last_words_come_in_after_bytes_that_are_no_utf8() {
+        accent_lsp::runtime().block_on(async {
+            let mut child = tokio::process::Command::new("sh")
+                .args(["-c", r"printf '\377\nNo module named ipykernel\n\n' >&2"])
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let words = Arc::new(Mutex::new(None));
+            drain(child.stderr.take().unwrap(), words.clone()).await;
+            let _ = child.wait().await;
+            let words = words.lock().unwrap().clone();
+            assert_eq!(words.as_deref(), Some("No module named ipykernel"));
+        });
     }
 
     fn has_ipykernel() -> bool {
