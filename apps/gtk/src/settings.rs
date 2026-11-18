@@ -83,6 +83,7 @@ impl Preferences {
         actions.add_action(&action);
         dialog.insert_action_group("preferences", Some(&actions));
         crate::dialogs::close_on_outside_press(dialog.upcast_ref());
+        crate::dialogs::unfocus_on_background_press(dialog.upcast_ref());
         Preferences { dialog, rows }
     }
 

@@ -26,11 +26,13 @@ pub(super) fn form_dialog(
 }
 
 pub(super) fn form_window(title: &str) -> adw::Dialog {
-    adw::Dialog::builder()
+    let dialog = adw::Dialog::builder()
         .title(title)
         .content_width(660)
         .content_height(560)
-        .build()
+        .build();
+    crate::dialogs::unfocus_on_background_press(&dialog);
+    dialog
 }
 
 /// A form's page: `verb` as the header's suggested button, over an error line and `body`.

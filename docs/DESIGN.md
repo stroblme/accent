@@ -1129,6 +1129,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 
 - `AdwPreferencesDialog` of `AdwPreferencesGroup` / `AdwSwitchRow`, an `AdwComboRow` each for the theme, the focus mode (its subtitle saying what the level fades), the Text Editor and the Debug Terminal (Terminal), and a destructive `AdwButtonRow` for Restore Defaults.
 - A click outside it closes it, as one outside the palette does (Palette).
+- A click beside a text field takes the keyboard from it, so its caret goes, since GTK moves the keyboard only to something that takes it.
+  The bibliography's forms do the same (`dialogs::unfocus_on_background_press`), while the palette's entry keeps the keyboard it drives the list with.
 - Match Colours to Theme holds a switch each for Images, PDFs and Diagrams, all on (user decision 2026-10-09).
   A kind switched off shows its files as they are, and its Invert command recolours one file onto the theme's paper and ink instead (PDF, Image, Diagram).
   Images covers the images a note shows too, Diagrams the canvas and a note's embeds; a switch redoes for those files what a theme change does.

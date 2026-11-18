@@ -40,11 +40,7 @@ pub(crate) fn close_on_outside_press(dialog: &adw::Dialog) {
         let Some(dialog) = gesture.widget().and_downcast::<adw::Dialog>() else {
             return;
         };
-        let on_dialog = gesture
-            .current_event()
-            .and_then(|event| event.surface())
-            .is_some_and(|surface| Some(surface) == dialog.native().and_then(|n| n.surface()));
-        let outside = on_dialog
+        let outside = on_own_surface(gesture, &dialog)
             && dialog
                 .pick(x, y, gtk::PickFlags::DEFAULT)
                 .zip(dialog.child())
@@ -57,6 +53,57 @@ pub(crate) fn close_on_outside_press(dialog: &adw::Dialog) {
         dialog.close();
     });
     dialog.add_controller(gesture);
+}
+
+/// Take the keyboard from a text field on a primary press anywhere else in `dialog`, so its caret
+/// goes, as leaving a field on a web page does: GTK moves the focus only to a widget that takes
+/// it, and a dialog's background takes none.
+///
+/// The focus goes where libadwaita puts it in a dialog with nothing to focus, the nearest
+/// focusable widget holding the content (the sheet), so Escape still closes the dialog and Tab
+/// goes back into it. The press is never claimed: a widget that takes the focus still takes it.
+/// Popover presses come from another surface and are excluded.
+pub(crate) fn unfocus_on_background_press(dialog: &adw::Dialog) {
+    let gesture = gtk::GestureClick::new();
+    gesture.set_propagation_phase(gtk::PropagationPhase::Capture);
+    gesture.connect_pressed(|gesture, _, x, y| {
+        gesture.set_state(gtk::EventSequenceState::Denied);
+        let Some(dialog) = gesture.widget().and_downcast::<adw::Dialog>() else {
+            return;
+        };
+        let Some(root) = dialog.root() else {
+            return;
+        };
+        // The text itself, not a row holding it: `AdwEntryRow` and `AdwSpinRow` are editables
+        // too, and a press on another row's title is a press beside the field.
+        let typing = |w: Option<gtk::Widget>| {
+            std::iter::successors(w, |w| w.parent())
+                .any(|w| w.is::<gtk::Text>() || w.is::<gtk::TextView>())
+        };
+        if !on_own_surface(gesture, &dialog)
+            || !typing(root.focus())
+            || typing(dialog.pick(x, y, gtk::PickFlags::DEFAULT))
+        {
+            return;
+        }
+        // Up from the content to the dialog at most, which is the focusable one when it is a
+        // window of its own.
+        let sheet = std::iter::successors(dialog.child().and_then(|c| c.parent()), |w| w.parent())
+            .find(|w| w.is_focusable() || w == dialog.upcast_ref::<gtk::Widget>())
+            .filter(|w| w.is_focusable());
+        if let Some(sheet) = sheet {
+            root.set_focus(Some(&sheet));
+        }
+    });
+    dialog.add_controller(gesture);
+}
+
+/// Whether the press `gesture` is handling landed on `dialog`'s own surface, not a popover's.
+fn on_own_surface(gesture: &gtk::GestureClick, dialog: &adw::Dialog) -> bool {
+    gesture
+        .current_event()
+        .and_then(|event| event.surface())
+        .is_some_and(|surface| Some(surface) == dialog.native().and_then(|n| n.surface()))
 }
 
 /// Focus `entry` after presentation, then apply `place` to its caret or selection.
