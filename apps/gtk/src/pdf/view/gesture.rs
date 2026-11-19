@@ -200,8 +200,9 @@ impl PdfView {
                     f();
                 }
                 if mode == Some(Mode::Select) {
-                    // The few pixels a click is allowed below, and Ctrl for a copy.
-                    let moved = dx.abs() >= 3.0 || dy.abs() >= 3.0;
+                    // The few pixels a click is allowed below, more for a pen, and Ctrl for a copy.
+                    let slop = crate::widgets::click_slop(drag);
+                    let moved = dx.abs() >= slop || dy.abs() >= slop;
                     let state = drag.current_event_state();
                     return obj
                         .select_release(moved, state.contains(crate::platform::PRIMARY_MODIFIER));
@@ -570,9 +571,9 @@ impl PdfView {
             }
             (m, handle)
         };
-        // A Ctrl+click, however shaky, moves nothing.
+        // A click, however shaky, moves nothing, as a diagram's does.
         match handle {
-            _ if m == accent_core::pdf::IDENTITY || (copy && !moved) => self.queue_draw(),
+            _ if m == accent_core::pdf::IDENTITY || !moved => self.queue_draw(),
             Some(Handle::Move) if copy => {
                 if let Some((page, ids)) = self.picked()
                     && let Some(f) = self.imp().on_duplicate.borrow().as_ref()

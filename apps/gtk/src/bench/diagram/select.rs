@@ -151,9 +151,16 @@ pub(super) fn select(app: &Rc<App>, rel: &str) {
         tab.select(vec!["s1".into()]);
         super::super::git::xtest(&format!("keydown ctrl; {lane}; keyup ctrl")).await;
         say("ctrl band from lane p over p1");
-        tab.select(Vec::new());
+        // A mouse's click may travel under 3 px, a finger's or a pen's GTK's drag threshold
+        // (`widgets::click_slop`, unit-tested, XTEST having no touch): 4 px is a band over
+        // nothing, which lets go of s1.
+        tab.select(vec!["s1".into()]);
         let r = tab.to_widget(&tab.frame_of("s2").unwrap_or_default());
         let (x, y) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        let to = on_screen(&app, &tab.key_target(), x + 4.0, y).unwrap_or_default();
+        super::super::git::xtest(&format!("move {}; down; move {to}; up", on("s2"))).await;
+        say("click s2 moving 4 px");
+        tab.select(Vec::new());
         let to = on_screen(&app, &tab.key_target(), x + 2.0, y).unwrap_or_default();
         super::super::git::xtest(&format!("move {}; down; move {to}; up", on("s2"))).await;
         say("click s2 moving 2 px");

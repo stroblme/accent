@@ -520,6 +520,7 @@ drill_diagram_select() {
 		'bench diagram select band from lane p over p1 ["p1"]' \
 		'bench diagram select band from p moved=false history=(false, false)' \
 		'bench diagram select ctrl band from lane p over p1 ["s1", "p1"]' \
+		'bench diagram select click s2 moving 4 px []' \
 		'bench diagram select click s2 moving 2 px ["s2"]' \
 		'bench diagram select cursor s2=Some("move") p1=None' \
 		'bench diagram select drag selected s2 unmoved_before=true s2=Some((600.0, 160.0)) history=(true, false)' \

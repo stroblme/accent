@@ -16,7 +16,7 @@ use adw::prelude::*;
 use gtk::subclass::prelude::*;
 use gtk::{glib, graphene, gsk};
 
-use super::geometry::{self, DRAG_SLOP, End, Frame, GAP, HANDLE, Sheet, TOLERANCE, Zoom};
+use super::geometry::{self, End, Frame, GAP, HANDLE, Sheet, TOLERANCE, Zoom};
 use super::paint::{self, Cache, Tint};
 use super::sharp::Renders;
 use super::tools::Tool;
@@ -583,8 +583,11 @@ mod imp {
         pub editing: RefCell<Option<CellId>>,
         pub(super) drag: RefCell<Option<Drag>>,
         pub(super) preview: RefCell<Option<Preview>>,
-        /// Whether the drag under way has gone past [`DRAG_SLOP`].
+        /// Whether the drag under way has gone past `slop`.
         pub moved: Cell<bool>,
+        /// How far, in pixels, the press under way may travel and still be a click, more with a
+        /// finger or a pen ([`crate::widgets::click_slop`]).
+        slop: Cell<f64>,
         /// Where the pointer is in the drag under way, in page units.
         pub pointer: Cell<Point>,
         /// The keys held in the drag under way.
@@ -631,6 +634,7 @@ mod imp {
                 drag: RefCell::new(None),
                 preview: RefCell::new(None),
                 moved: Cell::new(false),
+                slop: Cell::new(0.0),
                 pointer: Cell::new(Point::default()),
                 mods: Cell::new(Mods::default()),
                 over: Cell::new(None),
@@ -724,6 +728,7 @@ mod imp {
                         obj.start_drag(x, y, state.contains(crate::platform::PRIMARY_MODIFIER));
                     let imp = obj.imp();
                     imp.moved.set(false);
+                    imp.slop.set(crate::widgets::click_slop(gesture));
                     imp.mods.set(Mods::of(state));
                     imp.pointer.set(obj.page_at(x, y));
                     if started.is_some() {
@@ -740,7 +745,7 @@ mod imp {
                     let Some((x0, y0)) = gesture.start_point() else {
                         return;
                     };
-                    if dx.hypot(dy) > DRAG_SLOP {
+                    if dx.hypot(dy) > imp.slop.get() {
                         imp.moved.set(true);
                     }
                     imp.mods.set(Mods::of(gesture.current_event_state()));
@@ -766,7 +771,7 @@ mod imp {
                     let Some((x0, y0)) = gesture.start_point() else {
                         return;
                     };
-                    let moved = imp.moved.replace(false) || dx.hypot(dy) > DRAG_SLOP;
+                    let moved = imp.moved.replace(false) || dx.hypot(dy) > imp.slop.get();
                     let mods = Mods::of(gesture.current_event_state());
                     obj.end_drag(drag, x0 + dx, y0 + dy, moved, mods);
                     imp.preview.take();

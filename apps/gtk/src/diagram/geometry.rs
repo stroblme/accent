@@ -14,8 +14,6 @@ use crate::zoom::clamp_scale;
 pub const GAP: f64 = 24.0;
 /// A selection handle's side, in pixels on screen — the PDF's Select box's.
 pub const HANDLE: f64 = 8.0;
-/// A press has to move this far, in pixels, before it is a drag rather than a click.
-pub const DRAG_SLOP: f64 = 3.0;
 /// How close to a line a click has to land to take it, in pixels on screen.
 pub const TOLERANCE: f64 = 4.0;
 /// A new shape dropped with a click rather than drawn: draw.io's own default vertex.

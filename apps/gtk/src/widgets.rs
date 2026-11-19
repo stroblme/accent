@@ -960,9 +960,42 @@ impl<T> Hook<dyn Fn(&Rc<T>)> {
     }
 }
 
+/// How far the press `controller` is handling may travel and still be a click: 3 px with a mouse
+/// or a touchpad, and GTK's drag threshold, 8 px unless set otherwise, with a finger or a pen,
+/// which wobble as they touch down (user decision 2026-11-19).
+pub(crate) fn click_slop(controller: &impl IsA<gtk::EventController>) -> f64 {
+    // A pen by its tool, since Wayland gives a tablet as a logical mouse.
+    let pen = controller.current_event().and_then(|e| e.device_tool());
+    let source = controller.current_event_device().map(|d| d.source());
+    let widget = controller.widget();
+    let threshold = widget.map_or(8, |w| w.settings().gtk_dnd_drag_threshold());
+    slop(pen.is_some(), source, threshold)
+}
+
+/// [`click_slop`] for a press by a pen's tool (`pen`) or else a device of `source`, GTK's drag
+/// threshold being `threshold`.
+fn slop(pen: bool, source: Option<gdk::InputSource>, threshold: i32) -> f64 {
+    use gdk::InputSource::{Pen, Touchscreen};
+    match (pen, source) {
+        (true, _) | (_, Some(Pen | Touchscreen)) => f64::from(threshold),
+        _ => 3.0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_finger_or_a_pen_may_travel_further_in_a_click() {
+        use gdk::InputSource::{Mouse, Pen, Touchpad, Touchscreen};
+        assert_eq!(slop(false, Some(Mouse), 8), 3.0);
+        assert_eq!(slop(false, Some(Touchpad), 8), 3.0);
+        assert_eq!(slop(false, Some(Touchscreen), 8), 8.0);
+        assert_eq!(slop(false, Some(Pen), 8), 8.0);
+        // A tablet Wayland gives as a mouse, and GTK's threshold as set.
+        assert_eq!(slop(true, Some(Mouse), 12), 12.0);
+    }
 
     #[test]
     fn a_wheel_notch_lands_a_step_on_and_stays_in_range() {
