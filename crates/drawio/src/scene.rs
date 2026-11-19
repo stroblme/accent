@@ -570,7 +570,7 @@ impl<'a> Builder<'a> {
         let known = shapes::is_known(shape);
         let stencil = match known {
             true => None,
-            false => Stencil::of(shape),
+            false => Stencil::of(shape, self.page),
         };
         let mut stroke = stroke(&style);
         if !known

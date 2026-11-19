@@ -2,6 +2,7 @@
 
 use crate::Error;
 use crate::geom::{Point, Rect};
+use crate::shapes::Stencils;
 use crate::style::{Color, Style, parse_num};
 
 pub type CellId = String;
@@ -100,6 +101,9 @@ pub struct Page {
     /// Every cell in document order, the root (`0`) and the layers included. Order is paint
     /// order among siblings.
     pub cells: Vec<Cell>,
+    /// What the stencils packed into its file's styles may still take, which the file's pages
+    /// share.
+    pub(crate) stencils: Stencils,
 }
 
 /// draw.io's page when a model names none: A4 portrait at 96 dpi (`mxConstants.PAGE_FORMAT_A4_PORTRAIT`).
@@ -130,6 +134,7 @@ impl Page {
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
             cells: vec![Cell::root("0"), Cell::layer("1", "0")],
+            stencils: Stencils::default(),
         }
     }
 

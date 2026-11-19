@@ -42,7 +42,7 @@ fn main() {
             let style = cell.style.resolve(cell.edge);
             if cell.vertex
                 && !shapes::is_known(style.shape())
-                && shapes::Stencil::of(style.shape()).is_none()
+                && shapes::Stencil::of(style.shape(), page).is_none()
             {
                 *unknown.entry(style.shape().to_string()).or_default() += 1;
             }

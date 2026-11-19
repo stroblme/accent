@@ -5,11 +5,11 @@
 //! (`mxgraph.aws4.lambda`), which [`library`](super::library) finds where the packs are installed.
 
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 
 use super::{Fill, RECTANGLE_ROUNDING_FACTOR, add_points, ellipse, library, mxgraph, rect};
 use crate::geom::{PathCmd, Point, Rect};
-use crate::model::Element;
+use crate::model::{Element, Page};
 use crate::route::Constraint;
 use crate::scene::{Align, Cap, DEFAULT_FONTFAMILY, DEFAULT_FONTSIZE, Font, Join, Stroke, VAlign};
 use crate::style::{Color, Resolved, parse_num};
@@ -146,51 +146,119 @@ struct Hue {
     default: Option<String>,
 }
 
+/// What the stencils packed into one file's styles may take together, inflated and read
+/// ([`Budget::FILE`]): each shape is charged once, the first time a drawing of the file meets it,
+/// so that a file of many draws those past it as stand-ins and no other file is the less for it.
+/// A file's pages and every copy of them share it.
+#[derive(Clone)]
+pub(crate) struct Stencils(Arc<Mutex<Allowance>>);
+
+struct Allowance {
+    left: Budget,
+    /// Each packed shape met so far, and whether it was let through.
+    met: HashMap<String, bool>,
+}
+
+impl Stencils {
+    fn within(left: Budget) -> Stencils {
+        let met = HashMap::new();
+        Stencils(Arc::new(Mutex::new(Allowance { left, met })))
+    }
+}
+
+impl Default for Stencils {
+    fn default() -> Stencils {
+        Stencils::within(Budget::FILE)
+    }
+}
+
+/// Every file's stencils are alike, so that a page is equal to another by what it holds.
+impl PartialEq for Stencils {
+    fn eq(&self, _: &Stencils) -> bool {
+        true
+    }
+}
+
+impl std::fmt::Debug for Stencils {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Stencils").finish_non_exhaustive()
+    }
+}
+
 /// The stencils read so far, a miss too, by the shape that names them, as a scene asks again for
-/// every cell at every paint. Those packed into styles share `left` until the cache empties, a file
-/// being read whole with each of them, so that many cannot each inflate to all a file may hold. One
-/// past it is not read, and remembered so.
+/// every cell at every paint, each with what reading it took of a file's budget.
 // ponytail: emptied when full rather than evicting the oldest; an LRU if a session ever
 // holds this many shapes at once.
+#[derive(Default)]
 struct Cache {
-    shapes: HashMap<String, Option<Arc<Stencil>>>,
-    budget: Budget,
-    left: Budget,
+    shapes: HashMap<String, (Option<Arc<Stencil>>, Budget)>,
 }
 
 impl Cache {
     /// The shapes it holds before it empties.
     const ROOM: usize = 4096;
 
-    fn new(budget: Budget) -> Cache {
-        let shapes = HashMap::new();
-        Cache {
-            shapes,
-            budget,
-            left: budget,
-        }
+    fn shared() -> MutexGuard<'static, Cache> {
+        static CACHE: LazyLock<Mutex<Cache>> = LazyLock::new(Mutex::default);
+        CACHE.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn get(&mut self, shape: &str) -> Option<Arc<Stencil>> {
-        if let Some(known) = self.shapes.get(shape) {
+    /// Library shape `name`, which costs no file anything.
+    fn library(&mut self, name: &str) -> Option<Arc<Stencil>> {
+        if let Some((known, _)) = self.shapes.get(name) {
             return known.clone();
         }
+        let stencil = library::source(name).and_then(|xml| Stencil::parse(&xml));
+        self.keep(name, stencil.map(Arc::new), Budget::NOTHING)
+    }
+
+    /// Packed stencil `shape`, charged to `file` the first time it meets it. One past what the
+    /// file has left is not read for it, and is not remembered here, where another file with more
+    /// left may read it.
+    fn packed(&mut self, shape: &str, file: &mut Allowance) -> Option<Arc<Stencil>> {
+        let met = file.met.get(shape).copied();
+        if met == Some(false) {
+            return None;
+        }
+        if let Some((known, cost)) = self.shapes.get(shape) {
+            let fits = met.is_some() || file.left.spend(*cost);
+            file.met.insert(shape.to_string(), fits);
+            return known.clone().filter(|_| fits);
+        }
+        // One let through already, read again once the cache has emptied, takes nothing more.
+        let mut left = match met {
+            Some(_) => Budget::FILE,
+            None => file.left,
+        };
+        let before = left;
+        // `Graph.js` cuts the last character off, whatever it is.
+        let mut packed = shape["stencil(".len()..].chars();
+        packed.next_back();
+        let read = crate::xml::unpack(packed.as_str(), &mut left).ok();
+        let stencil = read.and_then(Stencil::read);
+        if met.is_none() {
+            // The file pays for what reading took, read or not.
+            file.left = left;
+            let refused = stencil.is_none() && before != Budget::FILE;
+            file.met.insert(shape.to_string(), !refused);
+            if refused {
+                return None;
+            }
+        }
+        self.keep(shape, stencil.map(Arc::new), before.less(left))
+    }
+
+    fn keep(
+        &mut self,
+        shape: &str,
+        stencil: Option<Arc<Stencil>>,
+        cost: Budget,
+    ) -> Option<Arc<Stencil>> {
         if self.shapes.len() >= Cache::ROOM {
             self.shapes.clear();
-            self.left = self.budget;
         }
-        let stencil = match shape.strip_prefix("stencil(") {
-            Some(packed) => {
-                // `Graph.js` cuts the last character off, whatever it is.
-                let mut packed = packed.chars();
-                packed.next_back();
-                let shape = crate::xml::unpack(packed.as_str(), &mut self.left);
-                shape.ok().and_then(Stencil::read)
-            }
-            None => library::source(shape).and_then(|xml| Stencil::parse(&xml)),
-        };
-        let stencil = stencil.map(Arc::new);
-        self.shapes.insert(shape.to_string(), stencil.clone());
+        self.shapes
+            .insert(shape.to_string(), (stencil.clone(), cost));
         stencil
     }
 }
@@ -199,18 +267,27 @@ impl Cache {
 const MAX_INCLUDES: usize = 8;
 
 impl Stencil {
-    /// The stencil a cell's `shape` is: one written into the style, or a library shape whose pack
-    /// is installed. `None` for every other shape and for a stencil that cannot be read.
-    pub fn of(shape: &str) -> Option<Arc<Stencil>> {
-        if !shape.starts_with("stencil(") && !shape.starts_with("mxgraph.") {
-            return None;
+    /// The stencil a cell's `shape` on `page` is: one written into the style, within what its
+    /// file's stencils may take ([`Stencils`]), or a library shape whose pack is installed. `None`
+    /// for every other shape and for a stencil that cannot be read.
+    pub fn of(shape: &str, page: &Page) -> Option<Arc<Stencil>> {
+        if shape.starts_with("stencil(") {
+            let mut file = page
+                .stencils
+                .0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            return Cache::shared().packed(shape, &mut file);
         }
-        static CACHE: LazyLock<Mutex<Cache>> =
-            LazyLock::new(|| Mutex::new(Cache::new(Budget::FILE)));
-        CACHE
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(shape)
+        Stencil::named(shape)
+    }
+
+    /// The library shape `name`, which is how a stencil's `<include-shape>` names one, draw.io
+    /// finding it in its registry by name.
+    fn named(name: &str) -> Option<Arc<Stencil>> {
+        name.starts_with("mxgraph.")
+            .then(|| Cache::shared().library(name))
+            .flatten()
     }
 
     /// Read a `<shape>` element (`mxStencil.parseDescription`, `parseConstraints`). `None` for
@@ -478,7 +555,7 @@ impl<'a> Canvas<'a> {
             }
             Op::Include(name, r) => {
                 if depth < MAX_INCLUDES
-                    && let Some(stencil) = Stencil::of(name)
+                    && let Some(stencil) = Stencil::named(name)
                 {
                     stencil.draw_into(self, frame.rect(*r), depth + 1);
                 }
@@ -982,15 +1059,16 @@ mod tests {
         // `<shape w="10" h="10"><foreground><rect x="0" y="0" w="10" h="5"/><stroke/></foreground></shape>`
         // as `Graph.compress` writes it.
         let shape = "stencil(UzV2Ls5ILEhVNTIoVzV2UTUyMjQAEkBuBjLX2FXV2Dktvyg1vSi/NC8Fwi9KTS4BKqyAKIRqq0ThYTfTFMxzg5hSXFKUn50K5wIZ6PYAhSBuNHYFAA==)";
-        let stencil = Stencil::of(shape).unwrap();
+        let page = Page::default();
+        let stencil = Stencil::of(shape, &page).unwrap();
         let pieces = stencil.draw(Rect::new(0.0, 0.0, 20.0, 20.0), &style(""));
         let [Piece::Path { path, fill, .. }] = pieces.as_slice() else {
             panic!("{pieces:?}")
         };
         assert_eq!(path, &rect(Rect::new(0.0, 0.0, 20.0, 10.0)));
         assert_eq!(*fill, Fill::None);
-        assert!(Stencil::of("stencil(not deflate)").is_none());
-        assert!(Stencil::of("rhombus").is_none());
+        assert!(Stencil::of("stencil(not deflate)", &page).is_none());
+        assert!(Stencil::of("rhombus", &page).is_none());
     }
 
     #[test]
@@ -1012,10 +1090,10 @@ mod tests {
         assert!(arc_to_curves(from, 0.0, 1.0, 0.0, false, true, to).is_empty());
     }
 
-    /// Stencils packed into styles share one budget until the cache empties: three that each fit
-    /// alone, the third past what the first two left.
+    /// Each file's packed stencils have a budget of their own: a file that has used its up draws
+    /// the rest as stand-ins, while another file's still draw, one the first read too among them.
     #[test]
-    fn packed_stencils_share_one_budget() {
+    fn each_file_s_packed_stencils_have_a_budget_of_their_own() {
         let packed = |w: u32| {
             let xml = format!(
                 r#"<shape w="{w}" h="10"><foreground><rect x="0" y="0" w="10" h="10"/><fillstroke/></foreground></shape>"#
@@ -1026,16 +1104,32 @@ mod tests {
                 xml.len(),
             )
         };
-        let ((a, len), (b, _), (c, _)) = (packed(10), packed(11), packed(12));
-        let two = Budget {
-            inflated: 2 * len,
-            elements: usize::MAX,
+        // Shapes of this test alone, as the cache is the whole process's.
+        let ((a, len), (b, _), (c, _)) = (packed(7001), packed(7002), packed(7003));
+        let file = || {
+            let two = Budget {
+                inflated: 2 * len,
+                elements: usize::MAX,
+            };
+            Page {
+                stencils: Stencils::within(two),
+                ..Page::default()
+            }
         };
-        let mut cache = Cache::new(two);
-        assert!(cache.get(&c).is_some(), "each fits alone");
-        let mut cache = Cache::new(two);
-        assert!(cache.get(&a).is_some() && cache.get(&b).is_some());
-        assert!(cache.get(&c).is_none(), "the third is past what they left");
-        assert!(cache.get(&a).is_some(), "what was read stays");
+        let (first, second) = (file(), file());
+        let drawn = |page: &Page, shape: &str| Stencil::of(shape, page).is_some();
+        assert!(drawn(&first, &a) && drawn(&first, &b));
+        assert!(!drawn(&first, &c), "past what the first file has left");
+        assert!(
+            drawn(&second, &c) && drawn(&second, &a),
+            "the second file's draw"
+        );
+        assert!(
+            !drawn(&second, &b),
+            "each charged to the file that meets it"
+        );
+        assert!(drawn(&first, &a), "what was let through stays");
+        let copy = first.clone();
+        assert!(!drawn(&copy, &c), "a copy of a page is of the same file");
     }
 }

@@ -11,6 +11,7 @@ use quick_xml::{Reader, XmlVersion};
 use crate::Error;
 use crate::geom::{Point, Rect};
 use crate::model::{Cell, Element, File, Geometry, Page, Value, guid};
+use crate::shapes::Stencils;
 use crate::style::{Style, parse_num};
 
 /// Parse a whole file.
@@ -22,8 +23,8 @@ pub fn parse(bytes: &[u8]) -> Result<File, Error> {
 /// pages inflate to and the elements of its XML and theirs. Each page once had the bytes to
 /// itself, so that twelve pages of a file of 100 kB held 72 MiB of labels, and bytes alone leave
 /// out what an element costs, an empty cell taking some 670 bytes where it inflates from 15. The
-/// stencils packed into styles share one too (`Stencil::of`).
-#[derive(Clone, Copy)]
+/// stencils packed into a file's styles have one of their own (`Stencils`).
+#[derive(Clone, Copy, PartialEq)]
 pub(crate) struct Budget {
     pub(crate) inflated: usize,
     pub(crate) elements: usize,
@@ -45,6 +46,30 @@ impl Budget {
         })?;
         Ok(())
     }
+
+    /// Nothing, what a library stencil costs a file.
+    pub(crate) const NOTHING: Budget = Budget {
+        inflated: 0,
+        elements: 0,
+    };
+
+    /// Take `cost` from what is left, if it fits.
+    pub(crate) fn spend(&mut self, cost: Budget) -> bool {
+        let fits = cost.inflated <= self.inflated && cost.elements <= self.elements;
+        if fits {
+            self.inflated -= cost.inflated;
+            self.elements -= cost.elements;
+        }
+        fits
+    }
+
+    /// What was taken from this budget to leave `left`.
+    pub(crate) fn less(self, left: Budget) -> Budget {
+        Budget {
+            inflated: self.inflated - left.inflated,
+            elements: self.elements - left.elements,
+        }
+    }
 }
 
 /// [`parse`], the file and all of its pages held to `budget` together.
@@ -53,6 +78,8 @@ fn parse_within(bytes: &[u8], mut budget: Budget) -> Result<File, Error> {
     let xml = std::str::from_utf8(bytes)
         .map_err(|e| Error::Format(format!("the file is not UTF-8 text: {e}")))?;
     let mut root = tree_within(xml, &mut budget)?;
+    // Its pages share what its stencils may take.
+    let stencils = Stencils::default();
     // A diagram that is not in an `<mxfile>` becomes one, as if accent had made it.
     let ours = || vec![("host".to_string(), "accent".to_string())];
     let (attrs, mut pages) = match root.name.as_str() {
@@ -61,14 +88,14 @@ fn parse_within(bytes: &[u8], mut budget: Budget) -> Result<File, Error> {
             let pages = diagrams
                 .into_iter()
                 .filter(|c| c.name == "diagram")
-                .map(|diagram| page(diagram, &mut budget))
+                .map(|diagram| page(diagram, &mut budget, &stencils))
                 .collect::<Result<Vec<_>, _>>()?;
             (root.attrs, pages)
         }
-        "diagram" => (ours(), vec![page(root, &mut budget)?]),
+        "diagram" => (ours(), vec![page(root, &mut budget, &stencils)?]),
         "mxGraphModel" => {
             let attrs = vec![("name".into(), "Page-1".into()), ("id".into(), guid())];
-            (ours(), vec![model_page(attrs, root)])
+            (ours(), vec![model_page(attrs, root, &stencils)])
         }
         other => return Err(Error::Format(format!("the document is <{other}>"))),
     };
@@ -188,7 +215,7 @@ fn xml_error(e: impl std::fmt::Display) -> Error {
 
 /// One `<diagram>`: its model inline, compressed into its text, or neither for an empty page.
 /// A compressed one takes what it inflates to and its elements from `budget`.
-fn page(diagram: Element, budget: &mut Budget) -> Result<Page, Error> {
+fn page(diagram: Element, budget: &mut Budget, stencils: &Stencils) -> Result<Page, Error> {
     let Element {
         attrs,
         children,
@@ -196,11 +223,12 @@ fn page(diagram: Element, budget: &mut Budget) -> Result<Page, Error> {
         ..
     } = diagram;
     if let Some(model) = children.into_iter().find(|c| c.name == "mxGraphModel") {
-        return Ok(model_page(attrs, model));
+        return Ok(model_page(attrs, model, stencils));
     }
     if text.trim().is_empty() {
         return Ok(Page {
             attrs,
+            stencils: stencils.clone(),
             ..Page::blank("", "")
         });
     }
@@ -212,7 +240,7 @@ fn page(diagram: Element, budget: &mut Budget) -> Result<Page, Error> {
             model.name
         )));
     }
-    Ok(model_page(attrs, model))
+    Ok(model_page(attrs, model, stencils))
 }
 
 /// What the compressed pages of one file, or the stencils packed into styles together, may inflate
@@ -233,10 +261,14 @@ fn decompress_within(text: &str, left: &mut usize) -> Result<String, Error> {
     let deflated = crate::base64::decode(text).ok_or_else(|| broken("base64"))?;
     let inflated = miniz_oxide::inflate::decompress_to_vec_with_limit(&deflated, *left);
     let inflated = inflated.map_err(|e| match e.status {
-        TINFLStatus::HasMoreOutput => Error::Format(format!(
-            "the compressed pages inflate to more than {} MiB",
-            MAX_INFLATED >> 20
-        )),
+        // All that was left went on it.
+        TINFLStatus::HasMoreOutput => {
+            *left = 0;
+            let most = MAX_INFLATED >> 20;
+            Error::Format(format!(
+                "the compressed pages inflate to more than {most} MiB"
+            ))
+        }
         _ => broken("deflate data"),
     })?;
     *left -= inflated.len();
@@ -274,7 +306,7 @@ pub(crate) fn zap_gremlins(s: &str) -> String {
 }
 
 /// A page from its `<diagram>` attributes and its `<mxGraphModel>`.
-fn model_page(attrs: Vec<(String, String)>, model: Element) -> Page {
+fn model_page(attrs: Vec<(String, String)>, model: Element, stencils: &Stencils) -> Page {
     // A second cell carrying an id already taken is given a fresh one, as draw.io does when a
     // cell is added under an id the model holds (`mxGraphModel.cellAdded`). The tree is walked by
     // id, so a duplicate is a cell that is its own ancestor — a recursion the walk never leaves.
@@ -297,6 +329,7 @@ fn model_page(attrs: Vec<(String, String)>, model: Element) -> Page {
         attrs,
         model_attrs: model.attrs,
         cells,
+        stencils: stencils.clone(),
     }
 }
 

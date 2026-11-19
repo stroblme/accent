@@ -17,6 +17,7 @@ pub use grapheditor::flex_arrow;
 pub use inset::Inset;
 pub use mxgraph::edge_line;
 pub(crate) use mxgraph::ellipse;
+pub(crate) use stencil::Stencils;
 pub use stencil::{Piece, Stencil};
 
 use crate::geom::{self, PathCmd, Point, Rect};

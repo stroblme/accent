@@ -51,7 +51,7 @@ impl Terminal {
         let outline = Outline::of(&style);
         // A fixed-aspect stencil is met and routed around where it is drawn, not at the cell's
         // box (`mxCellState.getPerimeterBounds`, `mxGraphView.updateBoundsFromStencil`).
-        let bounds = match shapes::Stencil::of(style.shape()) {
+        let bounds = match shapes::Stencil::of(style.shape(), page) {
             Some(stencil) => stencil.perimeter_bounds(bounds, outline.direction.vertical()),
             None => bounds,
         };
@@ -194,7 +194,7 @@ pub fn anchors(page: &Page, id: &str) -> Vec<(Point, Constraint)> {
     };
     let constraints = match style.get("points") {
         Some(list) => points_style(list).unwrap_or_default(),
-        None => shapes::constraints(style.shape(), &style, w, h),
+        None => shapes::constraints(style.shape(), &style, w, h, page),
     };
     constraints
         .into_iter()

@@ -3,6 +3,7 @@
 //! (the shapes' `constraints` and `getConstraints`, Shapes.js 9025-9600).
 
 use crate::geom::Point;
+use crate::model::Page;
 use crate::route::Constraint;
 use crate::style::Resolved;
 
@@ -31,11 +32,11 @@ const fn fixed(x: f64, y: f64) -> Constraint {
     at(x, y, 0.0, 0.0)
 }
 
-/// Connection points for an east-facing `shape` of size `w` by `h`. A stencil has its own
-/// (`<connections>`), none where it names none; other shapes without a table use rectangle
+/// Connection points for an east-facing `shape` of size `w` by `h` on `page`. A stencil has its
+/// own (`<connections>`), none where it names none; other shapes without a table use rectangle
 /// points.
-pub fn constraints(shape: &str, style: &Resolved, w: f64, h: f64) -> Vec<Constraint> {
-    if let Some(stencil) = super::Stencil::of(shape) {
+pub fn constraints(shape: &str, style: &Resolved, w: f64, h: f64, page: &Page) -> Vec<Constraint> {
+    if let Some(stencil) = super::Stencil::of(shape, page) {
         return stencil.constraints().to_vec();
     }
     let table: &[Constraint] = match shape {
