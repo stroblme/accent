@@ -26,6 +26,11 @@ impl Wired {
     /// [`open`](Self::open) over a vault the caller fills, for a test that needs a walk still
     /// running when the first request lands.
     fn seeded(write: &dyn Fn(&std::path::Path)) -> Wired {
+        Wired::configured(write, VaultConfig::default())
+    }
+
+    /// [`seeded`](Self::seeded), the window handing the host `config` as it says hello.
+    fn configured(write: &dyn Fn(&std::path::Path), config: VaultConfig) -> Wired {
         let root = tempfile::tempdir().unwrap();
         let cache = tempfile::tempdir().unwrap();
         write(root.path());
@@ -51,9 +56,7 @@ impl Wired {
             events,
             Box::new(|| {}),
         );
-        let hello: Hello = client
-            .call("hello", json!([VaultConfig::default(), true, true]))
-            .unwrap();
+        let hello: Hello = client.call("hello", json!([config, true, true])).unwrap();
         assert_eq!(hello.version, env!("CARGO_PKG_VERSION"));
 
         Wired {
@@ -1146,6 +1149,89 @@ fn a_debug_session_crosses_the_wire() {
     });
     // A session already over is stopped without complaint.
     w.client.call::<()>("debug_stop", json!([1])).unwrap();
+}
+
+/// A notebook's cells debugged in its kernel on the host: the kernel and its debugger stay there,
+/// the window setting a cell's breakpoints through the file the kernel writes the cell to.
+#[test]
+fn a_notebook_kernel_is_debugged_across_the_wire() {
+    use crate::debug::{Breakpoint, Frame, News};
+    if !crate::tests::has_ipykernel() || !crate::tests::has_debugpy() {
+        eprintln!("ipykernel or debugpy is not installed: skipping the kernel over the wire");
+        return;
+    }
+    // Its IPython folder and the folder it writes its cells to are the test's.
+    let python = r#"IPYTHONDIR="$PWD/ipython" TMPDIR="$PWD/tmp" exec python3 "$@""#;
+    let mut config = VaultConfig::default();
+    config.debug.python = ["sh", "-c", python, "sh"].map(String::from).to_vec();
+    let w = Wired::configured(
+        &|root| std::fs::create_dir(root.join("tmp")).unwrap(),
+        config,
+    );
+    let start = crate::kernel::Start {
+        notebook: "run.ipynb".to_string(),
+        kernel: None,
+    };
+    let _: crate::kernel::Info = w.client.call("kernel_start", json!([1, start])).unwrap();
+    let attach = crate::debug::Attach {
+        kernel: 1,
+        breakpoints: Vec::new(),
+        exceptions: Vec::new(),
+    };
+    let cells: crate::kernel::Cells = w.client.call("debug_kernel", json!([2, attach])).unwrap();
+    let double = "def double(x):\n    return x * 2\n";
+    let path: String = w.client.call("debug_dump", json!([2, double])).unwrap();
+    assert_eq!(path, cells.path(double));
+    let asked = json!([2, path, [Breakpoint::at(1)]]);
+    let placed: Vec<crate::debug::Placed> = w.client.call("debug_breakpoints", asked).unwrap();
+    assert!(placed[0].verified);
+    for (run, code) in [(1, double), (2, "double(21)")] {
+        let sent = w.client.call::<()>("kernel_execute", json!([1, run, code]));
+        sent.unwrap();
+    }
+    let stopped = crate::tests::wait_for(
+        &w._events,
+        |e| {
+            matches!(
+                e,
+                Event::Debug {
+                    session: 2,
+                    news: News::Stopped { .. }
+                }
+            )
+        },
+        Duration::from_secs(30),
+    );
+    let Some(Event::Debug {
+        news: News::Stopped {
+            thread: Some(thread),
+            ..
+        },
+        ..
+    }) = stopped
+    else {
+        panic!("{stopped:?}")
+    };
+    let frames: Vec<Frame> = w.client.call("debug_stack", json!([2, thread])).unwrap();
+    assert_eq!(
+        (frames[0].path.as_deref(), frames[0].pos.line),
+        (Some(path.as_str()), 1)
+    );
+    w.client
+        .call::<()>("debug_continue", json!([2, thread]))
+        .unwrap();
+    let done = |e: &Event| {
+        matches!(
+            e,
+            Event::Kernel {
+                news: crate::kernel::News::Done { run: 2, .. },
+                ..
+            }
+        )
+    };
+    assert!(w.wait(done), "the cell ran on");
+    w.client.call::<()>("debug_stop", json!([2])).unwrap();
+    w.client.call::<()>("kernel_stop", json!([1])).unwrap();
 }
 
 /// The window went away while the console's code ran on, which may never return: `serve`

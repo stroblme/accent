@@ -1,12 +1,14 @@
-//! One debug session's protocol: the adapter's start, its news turned into [`News`], and the
-//! requests the window makes of a paused program.
+//! One debug session's protocol: the adapter's start, or a notebook kernel's debugger attached,
+//! its news turned into [`News`], and the requests the window makes of a paused program.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
 
 use accent_core::config::DebugConfig;
+use accent_dap::types::Capabilities;
 use accent_dap::types::{
     BreakpointEventBody, CompletionsResponse, EvaluateResponse, ExitedEventBody, OutputEventBody,
     RunInTerminalRequestArguments, ScopesResponse, SetBreakpointsResponse, StackTraceResponse,
@@ -17,9 +19,10 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 use super::{
-    Breakpoint, Candidate, Category, Context, Debugs, Evaluated, ExceptionFilter, Frame, Launch,
-    News, Placed, Scope, Step, Supports, Thread, Variable,
+    Attach, Breakpoint, Candidate, Category, Context, Debugs, Evaluated, ExceptionFilter, Frame,
+    Launch, News, Placed, Scope, Step, Supports, Thread, Variable,
 };
+use crate::kernel::{Cells, DebugInfo, Debuggee, DumpCell};
 use crate::language::{Pos, session_root};
 use crate::{Error, Event, Result, locked};
 
@@ -29,7 +32,15 @@ pub(super) struct Session {
     root: PathBuf,
     /// Each file's breakpoints as the adapter last said.
     placed: Mutex<HashMap<String, Held>>,
+    /// How a notebook's kernel names its cells' files; `None` for a program's session.
+    cells: Option<Cells>,
 }
+
+/// Why a kernel's cells cannot be debugged where it names them otherwise.
+const NAMED_OTHERWISE: &str = "the kernel names its cells in a way Accent does not read";
+
+/// Files' breakpoints and the exceptions to stop at, as a session is configured with them.
+type Configuration = (Vec<(String, Vec<Breakpoint>)>, Vec<String>);
 
 /// A file's breakpoints, each with the id the adapter's `breakpoint` events name it by.
 type Held = Vec<(Option<i64>, Placed)>;
@@ -53,56 +64,11 @@ pub(super) async fn start(
         Ok(capabilities) => capabilities,
         Err(e) => return Err(failed(&argv[0], &client, e)),
     };
-    let _ = debugs.events.send(Event::Debug {
-        session: id,
-        news: News::Supports(Supports {
-            condition: capabilities.supports_conditional_breakpoints,
-            hit_condition: capabilities.supports_hit_conditional_breakpoints,
-            log_message: capabilities.supports_log_points,
-        }),
-    });
-    // Each as the window had it, else as the adapter defaults it.
-    let exceptions: Vec<ExceptionFilter> = capabilities
-        .exception_breakpoint_filters
-        .into_iter()
-        .map(|offered| {
-            let had = launch
-                .exceptions
-                .iter()
-                .find(|f| f.filter == offered.filter);
-            ExceptionFilter {
-                on: had.map_or(offered.default, |had| had.on),
-                filter: offered.filter,
-                label: offered.label,
-                description: offered.description,
-            }
-        })
-        .collect();
-    let _ = debugs.events.send(Event::Debug {
-        session: id,
-        news: News::Exceptions(exceptions.clone()),
-    });
-    let stop_at = exceptions.into_iter().filter(|f| f.on).map(|f| f.filter);
-    let session = Arc::new(Session {
-        client,
-        root: root.clone(),
-        placed: Mutex::default(),
-    });
-    // Before `launch`: the adapter asks for the program to be run while it is out. A vault shut
-    // down meanwhile stopped only the sessions it held, so this one stops its own adapter.
-    if !debugs.sessions.register(id, &session) {
-        session.client.shutdown().await;
-        return Err(accent_core::Error::Cancelled.into());
-    }
-    accent_lsp::runtime().spawn(forward(
-        id,
-        incomings,
-        Arc::downgrade(&session),
-        Arc::downgrade(&debugs),
-        debugs.events.clone(),
-        launch.breakpoints,
-        stop_at.collect(),
-    ));
+    let stop_at = told(&debugs, id, capabilities, &launch.exceptions);
+    // Before `launch`: the adapter asks for the program to be run while it is out, and is
+    // configured once it says `initialized`.
+    let configuration = Some((launch.breakpoints, stop_at));
+    let session = register(&debugs, id, client, incomings, None, configuration).await?;
     let arguments = json!({
         "name": "accent",
         "program": program,
@@ -124,6 +90,133 @@ pub(super) async fn start(
     Ok(())
 }
 
+/// Attach to a notebook kernel's debugger and stop at `attach`'s breakpoints and exceptions:
+/// answered with how the kernel names its cells' files. ipykernel starts debugpy at the first
+/// `initialize`, and configures it itself on the first `attach`, which a session after it on the
+/// same kernel finds started.
+pub(super) async fn attach(
+    debugs: Arc<Debugs>,
+    id: u64,
+    attach: Attach,
+    debuggee: Debuggee,
+) -> Result<Cells> {
+    let Debuggee {
+        client,
+        incomings,
+        python,
+    } = debuggee;
+    let ready = async {
+        let refused = |why: String| Err(Error::Language(why));
+        // Answered at once even while a cell runs; ipykernel 5 never answers.
+        let asked = client.request::<DebugInfo>("debugInfo", json!({}));
+        let cells = match tokio::time::timeout(Duration::from_secs(3), asked).await {
+            Err(_) => return refused("this kernel cannot debug: ipykernel 6 or newer does".into()),
+            Ok(Err(accent_dap::Error::Response { .. })) => {
+                return refused(format!("debugpy is not installed in {python}"));
+            }
+            Ok(Err(e)) => return Err(e.into()),
+            Ok(Ok(info)) => info.cells(),
+        };
+        let Some(cells) = cells else {
+            return refused(NAMED_OTHERWISE.to_string());
+        };
+        Ok((cells, client.initialize("debugpy").await?))
+    };
+    let (cells, capabilities) = match ready.await {
+        Ok(ready) => ready,
+        Err(e) => {
+            client.shutdown().await;
+            return Err(e);
+        }
+    };
+    let stop_at = told(&debugs, id, capabilities, &attach.exceptions);
+    let session = register(&debugs, id, client, incomings, Some(cells.clone()), None).await?;
+    // The kernel's output stays its runs', as without the debugger.
+    let arguments = json!({"justMyCode": true, "redirectOutput": false});
+    if let Err(e) = session.client.request::<Value>("attach", arguments).await {
+        debugs.sessions.remove(id);
+        session.stop().await;
+        return Err(e.into());
+    }
+    let emit = |news| {
+        let _ = debugs.events.send(Event::Debug { session: id, news });
+    };
+    session.configure(attach.breakpoints, stop_at, &emit).await;
+    Ok(cells)
+}
+
+/// Tell the window what the adapter's breakpoints take and which exceptions it can stop at, each
+/// as the window `had` it, else as the adapter defaults it: those switched on.
+fn told(
+    debugs: &Debugs,
+    id: u64,
+    capabilities: Capabilities,
+    had: &[ExceptionFilter],
+) -> Vec<String> {
+    let _ = debugs.events.send(Event::Debug {
+        session: id,
+        news: News::Supports(Supports {
+            condition: capabilities.supports_conditional_breakpoints,
+            hit_condition: capabilities.supports_hit_conditional_breakpoints,
+            log_message: capabilities.supports_log_points,
+        }),
+    });
+    let exceptions: Vec<ExceptionFilter> = capabilities
+        .exception_breakpoint_filters
+        .into_iter()
+        .map(|offered| {
+            let had = had.iter().find(|f| f.filter == offered.filter);
+            ExceptionFilter {
+                on: had.map_or(offered.default, |had| had.on),
+                filter: offered.filter,
+                label: offered.label,
+                description: offered.description,
+            }
+        })
+        .collect();
+    let _ = debugs.events.send(Event::Debug {
+        session: id,
+        news: News::Exceptions(exceptions.clone()),
+    });
+    exceptions
+        .into_iter()
+        .filter(|f| f.on)
+        .map(|f| f.filter)
+        .collect()
+}
+
+/// Register the session and follow its news, configured as `initialized` comes where it has a
+/// `configuration`. A vault shut down meanwhile stopped only the sessions it held, so this one
+/// stops its own adapter.
+async fn register(
+    debugs: &Arc<Debugs>,
+    id: u64,
+    client: Client,
+    incomings: Incomings,
+    cells: Option<Cells>,
+    configuration: Option<Configuration>,
+) -> Result<Arc<Session>> {
+    let session = Arc::new(Session {
+        client,
+        root: debugs.root.clone(),
+        placed: Mutex::default(),
+        cells,
+    });
+    if !debugs.sessions.register(id, &session) {
+        session.client.shutdown().await;
+        return Err(accent_core::Error::Cancelled.into());
+    }
+    accent_lsp::runtime().spawn(forward(
+        id,
+        incomings,
+        Arc::downgrade(&session),
+        Arc::downgrade(debugs),
+        debugs.events.clone(),
+        configuration,
+    ));
+    Ok(session)
+}
+
 /// Why the adapter did not answer: one that exited says why on stderr, which is how
 /// `No module named debugpy` reaches the reader.
 fn failed(adapter: &str, client: &Client, e: accent_dap::Error) -> Error {
@@ -143,13 +236,11 @@ async fn forward(
     session: Weak<Session>,
     debugs: Weak<Debugs>,
     events: Sender<Event>,
-    breakpoints: Vec<(String, Vec<Breakpoint>)>,
-    exceptions: Vec<String>,
+    mut configuration: Option<Configuration>,
 ) {
     let emit = |news| {
         let _ = events.send(Event::Debug { session: id, news });
     };
-    let mut configuration = Some((breakpoints, exceptions));
     let (mut code, mut terminated) = (None, false);
     while let Some(incoming) = incomings.recv().await {
         let (event, body) = match incoming {
@@ -227,13 +318,16 @@ async fn forward(
             _ => {}
         }
     }
-    // Still registered, it was neither stopped nor did it end: the adapter died.
+    // Still registered, it was neither stopped nor did it end: the adapter died. A kernel's
+    // debugger ends with its kernel, which says why itself.
     let gone = debugs.upgrade().and_then(|d| d.sessions.remove(id));
     let error = match (&gone, terminated) {
-        (Some(session), false) => Some(match session.client.last_words() {
-            Some(words) => format!("the debug adapter exited: {words}"),
-            None => "the debug adapter exited".to_string(),
-        }),
+        (Some(session), false) if session.cells.is_none() => {
+            Some(match session.client.last_words() {
+                Some(words) => format!("the debug adapter exited: {words}"),
+                None => "the debug adapter exited".to_string(),
+            })
+        }
         _ => None,
     };
     emit(News::Ended { code, error });
@@ -480,15 +574,41 @@ impl Session {
         Ok(())
     }
 
-    /// End the program, then the adapter, which exits as its input closes.
+    /// End the program, then the adapter, which exits as its input closes. A notebook's kernel
+    /// lives on, its debugger let go: debugpy would end it with the session.
     pub(super) async fn stop(&self) {
-        let arguments = json!({"terminateDebuggee": true});
+        let arguments = match self.cells {
+            None => json!({"terminateDebuggee": true}),
+            Some(_) => json!({"restart": false, "terminateDebuggee": false}),
+        };
         let _ = self.client.request::<Value>("disconnect", arguments).await;
         self.client.shutdown().await;
     }
 
-    /// A path from the adapter as the façade gives it: vault-relative inside the vault.
+    /// Have the kernel write `code` to the file it runs it as: that file, refused where it is not
+    /// the one the kernel's frames would name.
+    pub(super) async fn dump(&self, code: String) -> Result<String> {
+        let Some(cells) = &self.cells else {
+            return Err(Error::Language("a program has no cells".to_string()));
+        };
+        let arguments = json!({"code": code});
+        let dumped: DumpCell = self.client.request("dumpCell", arguments).await?;
+        if dumped.source_path != cells.path(&code) {
+            return Err(Error::Language(NAMED_OTHERWISE.to_string()));
+        }
+        Ok(dumped.source_path)
+    }
+
+    /// A path from the adapter as the façade gives it: vault-relative inside the vault, a kernel's
+    /// cell as the kernel names it.
     fn ours(&self, path: &str) -> String {
+        if self
+            .cells
+            .as_ref()
+            .is_some_and(|c| path.starts_with(&c.prefix))
+        {
+            return path.to_string();
+        }
         match Path::new(path).strip_prefix(&self.root) {
             Ok(rel) => rel.to_string_lossy().into_owned(),
             Err(_) => path.to_string(),

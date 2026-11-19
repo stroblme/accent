@@ -19,6 +19,7 @@ use accent_core::config::DebugConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::kernel::{Cells, Kernels};
 use crate::language::{Pos, Task, in_path, remote_task_then};
 use crate::registry::Registry;
 use crate::vault::Backend;
@@ -34,6 +35,16 @@ use session::Session;
 pub struct Launch {
     pub program: String,
     pub language: String,
+    pub breakpoints: Vec<(String, Vec<Breakpoint>)>,
+    pub exceptions: Vec<ExceptionFilter>,
+}
+
+/// What to debug a notebook's cells in: the kernel the vault knows by `kernel`, its debugger
+/// stopping at `breakpoints` and `exceptions` as [`Launch`]'s does. The cells' breakpoints go once
+/// the kernel has their files ([`Vault::debug_dump`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Attach {
+    pub kernel: u64,
     pub breakpoints: Vec<(String, Vec<Breakpoint>)>,
     pub exceptions: Vec<ExceptionFilter>,
 }
@@ -255,6 +266,17 @@ impl Debugs {
         Task::spawn(session::start(debugs, id, launch, cfg))
     }
 
+    /// Attach to `attach.kernel`'s debugger; answered once it stops where asked.
+    pub(crate) fn attach(
+        self: &Arc<Self>,
+        id: u64,
+        attach: Attach,
+        kernels: &Kernels,
+    ) -> Task<Cells> {
+        let (debugs, debuggee) = (self.clone(), kernels.debugger(attach.kernel));
+        Task::spawn(async move { session::attach(debugs, id, attach, debuggee?).await })
+    }
+
     /// End the program and its adapter; a session already over is no error.
     pub(crate) fn stop(&self, id: u64) -> Task<()> {
         let session = self.sessions.remove(id);
@@ -346,6 +368,9 @@ sessions! {
         -> Vec<Candidate>;
     /// Answer [`News::Terminal`] `seq`: the program's process id where the window runs it.
     debug_answer => answer(seq: i64, pid: Option<u32>) -> ();
+    /// Have a notebook's kernel write `code` to the file it runs it as, which takes breakpoints
+    /// once it is there: that file's path.
+    debug_dump => dump(code: String) -> String;
 }
 
 /// The two calls the macro does not write: starting reads the vault's config, and stopping a
@@ -366,7 +391,23 @@ impl Vault {
         }
     }
 
-    /// End the program and its adapter.
+    /// Debug the cells of a notebook's kernel as `session`: answered once its debugger stops
+    /// where asked, with how the kernel names the cells' files, which their frames name. Its
+    /// first answer may wait for debugpy to start.
+    pub fn debug_kernel(&self, session: u64, attach: &Attach) -> Task<Cells> {
+        match &self.backend {
+            Backend::Local(v) => v.debug_kernel(session, attach),
+            Backend::Remote(r) => remote_task_then(
+                r.clone(),
+                "debug_kernel",
+                json!([session, attach]),
+                crate::kernel::START,
+                |_, answer| Ok(answer),
+            ),
+        }
+    }
+
+    /// End the program and its adapter; a notebook's kernel lives on.
     pub fn debug_stop(&self, session: u64) -> Task<()> {
         match &self.backend {
             Backend::Local(v) => v.debug_stop(session),
@@ -385,6 +426,10 @@ impl Local {
     pub fn debug_start(&self, session: u64, launch: &Launch) -> Task<()> {
         self.debug
             .start(session, launch.clone(), &self.config().debug)
+    }
+
+    pub fn debug_kernel(&self, session: u64, attach: &Attach) -> Task<Cells> {
+        self.debug.attach(session, attach.clone(), &self.kernels)
     }
 
     pub fn debug_stop(&self, session: u64) -> Task<()> {
@@ -590,5 +635,197 @@ mod tests {
             }
         );
         program.wait().unwrap();
+    }
+    /// A cell of a notebook debugged in its kernel, the kernel and what it holds living on past
+    /// the session, a second session on it, and a kernel that dies under a paused cell ending
+    /// its session.
+    #[test]
+    fn a_notebook_cell_pauses_at_a_breakpoint_and_its_kernel_lives_on() {
+        if !crate::tests::has_ipykernel() || !crate::tests::has_debugpy() {
+            eprintln!("ipykernel or debugpy is not installed: skipping the end-to-end test");
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("tmp")).unwrap();
+        // The kernel's IPython folder, and the folder it writes its cells to, are the test's.
+        let python = r#"IPYTHONDIR="$PWD/ipython" TMPDIR="$PWD/tmp" exec python3 "$@""#;
+        let config = VaultConfig {
+            debug: DebugConfig {
+                python: ["sh", "-c", python, "sh"].map(String::from).to_vec(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (vault, events) =
+            Vault::open_at(root.path(), &cache.path().join("index.db"), config).unwrap();
+        fn wait<T>(task: impl std::future::Future<Output = T>) -> T {
+            accent_lsp::runtime().block_on(task)
+        }
+        let next = |want: &dyn Fn(&Event) -> bool| {
+            wait_for(&events, want, Duration::from_secs(60)).expect("the news in time")
+        };
+        let done = |run: u64| move |e: &Event| matches!(e, Event::Kernel { news: crate::kernel::News::Done { run: r, .. }, .. } if *r == run);
+        let stopped = |session: u64| move |e: &Event| matches!(e, Event::Debug { session: s, news: News::Stopped { .. } } if *s == session);
+        let double = "def double(x):\n    return x * 2\n";
+        let total = "total = double(21)\nprint(\"total\", total)\n";
+
+        let start = crate::kernel::Start {
+            notebook: "run.ipynb".to_string(),
+            kernel: None,
+        };
+        wait(vault.kernel_start(1, &start)).unwrap();
+        wait(vault.kernel_execute(1, 1, double.to_string())).unwrap();
+        next(&done(1));
+
+        let attach = Attach {
+            kernel: 1,
+            breakpoints: Vec::new(),
+            exceptions: Vec::new(),
+        };
+        let cells = wait(vault.debug_kernel(7, &attach)).unwrap();
+        let path = wait(vault.debug_dump(7, double.to_string())).unwrap();
+        assert_eq!(path, cells.path(double));
+        let placed = wait(vault.debug_breakpoints(7, path.clone(), vec![Breakpoint::at(1)]));
+        assert!(placed.unwrap()[0].verified);
+        wait(vault.kernel_execute(1, 2, total.to_string())).unwrap();
+        let Event::Debug {
+            news: News::Stopped { thread, reason, .. },
+            ..
+        } = next(&stopped(7))
+        else {
+            unreachable!()
+        };
+        assert_eq!(reason, "breakpoint");
+        let thread = thread.unwrap();
+        let top = wait(vault.debug_stack(7, thread)).unwrap().remove(0);
+        assert_eq!(
+            (top.name.as_str(), top.path.as_deref(), top.pos.line),
+            ("double", Some(path.as_str()), 1)
+        );
+        let scopes = wait(vault.debug_scopes(7, top.id)).unwrap();
+        let locals = wait(vault.debug_variables(7, scopes[0].reference)).unwrap();
+        assert!(
+            locals.iter().any(|v| v.name == "x" && v.value == "21"),
+            "{locals:?}"
+        );
+        let twice = vault.debug_evaluate(7, Some(top.id), "x * 2".to_string(), Context::Repl);
+        assert_eq!(wait(twice).unwrap().result, "42");
+        wait(vault.debug_continue(7, thread)).unwrap();
+        // The cell's print is its own output, as without the debugger.
+        let Event::Kernel {
+            news: crate::kernel::News::Stream { text, .. },
+            ..
+        } = next(&|e| {
+            matches!(
+                e,
+                Event::Kernel {
+                    news: crate::kernel::News::Stream { run: 2, .. },
+                    ..
+                }
+            )
+        })
+        else {
+            unreachable!()
+        };
+        assert_eq!(text, "total 42\n");
+        next(&done(2));
+        wait(vault.debug_stop(7)).unwrap();
+        let ended = next(&|e| {
+            matches!(
+                e,
+                Event::Debug {
+                    session: 7,
+                    news: News::Ended { .. }
+                }
+            )
+        });
+        assert!(
+            matches!(
+                ended,
+                Event::Debug {
+                    news: News::Ended { error: None, .. },
+                    ..
+                }
+            ),
+            "{ended:?}"
+        );
+
+        // The kernel lives on, holding what the cells made.
+        wait(vault.kernel_execute(1, 3, "total".to_string())).unwrap();
+        let result = next(&|e| {
+            matches!(
+                e,
+                Event::Kernel {
+                    news: crate::kernel::News::Output { run: 3, .. },
+                    ..
+                }
+            )
+        });
+        let Event::Kernel {
+            news: crate::kernel::News::Output { output, .. },
+            ..
+        } = result
+        else {
+            unreachable!()
+        };
+        assert_eq!(output["data"]["text/plain"], "42");
+
+        // A second session finds the kernel's debugger started.
+        let cells = wait(vault.debug_kernel(8, &attach)).unwrap();
+        let path = wait(vault.debug_dump(8, double.to_string())).unwrap();
+        assert_eq!(path, cells.path(double));
+        wait(vault.debug_breakpoints(8, path, vec![Breakpoint::at(1)])).unwrap();
+        wait(vault.kernel_execute(1, 4, total.to_string())).unwrap();
+        let Event::Debug {
+            news: News::Stopped { thread, .. },
+            ..
+        } = next(&stopped(8))
+        else {
+            unreachable!()
+        };
+        // Killed while paused: the session ends quietly with it, the kernel saying why.
+        let top = wait(vault.debug_stack(8, thread.unwrap()))
+            .unwrap()
+            .remove(0);
+        let pid = "__import__('os').getpid()".to_string();
+        let pid = wait(vault.debug_evaluate(8, Some(top.id), pid, Context::Repl)).unwrap();
+        let pid: i32 = pid.result.parse().unwrap();
+        // SAFETY: kill takes plain integers; the process is the test's own kernel.
+        assert_eq!(unsafe { libc::kill(pid, libc::SIGKILL) }, 0);
+        let (mut debug, mut kernel) = (None, None);
+        while debug.is_none() || kernel.is_none() {
+            match next(&|e| {
+                matches!(
+                    e,
+                    Event::Debug {
+                        session: 8,
+                        news: News::Ended { .. }
+                    } | Event::Kernel {
+                        session: 1,
+                        news: crate::kernel::News::Ended { .. }
+                    }
+                )
+            }) {
+                Event::Debug { news, .. } => debug = Some(news),
+                Event::Kernel { news, .. } => kernel = Some(news),
+                _ => unreachable!(),
+            }
+        }
+        assert_eq!(
+            debug,
+            Some(News::Ended {
+                code: None,
+                error: None
+            })
+        );
+        assert!(
+            matches!(kernel, Some(crate::kernel::News::Ended { error: Some(_) })),
+            "{kernel:?}"
+        );
+        assert!(
+            wait(vault.debug_stack(8, 1)).is_err(),
+            "the session is over"
+        );
     }
 }

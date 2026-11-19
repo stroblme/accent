@@ -8,6 +8,7 @@
 //! kernelspec the caller names ([`Vault::kernel_specs`]). Either runs in the notebook's folder,
 //! as Jupyter's and VS Code's does.
 
+mod debug;
 mod session;
 mod spec;
 
@@ -26,6 +27,8 @@ use crate::language::{Task, remote_task_then};
 use crate::registry::Registry;
 use crate::vault::Backend;
 use crate::{Error, Event, Local, Result, Vault};
+pub use debug::Cells;
+pub(crate) use debug::{DebugInfo, Debuggee, DumpCell};
 use session::Session;
 pub use spec::{Spec, Specs, of_language, pick};
 
@@ -96,7 +99,7 @@ pub enum News {
 }
 
 /// How long a start on a host may take: the kernel's own minute, and the round trip.
-const START: Duration = Duration::from_secs(90);
+pub(crate) const START: Duration = Duration::from_secs(90);
 
 /// A vault's kernels, each a notebook's.
 pub(crate) struct Kernels {
@@ -162,6 +165,11 @@ impl Kernels {
         })
     }
 
+    /// Kernel `id`'s debugger, a client of which takes the place of any before.
+    pub(crate) fn debugger(&self, id: u64) -> Result<Debuggee> {
+        Ok(self.sessions.get(id)?.debugger())
+    }
+
     /// Stop every kernel within 2 s, past which the rest are killed as they are dropped; one
     /// still starting stops itself as it would register. For `Local::drop`, and for `serve` once
     /// its window has gone. Blocks on the runtime, and starts none when nothing runs.
@@ -193,7 +201,15 @@ fn launch(
     let Some(name) = kernel else {
         let python = crate::debug::interpreter(root, notebook, python);
         let called = python.first().cloned().unwrap_or_default();
-        let ipykernel = ["-m", "ipykernel_launcher", "-f", "{connection_file}"].map(String::from);
+        // As ipykernel's own kernelspec starts it: debugpy reads a frozen module's file as none.
+        let ipykernel = [
+            "-Xfrozen_modules=off",
+            "-m",
+            "ipykernel_launcher",
+            "-f",
+            "{connection_file}",
+        ]
+        .map(String::from);
         return Ok(Launch {
             argv: python.iter().cloned().chain(ipykernel).collect(),
             env: Vec::new(),

@@ -280,6 +280,9 @@ async fn write_loop(
             break;
         }
     }
+    // An in-process adapter reads the end only once it is said: half of a stream it holds the
+    // other half of stays open as it is dropped.
+    let _ = writer.shutdown().await;
 }
 
 async fn drain(inner: Arc<Inner>, stderr: ChildStderr) {

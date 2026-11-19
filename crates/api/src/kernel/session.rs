@@ -13,7 +13,9 @@ use std::time::{Duration, Instant};
 use accent_core::notebook::bound::{self, Stream};
 use accent_jupyter::{Channel, Header, Incoming, Incomings, Kernel};
 use serde_json::{Value, json};
+use tokio::sync::mpsc;
 
+use super::debug::{self, Debuggee};
 use super::{Info, Kernels, Launch, News, Status};
 use crate::{Error, Event, Result, locked};
 
@@ -26,8 +28,13 @@ const RATE: f64 = (1 << 20) as f64;
 
 /// A running kernel and the runs it has been sent.
 pub(super) struct Session {
-    kernel: Kernel,
+    pub(super) kernel: Kernel,
     runs: Mutex<Runs>,
+    /// The debugger's bridge, while one is attached, by its number: the kernel's debug news goes
+    /// there rather than to a run (`debug`).
+    pub(super) debug: Mutex<Option<(u64, mpsc::UnboundedSender<Incoming>)>>,
+    /// The Python it runs in, as the Python Environment dropdown names it, or its kernelspec.
+    python: String,
     /// Being stopped ([`Kernels`]' `stop`): its end is then no news of its own.
     pub(super) stopping: AtomicBool,
     /// Interrupted with an `interrupt_request` on control rather than SIGINT.
@@ -53,6 +60,10 @@ pub(super) async fn start(
     // As jupyter_client launches one: ipykernel then ends itself once we are gone, a crash or a
     // kill included, rather than outliving us.
     let parent = ("JPY_PARENT_PID".to_string(), std::process::id().to_string());
+    let python = match &launch.python {
+        Some(python) => named(&kernels.root, python.clone()),
+        None => launch.called.clone(),
+    };
     let env: Vec<(String, String)> = launch.env.into_iter().chain([parent]).collect();
     let started = Kernel::start(&argv, cwd, &env, &under).await;
     let (kernel, incomings, info) = match (started, launch.python) {
@@ -86,6 +97,8 @@ pub(super) async fn start(
     let session = Arc::new(Session {
         kernel,
         runs: Mutex::default(),
+        debug: Mutex::default(),
+        python,
         stopping: AtomicBool::new(false),
         message_interrupt: launch.message_interrupt,
     });
@@ -148,6 +161,21 @@ impl Session {
     pub(super) async fn stop(&self) {
         self.kernel.shutdown().await;
     }
+
+    /// A client of its debugger, in the place of any before.
+    pub(super) fn debugger(self: &Arc<Self>) -> Debuggee {
+        debug::connect(self, self.python.clone())
+    }
+}
+
+/// Whether `incoming` is the debugger's: an answer on control, or an event on IOPub.
+fn debugger_says(incoming: &Incoming) -> bool {
+    match incoming {
+        Incoming::Message(Channel::Control, msg) => msg.header.msg_type == "debug_reply",
+        Incoming::Message(Channel::Iopub, msg) => msg.header.msg_type == "debug_event",
+        Incoming::Dropped { channel, .. } => *channel == Channel::Control,
+        _ => false,
+    }
 }
 
 /// `python` as the Python Environment dropdown names it, the vault's own by its path in the vault.
@@ -195,6 +223,12 @@ async fn forward(
                 code = exited;
                 break;
             }
+            Some(Some(incoming)) if debugger_says(&incoming) => {
+                if let Some((_, bridge)) = locked(&session.debug).as_ref() {
+                    let _ = bridge.send(incoming);
+                }
+                Vec::new()
+            }
             Some(Some(incoming)) => locked(&session.runs).take(&incoming, Instant::now()),
         };
         news.into_iter().for_each(emit);
@@ -202,6 +236,8 @@ async fn forward(
     if let Some(session) = session.upgrade() {
         let waiting = locked(&session.runs).flush(Instant::now() + BATCH);
         waiting.into_iter().for_each(emit);
+        // Its debugger's client reads the end.
+        locked(&session.debug).take();
     }
     // Still registered and not being stopped, it ended on its own.
     let ended = kernels.upgrade().and_then(|k| k.sessions.remove(id));

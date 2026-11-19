@@ -16,7 +16,7 @@ use std::process::Stdio;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
-use accent_api::debug::{Breakpoint, Context, Launch, News};
+use accent_api::debug::{Attach, Breakpoint, Context, Launch, News};
 use accent_api::kernel;
 use accent_api::link;
 use accent_api::ssh::{self, Direction, Forward, Url};
@@ -736,8 +736,60 @@ fn a_remote_vault_connects_indexes_and_answers() {
             unreachable!()
         };
         assert_eq!((status, count), (kernel::Status::Ok, Some(1)));
+        // Its cells are debugged on the host too, its debugger staying beside it.
+        let attach = Attach {
+            kernel: 1,
+            breakpoints: Vec::new(),
+            exceptions: Vec::new(),
+        };
+        let cells = wait(vault.debug_kernel(2, &attach)).unwrap();
+        let double = "def double(x):\n    return x * 2\n";
+        let path = wait(vault.debug_dump(2, double.to_string())).unwrap();
+        assert_eq!(path, cells.path(double));
+        let placed = wait(vault.debug_breakpoints(2, path.clone(), vec![Breakpoint::at(1)]));
+        assert!(placed.unwrap()[0].verified);
+        wait(vault.kernel_execute(1, 2, double.to_string())).unwrap();
+        wait(vault.kernel_execute(1, 3, "double(21)".to_string())).unwrap();
+        let stopped = |e: &Event| {
+            matches!(
+                e,
+                Event::Debug {
+                    session: 2,
+                    news: News::Stopped { .. }
+                }
+            )
+        };
+        let Event::Debug {
+            news: News::Stopped { thread, .. },
+            ..
+        } = wait_for(&events, stopped)
+        else {
+            unreachable!()
+        };
+        let top = wait(vault.debug_stack(2, thread.unwrap()))
+            .unwrap()
+            .remove(0);
+        assert_eq!(
+            (top.path.as_deref(), top.pos.line),
+            (Some(path.as_str()), 1)
+        );
+        wait(vault.debug_continue(2, thread.unwrap())).unwrap();
+        let done = |e: &Event| {
+            matches!(
+                e,
+                Event::Kernel {
+                    session: 1,
+                    news: kernel::News::Done { run: 3, .. }
+                }
+            )
+        };
+        wait_for(&events, done);
+        wait(vault.debug_stop(2)).unwrap();
         wait(vault.kernel_stop(1)).unwrap();
-        eprintln!("ran print(1) on a host kernel in {:?}", t.elapsed());
+        eprintln!(
+            "ran and debugged cells on a host kernel in {:?}",
+            t.elapsed()
+        );
     } else {
         eprintln!("no ipykernel on {}: skipping the kernel", url.host);
     }
