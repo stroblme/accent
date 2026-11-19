@@ -56,22 +56,27 @@ pub(super) fn props(app: &Rc<App>, rel: &str) {
         let style = |id: &str| tab.file().pages[0].cell(id).map(|c| c.style.to_string());
 
         // A colour row whose cells differ shows a hatched swatch with no colour, its tooltip
-        // Mixed, while a shape's and an arrow's fill is the shape's alone (user decision
-        // 2026-11-18). A colour picked there reaches every cell, the first one's own colour too,
-        // as the dialog hands it over, and one Undo takes it back.
-        let swatch = |title: &str| {
-            let row = find_widget(&pane, &|w| {
+        // Mixed, in the colour button's place and as large, while a shape's and an arrow's fill is
+        // the shape's alone (user decision 2026-11-18). A colour picked there reaches every cell,
+        // the first one's own colour too, as the dialog hands it over, and one Undo takes it back.
+        let swatch_row = |title: &str| {
+            find_widget(&pane, &|w| {
                 w.downcast_ref::<adw::PreferencesRow>()
                     .is_some_and(|r| r.title() == title)
-            })?;
-            find_widget(&row, &|w| w.is::<gtk::ColorDialogButton>())
-                .and_downcast::<gtk::ColorDialogButton>()
+            })
         };
         let swatches = || {
             ["Fill", "Line Colour", "Font Colour"].map(|title| {
-                let b = swatch(title)?;
-                let tip = b.tooltip_text().map(|t| t.to_string());
-                Some((b.is_mapped(), b.has_css_class("accent-mixed"), tip))
+                let row = swatch_row(title)?;
+                let colour = find_widget(&row, &|w| w.is::<gtk::ColorDialogButton>())?;
+                let mixed = find_widget(&row, &|w| w.tooltip_text().as_deref() == Some("Mixed"))?;
+                // The size of the swatch shown, GTK's or the hatched one, the same either way.
+                let swatch = match mixed.is_mapped() {
+                    true => mixed.first_child(),
+                    false => colour.first_child().and_then(|button| button.first_child()),
+                };
+                let size = swatch.map(|w| (w.width(), w.height()));
+                Some((colour.is_mapped(), mixed.is_mapped(), size))
             })
         };
         let fills = || {
@@ -96,13 +101,42 @@ pub(super) fn props(app: &Rc<App>, rel: &str) {
             }
             crate::theme::apply(Theme::Light);
         }
-        if let Some(fill) = swatch("Fill") {
-            fill.set_rgba(&gdk::RGBA::parse("#dae8fc").expect("a colour"));
+        // The Fill row's dialog, opened as a click on its swatch opens it, keeps nothing among
+        // GTK's custom colours, which every GTK app outside a sandbox shares, and a palette colour
+        // picked in it reaches both cells.
+        let custom = || {
+            let settings = gio::Settings::new("org.gtk.gtk4.Settings.ColorChooser");
+            settings.value("custom-colors").to_string()
+        };
+        let before = custom();
+        let opener = swatch_row("Fill").and_then(|row| {
+            find_widget(&row, &|w| {
+                w.is::<gtk::Button>() && w.has_css_class("color") && w.is_mapped()
+            })
+        });
+        match opener.and_downcast::<gtk::Button>() {
+            Some(button) => button.emit_clicked(),
+            None => println!("bench diagram props no_swatch Fill"),
         }
+        let dialog = super::super::until("diagram props", "colour dialog", 3000, || {
+            gtk::Window::list_toplevels()
+                .into_iter()
+                .find(|w| w.is_visible() && w.type_().name() == "GtkColorChooserDialog")
+        })
+        .await;
+        let opened = custom();
+        if let Some(dialog) = dialog {
+            use glib::translate::IntoGlib;
+            dialog.set_property("rgba", gdk::RGBA::parse("#99c1f1").expect("a colour"));
+            dialog.emit_by_name::<()>("response", &[&gtk::ResponseType::Ok.into_glib()]);
+        }
+        glib::timeout_future(Duration::from_millis(300)).await;
         println!(
-            "bench diagram props swatch picked fills={:?} {:?}",
+            "bench diagram props swatch picked fills={:?} {:?} custom before={before} \
+             opened={opened} after={}",
             fills(),
-            swatches()
+            swatches(),
+            custom()
         );
         tab.undo();
         println!(

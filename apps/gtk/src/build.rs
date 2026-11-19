@@ -1594,7 +1594,7 @@ fn install_chrome_css() {
              .accent-label-editor {{ box-shadow: 0 0 0 1px var(--accent-bg-color), \
                0 1px 4px var(--shade-color); }} \
              .accent-current-layer {{ box-shadow: inset 3px 0 var(--accent-bg-color); }} \
-             colorbutton.accent-mixed colorswatch > overlay {{ \
+             button.color > .accent-swatch {{ border-radius: 4px; \
                background-color: var(--view-bg-color); background-image: \
                repeating-linear-gradient(-45deg, \
                  color-mix(in srgb, var(--view-fg-color) 40%, transparent) 0, \

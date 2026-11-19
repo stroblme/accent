@@ -211,6 +211,11 @@ struct ColourRow {
     row: adw::ActionRow,
     switch: gtk::Switch,
     button: gtk::ColorDialogButton,
+    /// The button in `button`'s place while the cells' colours differ: a hatched swatch whose
+    /// dialog opens at no colour, since GTK's chooser keeps any colour it opens at that its
+    /// palette lacks among the custom colours every GTK app outside a sandbox shares
+    /// (`gtkcolorchooserwidget.c`), and whatever is picked there reaches every cell.
+    mixed: gtk::Button,
     /// What the switch turns on while there is no colour: draw.io's `default`, ink or paper.
     blank: Color,
 }
@@ -221,14 +226,36 @@ impl ColourRow {
             gtk::ColorDialog::builder().with_alpha(false).build(),
         ));
         button.set_valign(gtk::Align::Center);
+        // As large as the colour button's swatch, which GTK sizes to the word Black in the
+        // button's font (`gtkcolordialogbutton.c`).
+        let (_, black) = button.create_pango_layout(Some("Black")).pixel_extents();
+        let swatch = gtk::Box::builder()
+            .css_classes(["accent-swatch"])
+            .width_request(black.width())
+            .height_request(black.height())
+            .build();
+        let mixed = gtk::Button::builder()
+            .child(&swatch)
+            .css_classes(["color"])
+            .tooltip_text("Mixed")
+            .valign(gtk::Align::Center)
+            .visible(false)
+            .build();
+        mixed.update_property(&[
+            gtk::accessible::Property::Label(title),
+            gtk::accessible::Property::Description("Mixed"),
+            gtk::accessible::Property::HasPopup(true),
+        ]);
         let switch = gtk::Switch::builder().valign(gtk::Align::Center).build();
         let row = adw::ActionRow::builder().title(title).build();
         row.add_suffix(&button);
+        row.add_suffix(&mixed);
         row.add_suffix(&switch);
         ColourRow {
             row,
             switch,
             button,
+            mixed,
             blank,
         }
     }
@@ -239,19 +266,14 @@ impl ColourRow {
     fn fill(&self, shade: Shade) {
         let on = shade.colour.is_some() || shade.mixed;
         self.switch.set_active(on);
-        self.button.set_visible(on);
-        let mut rgba = super::paint::rgba(shade.colour.unwrap_or(self.blank));
-        // Clear, which a dialog without alpha never hands back, so any colour picked is a change
-        // and reaches every cell, the first one's own colour too.
-        if shade.mixed {
-            rgba.set_alpha(0.0);
+        self.button
+            .set_rgba(&super::paint::rgba(shade.colour.unwrap_or(self.blank)));
+        self.button.set_visible(on && !shade.mixed);
+        // The keyboard stays on the row as a colour picked from Mixed takes the swatch's place.
+        if self.mixed.is_focus() && !shade.mixed {
+            self.button.grab_focus();
         }
-        self.button.set_rgba(&rgba);
-        match shade.mixed {
-            true => self.button.add_css_class("accent-mixed"),
-            false => self.button.remove_css_class("accent-mixed"),
-        }
-        self.button.set_tooltip_text(shade.mixed.then_some("Mixed"));
+        self.mixed.set_visible(on && shade.mixed);
     }
 
     /// What the row says now, as a style value: the colour, or `none`.
@@ -262,17 +284,32 @@ impl ColourRow {
         }
     }
 
-    /// Call `f` with the new value whenever either half changes.
+    /// Call `f` with the new value whenever either half changes, or a colour is picked from
+    /// Mixed.
     fn connect(self: &Rc<Self>, filling: &Rc<Cell<bool>>, f: impl Fn(String) + 'static) {
         let f = Rc::new(f);
         let (me, guard, g) = (Rc::downgrade(self), filling.clone(), f.clone());
         self.switch.connect_active_notify(move |switch| {
             if let Some(me) = me.upgrade() {
                 me.button.set_visible(switch.is_active());
+                me.mixed.set_visible(false);
                 if !guard.get() {
                     g(me.value());
                 }
             }
+        });
+        let (dialog, g) = (self.button.dialog(), f.clone());
+        self.mixed.connect_clicked(move |button| {
+            let (Some(dialog), g) = (dialog.clone(), g.clone()) else {
+                return;
+            };
+            let window = button.root().and_downcast::<gtk::Window>();
+            glib::spawn_future_local(async move {
+                // A dialog closed without a colour leaves the cells as they are.
+                if let Ok(rgba) = dialog.choose_rgba_future(window.as_ref(), None).await {
+                    g(hex(rgba));
+                }
+            });
         });
         let (me, guard) = (Rc::downgrade(self), filling.clone());
         self.button.connect_rgba_notify(move |_| {
