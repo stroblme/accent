@@ -2,8 +2,9 @@
 //! `TextWidgetAnnotation._getAppearance`): the widget's background and border, then the value in
 //! its `/DA`'s font, size and colour inside `/Tx BMC … EMC`, padded 2 pt across and 1 pt down, a
 //! size of 0 fitted to the box, one line or several wrapped at spaces, or a comb's cells, and
-//! aligned as `/Q` says. A form's readers draw it as accent
-//! does.
+//! aligned as `/Q` says. A list box's as its `ChoiceWidgetAnnotation._getAppearance`: the options
+//! that fit from the first that keeps the picks in view, the picks' rows filled. A form's readers
+//! draw them as accent does.
 
 use accent_pdf::{Content, SimpleFont, Widget};
 
@@ -163,6 +164,60 @@ fn aligned(align: u8, width: f32, wide: f32) -> f32 {
         2 => width - wide - PAD_ACROSS,
         _ => PAD_ACROSS,
     }
+}
+
+/// The content of list box `w`'s appearance with the options `picked` picked, by export value;
+/// `None` where the font has no code for a character of an option shown.
+pub(super) fn list(w: &Widget, picked: &[String], set: &Setting) -> Option<Vec<u8>> {
+    let (width, height) = frame(w);
+    let count = w.options.len().max(1);
+    let picks: Vec<usize> = (w.options.iter().enumerate())
+        .filter(|(_, (export, _))| picked.contains(export))
+        .map(|(i, _)| i)
+        .collect();
+    let shown: Vec<Option<Vec<u8>>> = (w.options.iter())
+        .map(|(_, display)| set.font.encode(display))
+        .collect();
+    let size = match set.size > 0.0 {
+        true => set.size,
+        false => {
+            let row = (height - PAD_DOWN) / count as f32;
+            let widest = (shown.iter().flatten())
+                .max_by(|a, b| set.font.width(a).total_cmp(&set.font.width(b)))
+                .cloned()
+                .unwrap_or_default();
+            fit(set, &[widest], (width - 2.0 * PAD_ACROSS, row), false).0
+        }
+    };
+    let row = size * LINE;
+    let v_pad = (row - size) / 2.0;
+    let visible = (height / row).floor() as usize;
+    let first = match (picks.iter().min(), picks.iter().max()) {
+        (Some(&low), Some(&high)) => (high + 1).saturating_sub(visible).min(low),
+        _ => 0,
+    };
+    let end = (first + visible + 1).min(w.options.len());
+    let mut c = Content::default();
+    c.marked(b"Tx").save();
+    c.rect((1.0, 1.0), width, height).clip();
+    if !picks.is_empty() {
+        c.fill_rgb([0.600006, 0.756866, 0.854904]);
+        for &i in picks.iter().filter(|i| (first..end).contains(i)) {
+            let y = height - (i - first + 1) as f32 * row;
+            c.rect((1.0, y), width, row).fill();
+        }
+    }
+    c.begin_text();
+    c.font(set.name, size)
+        .fill_rgb(set.rgb.map(|v| f32::from(v) / 255.0));
+    c.text_matrix([1.0, 0.0, 0.0, 1.0, 0.0, height]);
+    for (i, codes) in shown.iter().enumerate().take(end).skip(first) {
+        let down = -row + if i == first { v_pad } else { 0.0 };
+        let across = if i == first { PAD_ACROSS } else { 0.0 };
+        c.next_line((across, down)).show(codes.as_ref()?);
+    }
+    c.end_text().restore().end_marked();
+    Some(c.finish())
 }
 
 /// The size the text sets at, and how far apart its lines are: `/DA`'s size, or for 0 the

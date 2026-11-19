@@ -4,7 +4,8 @@
 //! `ACCENT_BENCH_SHOTS=<dir>`; then a check box ticked and a radio button picked by real clicks,
 //! and the pick undone, each against the file; then a text field typed into, its editor over the
 //! field at 100 % and 200 %, finished by a click away, left by Escape and undone, pictured as
-//! `form-typing.png`. Takes the file away again.
+//! `form-typing.png`; then a combo box's option picked and a list box's ticked from the list a
+//! click opens, pictured as `form-choosing.png`, and the tick undone. Takes the file away again.
 
 use super::pdf::{opened, written};
 use super::*;
@@ -190,6 +191,48 @@ pub(super) fn bench_pdf_form(app: &Rc<App>) {
         undo().await;
         println!("bench form typed_undone {}", filed(&path));
 
+        pdf.set_zoom(pdfview::PdfZoom::Scale(1.0));
+        glib::timeout_future(Duration::from_secs(1)).await;
+        let (Some(country), Some(fruit)) = (named("country"), named("fruit")) else {
+            return quit(&app, &path);
+        };
+        // The list opens on a real click; its rows are activated as a click on one would.
+        let listed = async |f: &FormField| {
+            click(f).await;
+            let popover = pdf.choosing();
+            let rows = popover
+                .as_ref()
+                .map(|p| rows(p.upcast_ref()))
+                .unwrap_or_default();
+            (popover, rows)
+        };
+        let (popover, options) = listed(&country).await;
+        println!(
+            "bench form choosing open={} rows={}",
+            popover.as_ref().is_some_and(|p| p.is_visible()),
+            options.len()
+        );
+        shot(&view, "form-choosing.png");
+        if let Some(italy) = options.get(2) {
+            italy.activate();
+        }
+        save().await;
+        println!(
+            "bench form chose open={} {}",
+            pdf.choosing().is_some(),
+            filed(&path)
+        );
+        let (popover, options) = listed(&fruit).await;
+        if let Some(banana) = options.get(1) {
+            banana.activate();
+        }
+        if let Some(popover) = popover {
+            popover.popdown();
+        }
+        save().await;
+        println!("bench form ticked_list {}", filed(&path));
+        undo().await;
+        println!("bench form list_undone {}", filed(&path));
         quit(&app, &path);
     });
 }
@@ -207,12 +250,30 @@ fn filed(path: &std::path::Path) -> String {
                 FieldKind::Check { checked, .. } => checked.to_string(),
                 FieldKind::Radio { checked, .. } => checked.to_string(),
                 FieldKind::Text { value, .. } if !value.is_empty() => format!("{value:?}"),
+                FieldKind::Choice { picked, .. } => format!("[{}]", picked.join(",")),
                 _ => return None,
             };
             Some(format!("{}={value}", f.name))
         })
         .collect();
     said.join(" ")
+}
+
+/// The rows of the list `under` holds.
+fn rows(under: &gtk::Widget) -> Vec<gtk::ListBoxRow> {
+    if let Some(list) = under.downcast_ref::<gtk::ListBox>() {
+        let rows = (0..).map_while(|i| list.row_at_index(i));
+        return rows.collect();
+    }
+    let mut child = under.first_child();
+    while let Some(c) = child {
+        let found = rows(&c);
+        if !found.is_empty() {
+            return found;
+        }
+        child = c.next_sibling();
+    }
+    Vec::new()
 }
 
 fn quit(app: &Rc<App>, path: &std::path::Path) {

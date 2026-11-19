@@ -591,3 +591,77 @@ fn an_encrypted_text_field_is_filled_in() {
     let back = super::reopen(&dir, &doc);
     assert_eq!(said(&back, 0, "secret").0, "Hidden words");
 }
+
+/// What the choice field `name` picks as the document now reads, and what pdfium shows of it.
+fn picks(doc: &PdfDoc, name: &str) -> (Vec<String>, Option<String>) {
+    let fields = doc.fields(0).unwrap();
+    let FieldKind::Choice { picked, .. } = &field(&fields, name).kind else {
+        panic!()
+    };
+    let _guard = lock();
+    let p = doc.doc().pages().get(0).unwrap();
+    let theirs = (p.annotations().iter()).find_map(|a| {
+        let f = a.as_form_field()?;
+        (f.name()? == name).then(|| match f.field_type() {
+            PdfFormFieldType::ComboBox => f.as_combo_box_field()?.value(),
+            _ => f.as_list_box_field()?.value(),
+        })?
+    });
+    (picked.clone(), theirs)
+}
+
+/// A combo box picks an option by its export value and shows its text as a text field would; a
+/// list box picks several, its `/V` an array and its `/I` their places, its appearance the rows
+/// it shows with the picks filled; and Undo puts both back.
+#[test]
+fn choice_fields_pick_their_options() {
+    let Some((dir, mut doc)) = open_pdf(&form_pdf(|o| o)) else {
+        return;
+    };
+    let mut ink = Ink::default();
+    let fields = doc.fields(0).unwrap();
+    let (country, fruit) = (
+        field(&fields, "country").clone(),
+        field(&fields, "fruit").clone(),
+    );
+    let one = |s: &str| vec![s.to_string()];
+    ink.fill(&mut doc, country.field, &FieldValue::Choice(one("it")))
+        .unwrap();
+    let combo = appearance_of(&doc, 25).unwrap();
+    assert!(combo.contains("(Italy) Tj"), "{combo}");
+    assert_eq!(
+        picks(&doc, "country"),
+        (one("it"), Some("Italy".to_string()))
+    );
+    let two = vec!["Banana".to_string(), "Cherry".to_string()];
+    ink.fill(&mut doc, fruit.field, &FieldValue::Choice(two.clone()))
+        .unwrap();
+    let list = appearance_of(&doc, 26).unwrap();
+    assert!(
+        list.contains("re\nW n\n0.600006 0.756866 0.854904 rg\n"),
+        "{list}"
+    );
+    assert_eq!(list.matches(" re\nf\n").count(), 2, "{list}");
+    assert_eq!(list.matches(" Tj").count(), 3, "every option fits: {list}");
+    let r = |num| accent_pdf::Ref { num, generation: 0 };
+    let saved = doc.cos.dict(r(26)).unwrap();
+    let strings = |s: &[&str]| {
+        s.iter()
+            .map(|s| Object::String(s.as_bytes().to_vec()))
+            .collect()
+    };
+    assert_eq!(
+        saved.get(b"V"),
+        Some(&Object::Array(strings(&["Banana", "Cherry"])))
+    );
+    assert_eq!(
+        saved.get(b"I"),
+        Some(&Object::Array(vec![Object::Int(1), Object::Int(2)]))
+    );
+    let back = super::reopen(&dir, &doc);
+    assert_eq!(picks(&back, "fruit"), (two, Some("Banana".to_string())));
+    ink.walk(&mut doc, false);
+    ink.walk(&mut doc, false);
+    assert_eq!(picks(&doc, "fruit").0, ["Apple", "Cherry"]);
+    assert_eq!(picks(&doc, "country").0, one("fr"));
+}

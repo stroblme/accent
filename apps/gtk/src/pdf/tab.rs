@@ -89,8 +89,9 @@ pub struct PdfTab {
     /// The editor of a text just finished, kept until the page shows it, and whether the page's
     /// change has been heard (`PdfTab::settle`).
     pub(super) settling: RefCell<Option<(Rc<dyn super::typed::Kept>, bool)>>,
-    /// The editor of the form field being filled in.
+    /// The editor of the form field being filled in, and the list a choice field picks from.
     pub(super) filling: RefCell<Option<Rc<super::field::FieldEditor>>>,
+    pub(super) choosing: RefCell<Option<gtk::Popover>>,
     /// The thumbnail scroller with the page buttons and the drop bar floating over it, which is
     /// what the Outline pane is handed. Built once to preserve its parent; rebuilding around the
     /// same widget would trigger a GTK reparenting critical.
@@ -316,6 +317,7 @@ pub fn open(
         typing: RefCell::default(),
         settling: RefCell::default(),
         filling: RefCell::default(),
+        choosing: RefCell::default(),
         organize: crate::organize::Organize::new(
             &thumb_strip,
             &thumbs,

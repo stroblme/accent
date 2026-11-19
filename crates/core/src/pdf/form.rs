@@ -146,6 +146,8 @@ pub enum FieldValue {
     On(Option<Vec<u8>>),
     /// What a text field says.
     Text(String),
+    /// The options a combo box or a list box picks, by export value.
+    Choice(Vec<String>),
 }
 
 /// What a fill wrote: each object it changed as it was before, which its Undo puts back, and each
@@ -176,6 +178,10 @@ impl PdfDoc {
             FieldValue::Text(text) => {
                 let (read, need) = self.widgets_read(&widgets)?;
                 self.cos.put_text_value(field, &read, text, need)?
+            }
+            FieldValue::Choice(picked) => {
+                let (read, need) = self.widgets_read(&widgets)?;
+                self.cos.put_choice(field, &read, picked, need)?
             }
         };
         let areas = self.areas_of(&widgets)?;
@@ -313,6 +319,60 @@ impl Objects {
             .map(|w| match need {
                 true => Ok(None),
                 false => self.text_appearance(w, value),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.put_appearances(&mut edits, widgets, need, made)?;
+        Ok(edits.write(self))
+    }
+
+    /// The combo box or list box `field`, shown by `widgets`, made to pick the export values
+    /// `picked`, as pdf.js saves one: its `/V`, one string, or an array for a list box that
+    /// picks several or none; its `/I`, the options picked by place, where it had one or picks
+    /// several; and each widget an appearance of ours, a combo box's the option's text as a text
+    /// field's, a list box's its options. What each object was before.
+    fn put_choice(
+        &mut self,
+        field: Ref,
+        widgets: &[Widget],
+        picked: &[String],
+        need: bool,
+    ) -> Result<Vec<(Ref, Object)>> {
+        let Some(first) = widgets.first() else {
+            return Ok(Vec::new());
+        };
+        let multi = first.flags & MULTI_SELECT != 0;
+        let combo = first.flags & COMBO != 0;
+        let value = match (picked, multi) {
+            ([one], _) => text(one),
+            (_, true) => Object::Array(picked.iter().map(|p| text(p)).collect()),
+            ([], false) => text(""),
+            (many, false) => text(&many[0]),
+        };
+        let indices: Vec<Object> = (first.options.iter().enumerate())
+            .filter(|(_, (export, _))| picked.contains(export))
+            .map(|(i, _)| Object::Int(i as i64))
+            .collect();
+        let had = self.dict(field)?.get(b"I").is_some();
+        let mut edits = Edits::default();
+        edits.edit(self, field, |d| {
+            d.set(b"V", value);
+            if had || multi {
+                d.set(b"I", Object::Array(indices));
+            }
+        })?;
+        let made = (widgets.iter())
+            .map(|w| match (need, combo) {
+                (true, _) => Ok(None),
+                (false, true) => {
+                    let shown = picked.first().map(|p| {
+                        let option = w.options.iter().find(|(export, _)| export == p);
+                        option.map_or(p.as_str(), |(_, shown)| shown.as_str())
+                    });
+                    self.appearance(w, |set| {
+                        appearance::text(w, shown.unwrap_or_default(), set, false, None)
+                    })
+                }
+                (false, false) => self.appearance(w, |set| appearance::list(w, picked, set)),
             })
             .collect::<Result<Vec<_>>>()?;
         self.put_appearances(&mut edits, widgets, need, made)?;

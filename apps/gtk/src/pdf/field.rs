@@ -114,9 +114,161 @@ impl PdfTab {
                 (false, _) => self.fill_state(&field, Some(on.clone())),
             },
             FieldKind::Text { .. } => self.edit_field(page, &field),
+            FieldKind::Choice { .. } => self.choose(page, &field),
             _ => {}
         }
         true
+    }
+
+    /// Open the list a choice field picks from under its widget, its picks marked: a click on an
+    /// option of a combo box or a single list box picks it and closes the list, and a list box
+    /// that picks several ticks and unticks its options, picked as they stand when the list
+    /// closes. An editable combo box's own text goes in above, picked on Return.
+    fn choose(self: &Rc<Self>, page: usize, field: &FormField) {
+        let FieldKind::Choice {
+            edit,
+            multi,
+            options,
+            picked,
+            ..
+        } = &field.kind
+        else {
+            return;
+        };
+        self.finish_field();
+        if let Some(open) = self.choosing.borrow_mut().take() {
+            open.popdown();
+        }
+        let list = gtk::ListBox::builder()
+            .selection_mode(gtk::SelectionMode::None)
+            .css_classes(["navigation-sidebar"])
+            .build();
+        let ticks: Vec<gtk::CheckButton> = (options.iter())
+            .map(|(export, shown)| {
+                let label = gtk::Label::builder()
+                    .label(shown)
+                    .xalign(0.0)
+                    .ellipsize(gtk::pango::EllipsizeMode::End)
+                    .max_width_chars(40)
+                    .build();
+                let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+                let tick = gtk::CheckButton::builder()
+                    .active(picked.contains(export))
+                    .can_focus(false)
+                    .can_target(false)
+                    .build();
+                // A pick of one is said by the row's mark, as a menu's radio items say it.
+                if !multi {
+                    tick.set_opacity(if tick.is_active() { 1.0 } else { 0.0 });
+                }
+                row.append(&tick);
+                row.append(&label);
+                list.append(&row);
+                tick
+            })
+            .collect();
+        let scroller = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .propagate_natural_height(true)
+            .max_content_height(320)
+            .child(&list)
+            .build();
+        let column = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        let popover = gtk::Popover::builder()
+            .position(gtk::PositionType::Bottom)
+            .child(&column)
+            .build();
+        let target = field.field;
+        let exports: Vec<String> = options.iter().map(|(e, _)| e.clone()).collect();
+        if *edit {
+            let entry = gtk::Entry::builder()
+                .text(picked.first().map(String::as_str).unwrap_or_default())
+                .build();
+            entry.connect_activate(glib::clone!(
+                #[weak(rename_to = tab)]
+                self,
+                #[weak]
+                popover,
+                move |entry| {
+                    tab.fill_choice(target, vec![entry.text().to_string()]);
+                    popover.popdown();
+                }
+            ));
+            column.append(&entry);
+        }
+        column.append(&scroller);
+        let was = picked.clone();
+        let multi = *multi;
+        let selected = picked
+            .first()
+            .and_then(|p| exports.iter().position(|e| e == p));
+        list.connect_row_activated(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            #[weak]
+            popover,
+            #[strong]
+            ticks,
+            #[strong]
+            exports,
+            move |_, row| {
+                let at = row.index().max(0) as usize;
+                if multi {
+                    if let Some(tick) = ticks.get(at) {
+                        tick.set_active(!tick.is_active());
+                    }
+                    return;
+                }
+                if let Some(export) = exports.get(at) {
+                    tab.fill_choice(target, vec![export.clone()]);
+                }
+                popover.popdown();
+            }
+        ));
+        popover.connect_closed(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            move |popover| {
+                if multi {
+                    let now: Vec<String> = (ticks.iter().zip(&exports))
+                        .filter(|(tick, _)| tick.is_active())
+                        .map(|(_, export)| export.clone())
+                        .collect();
+                    if now != was {
+                        tab.fill_choice(target, now);
+                    }
+                }
+                popover.unparent();
+                tab.choosing.borrow_mut().take_if(|open| *open == *popover);
+                tab.page_takes_keys();
+            }
+        ));
+        // On the box, at its own coordinates, as the page's menu is (`selection_menu`).
+        popover.set_parent(&self.host);
+        if let Some(r) = self.view.widget_rect(page, &field.rect) {
+            let p = gtk::graphene::Point::new(r.x() as f32, r.y() as f32);
+            let p = self.view.compute_point(&self.host, &p).unwrap_or(p);
+            let at = gtk::gdk::Rectangle::new(p.x() as i32, p.y() as i32, r.width(), r.height());
+            popover.set_pointing_to(Some(&at));
+        }
+        popover.popup();
+        if let Some(row) = list.row_at_index(selected.unwrap_or(0) as i32) {
+            row.grab_focus();
+        }
+        *self.choosing.borrow_mut() = Some(popover);
+    }
+
+    /// Pick `picked` in the choice field `field`, what the tab knows of it saying so at once.
+    fn fill_choice(&self, field: pdf::Ref, picked: Vec<String>) {
+        for fields in self.fields.borrow_mut().values_mut() {
+            for f in fields.iter_mut().filter(|f| f.field == field) {
+                if let FieldKind::Choice { picked: now, .. } = &mut f.kind {
+                    now.clone_from(&picked);
+                }
+            }
+        }
+        let value = FieldValue::Choice(picked);
+        self.ask(Request::Fill { field, value });
     }
 
     /// Open the editor over the text field `field` of `page`, holding what it says, in its face,
@@ -300,7 +452,10 @@ impl PdfTab {
     fn page_takes_keys(self: &Rc<Self>) {
         let tab = Rc::downgrade(self);
         glib::idle_add_local_once(move || {
-            let idle = |t: &Rc<PdfTab>| t.filling.borrow().is_none() && t.typing.borrow().is_none();
+            let idle = |t: &Rc<PdfTab>| {
+                let open = t.choosing.borrow().is_some() || t.filling.borrow().is_some();
+                !open && t.typing.borrow().is_none()
+            };
             if let Some(tab) = tab.upgrade().filter(idle) {
                 tab.view.grab_focus();
             }
@@ -394,5 +549,10 @@ impl PdfTab {
         let editor = self.filling.borrow().clone()?;
         let (at, _, px) = editor.at();
         Some((at, px, editor.has_focus()))
+    }
+
+    /// The list a choice field picks from, while it is open.
+    pub fn choosing(&self) -> Option<gtk::Popover> {
+        self.choosing.borrow().clone()
     }
 }

@@ -77,6 +77,11 @@ impl Content {
         self.op(&[x, y, w, h], "re")
     }
 
+    /// `W n`: clip to the path, which is not painted.
+    pub fn clip(&mut self) -> &mut Self {
+        self.op(&[], "W n")
+    }
+
     /// `h`: close the subpath.
     pub fn close(&mut self) -> &mut Self {
         self.op(&[], "h")
