@@ -62,6 +62,7 @@ Follow these rules where they differ from Material 3, using a flat layout and ty
   The page is loaded when the note, the palette or an image inverted in it changes, and at no other time: a WebView told to load again sends the reader back to the top, so a load of the note already in front puts them back where they were once it has been drawn, and so does Done, which builds the view again.
 - A tapped link goes where the desktop preview sends it (`markdown::click`): a wikilink or a link to a vault file opens it, an anchor into the note scrolls there, a tag opens Browse on its notes, and an address the desktop hands to the system goes to whichever app opens it, on a tap only.
   A PDF's own links keep their shorter list (http, https, mailto, tel).
+- A tapped task's box flips as on the desktop (`markdown::click_box`), an edit of the note's text that the autosave writes, and the box is a link to its line on the page because the WebView runs no script to hear a checkbox.
 - Editing: the same text with the same styling spans, markup visible and dimmed.
 
 ### PDF
@@ -133,6 +134,7 @@ Provide a visible control for each action that otherwise depends on a gesture.
 | Tap another reader's comment on a page | Shows it with its author in a dialog | The mark pdfium paints |
 | Back on a tag's notes | Returns to the tags | The tag's heading |
 | Tap a tag in a note | Opens Browse on that tag's notes | The tag, in the accent |
+| Tap a task's box in a note | Ticks an open box and opens any other | The box |
 | Long press on a PDF page | Selects the word under the finger; a drag grows it, and the handles move either end | The handles and the floating toolbar it raises |
 | Long press on a note | Selects the text under the finger with the WebView's own handles, as a page of prose does everywhere else on the platform | The handles it raises |
 | Tap an image in a note | Opens it on its own screen, to zoom and invert; an image inside a link follows the link | The image |

@@ -4,7 +4,7 @@
 use accent_core::markdown::{self, Click};
 use accent_core::note::Syntax;
 
-use crate::ffi::convert::{Analysis, Heading, Link, PdfAnchor, Span, Tag, Utf16};
+use crate::ffi::convert::{Analysis, Heading, Link, PdfAnchor, Span, Tag, TextEdit, Utf16};
 
 /// Parse PDF anchors such as `page=3&selection=0,4,1,9` into a zero-based
 /// page and selection. `None` distinguishes heading and block anchors.
@@ -36,6 +36,17 @@ pub fn to_html(text: String, rel: String) -> String {
 #[uniffi::export]
 pub fn click(uri: String, page: String) -> Click {
     markdown::click(&uri, &page)
+}
+
+/// What a tap on the box of the task on line `line` of the note at `rel` writes, as the desktop's
+/// click does ([`Syntax::click_box`]): its tick's range and the tick it becomes.
+#[uniffi::export]
+pub fn click_box(text: String, rel: String, line: u32) -> Option<TextEdit> {
+    let (at, tick) = Syntax::of(&rel).click_box(&text, line)?;
+    Some(TextEdit {
+        range: Utf16::new(&text).range(&(at..at + 1)),
+        text: tick.to_string(),
+    })
 }
 
 /// The vault path an `accent://file/` request names, decoded; `None` for any other address.
@@ -161,6 +172,19 @@ mod tests {
             assert_eq!(found.as_deref(), Some(id));
             assert!(html.contains(&format!("id=\"{id}\"")), "{html}");
         }
+    }
+
+    /// The tick's range is in UTF-16 units, past an emoji too, and an org note ticks `X`.
+    #[test]
+    fn a_tapped_box_is_its_ticks_range_in_utf16() {
+        let edit = click_box("🙂\n- [ ] a\n".to_string(), "n.md".into(), 2).unwrap();
+        assert_eq!(
+            (edit.range.start, edit.range.end, edit.text.as_str()),
+            (6, 7, "x")
+        );
+        let edit = click_box("- [-] a\n".to_string(), "n.org".into(), 1).unwrap();
+        assert_eq!((edit.range.start, edit.text.as_str()), (3, " "));
+        assert!(click_box("- a\n".to_string(), "n.md".into(), 1).is_none());
     }
 
     /// An org file renders and reads as org, by its path.

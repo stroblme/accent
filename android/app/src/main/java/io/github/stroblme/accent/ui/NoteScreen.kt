@@ -40,6 +40,7 @@ import io.github.stroblme.accent.ffi.accentFile
 import io.github.stroblme.accent.ffi.analyzeUtf16
 import io.github.stroblme.accent.ffi.baseUri
 import io.github.stroblme.accent.ffi.click
+import io.github.stroblme.accent.ffi.clickBox
 import io.github.stroblme.accent.ffi.toHtml
 import java.io.File
 import java.util.Locale
@@ -332,6 +333,15 @@ private fun Rendered(
                                 is Click.Tag -> tagged(to.v1)
                                 // A saved search's Show Results: its query, asked in Browse.
                                 is Click.Search -> searched(to.v1)
+                                // A task's box, flipped in the note as a typed edit would be: the
+                                // autosave writes it, and the page loads again where it is read.
+                                is Click.Task -> if (request.hasGesture() && load.rel == model.state.value.note?.rel) {
+                                    clickBox(model.buffer.text.toString(), load.rel, to.v1)?.let {
+                                        model.buffer.edit {
+                                            replace(it.range.start.toInt(), it.range.end.toInt(), it.text)
+                                        }
+                                    }
+                                }
                                 // Only for a tap: a refresh or a redirect launches nothing.
                                 Click.Leave -> if (request.hasGesture()) {
                                     launchUri(view.context, url) { model.said(it) }
@@ -474,6 +484,8 @@ ${if (diagrams(body)) mermaid(if (bg.dark()) "dark" else "neutral") else ""}
   th, td { padding: 4px 10px 4px 0; text-align: left; }
   math[display="block"] { margin: 1.2em 0; }
   hr { border: 0; border-top: 1px solid ${fg.css()}; opacity: 0.15; }
+  /* A task's box is a link a tap follows to flip it; the box itself takes no tap. */
+  a.task > input { pointer-events: none; }
   /* `[/]`, a task in progress: the desktop preview's half-filled box (no checkbox state draws it). */
   input.in-progress {
     appearance: none; box-sizing: border-box; width: 12px; height: 12px;

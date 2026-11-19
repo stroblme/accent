@@ -1072,6 +1072,7 @@ impl Page {
             Click::Open(target) => (self.on_open)(&target),
             Click::Tag(name) => (self.on_tag)(&name),
             Click::Search(query) => (self.on_search)(&query),
+            Click::Task(line) => self.flip(line),
             Click::Scroll => {
                 if let Some((_, id)) = uri.split_once('#') {
                     let id = markdown::percent_decode(id);
@@ -1378,6 +1379,7 @@ impl Preview {
                     Click::Open(_) => "open",
                     Click::Tag(_) => "tag",
                     Click::Search(_) => "search",
+                    Click::Task(_) => "task",
                     Click::Scroll => "scroll",
                     Click::Leave => "leave",
                     Click::Nowhere => "nowhere",

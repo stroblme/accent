@@ -1,5 +1,6 @@
 //! The preview's own addresses read back. [`to_html`](super::to_html) writes `accent://open/…`
-//! for a wikilink, `accent://tag/…` for a tag and `accent://file/…` for an embed, and a page
+//! for a wikilink, `accent://tag/…` for a tag, `accent://file/…` for an embed and
+//! `accent://task/<line>` for a task's box, and a page
 //! loaded at [`base_uri`] resolves an ordinary relative link to `accent://file/…` too. Both apps
 //! route a click on a rendered note by [`click`], so a link goes the same way on either.
 
@@ -16,6 +17,9 @@ pub enum Click {
     Tag(String),
     /// A saved search's query, whose results are listed.
     Search(String),
+    /// The box of the task on this line of the note (1-based), which the click flips
+    /// ([`click_box`](super::click_box)).
+    Task(u32),
     /// A place on the page in front, which the view scrolls to itself.
     Scroll,
     /// An address the system opens: the web, mail, a phone number ([`is_url`]).
@@ -30,6 +34,7 @@ pub fn click(uri: &str, page: &str) -> Click {
     match accent_uri(uri) {
         Some(("tag", tag)) => Click::Tag(tag),
         Some(("search", query)) => Click::Search(query),
+        Some(("task", line)) => line.parse().map_or(Click::Nowhere, Click::Task),
         _ if same_page(uri, page) => Click::Scroll,
         // The anchor is kept for a PDF, which needs the page as well as the file, and for a
         // note, whose heading it names. Rejoined here rather than kept by `accent_uri`, since
@@ -141,6 +146,8 @@ mod tests {
             open("accent://search/%23paper%20-%23read%20path%3Aa/b"),
             Click::Search("#paper -#read path:a/b".into())
         );
+        assert_eq!(open("accent://task/12"), Click::Task(12));
+        assert_eq!(open("accent://task/x"), Click::Nowhere);
     }
 
     #[test]

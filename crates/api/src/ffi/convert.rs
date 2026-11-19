@@ -141,6 +141,7 @@ pub enum Click {
     Open(String),
     Tag(String),
     Search(String),
+    Task(u32),
     Scroll,
     Leave,
     Nowhere,
@@ -187,6 +188,13 @@ impl Utf16 {
 pub struct Range {
     pub start: u32,
     pub end: u32,
+}
+
+/// What goes in place of `range` of a text.
+#[derive(uniffi::Record)]
+pub struct TextEdit {
+    pub range: Range,
+    pub text: String,
 }
 
 // ------------------------------------------------------------------------------ vault records

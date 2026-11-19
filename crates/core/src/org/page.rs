@@ -1215,7 +1215,8 @@ Left out.
 * DONE Shipped
 ";
 
-    /// The page's HTML without the preview's line markers, which are tested on their own.
+    /// The page's HTML without the preview's line markers and task links, which are tested on
+    /// their own.
     fn bare(text: &str) -> String {
         let mut out = to_html(text);
         while let Some(i) = out.find("<span data-line=\"") {
@@ -1225,7 +1226,27 @@ Left out.
                 .map(|k| format!("<span{}", &out[i + k..j]));
             out.replace_range(i..j, &id.unwrap_or_default());
         }
+        while let Some(i) = out.find("<a class=\"task\"") {
+            let j = out[i..].find("\">").unwrap() + i + 2;
+            out.replace_range(i..j, "");
+            let k = out[i..].find("</a>").unwrap() + i;
+            out.replace_range(k..k + 4, "");
+        }
         out
+    }
+
+    /// A checkbox links to its item's line, as a markdown task's box does.
+    #[test]
+    fn a_checkbox_links_to_its_line() {
+        let h = to_html("* Plan\n- [ ] open\n- [-] doing\n");
+        assert!(
+            h.contains("<a class=\"task\" href=\"accent://task/2\"><input"),
+            "{h}"
+        );
+        assert!(
+            h.contains("<a class=\"task\" href=\"accent://task/3\"><input"),
+            "{h}"
+        );
     }
 
     #[test]

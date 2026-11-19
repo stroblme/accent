@@ -194,9 +194,14 @@ pub(crate) fn write(blocks: &[Block], mode: Mode) -> String {
     let mut events = Vec::new();
     // Whether an exported file keeps each open markdown link, or only its text.
     let mut kept = Vec::new();
+    // The line of the element last started, a task's box being on its item's.
+    let mut line = 0;
     for block in blocks {
         for node in &block.nodes {
-            node_events(node, block.lines.start, mode, &mut kept, &mut events);
+            if let Node::Line { at, .. } = node {
+                line = block.lines.start + at;
+            }
+            node_events(node, block.lines.start, line, mode, &mut kept, &mut events);
         }
     }
     let mut html = String::new();
@@ -207,17 +212,29 @@ pub(crate) fn write(blocks: &[Block], mode: Mode) -> String {
     }
 }
 
-/// The events `node` of a block starting on line `top` is written as for `mode`.
+/// The events `node` of a block starting on line `top` is written as for `mode`, `line` being the
+/// line of the element it is in.
 fn node_events<'a>(
     node: &Node<'a>,
     top: u32,
+    line: u32,
     mode: Mode,
     kept: &mut Vec<bool>,
     out: &mut Vec<Event<'a>>,
 ) {
     let html = |s: String| Event::Html(s.into());
     let preview = matches!(mode, Mode::Preview);
+    // A task's box in the preview is a link to itself, which a tap flips (`Click::Task`).
+    let task = |out: &mut Vec<Event<'a>>, ev: Event<'a>| {
+        if preview {
+            let href = format!("<a class=\"task\" href=\"accent://task/{line}\">");
+            out.extend([html(href), ev, html("</a>".into())]);
+        } else {
+            out.push(ev);
+        }
+    };
     match node {
+        Node::Event(ev @ Event::TaskListMarker(_)) => task(out, ev.clone()),
         Node::Event(ev) => match (ev, mode) {
             // A link into the vault goes nowhere from an exported file: its text is left.
             (
@@ -322,7 +339,7 @@ fn node_events<'a>(
         Node::Math { mathml, .. } => out.push(html(mathml.clone())),
         // GitHub's class for a task, for which the preview draws the box in place of the bullet.
         Node::TaskItem => out.push(html("<li class=\"task-list-item\">".into())),
-        Node::TaskDoing => out.push(html(IN_PROGRESS.into())),
+        Node::TaskDoing => task(out, html(IN_PROGRESS.into())),
         Node::Callout { kind } => out.push(html(format!(
             "<blockquote class=\"callout\" data-callout=\"{kind}\">\n"
         ))),
@@ -817,15 +834,40 @@ mod tests {
         }
     }
 
-    /// The preview markers are tested on their own; strip them so the older assertions stay
-    /// about the HTML the renderer produces.
+    /// The preview markers, a block's line and a task's link, are tested on their own; strip
+    /// them so the older assertions stay about the HTML the renderer produces.
     fn bare(text: &str) -> String {
         let mut out = to_html(text);
         while let Some(i) = out.find("<span data-line=\"") {
             let j = out[i..].find("></span>").unwrap() + i + "></span>".len();
             out.replace_range(i..j, "");
         }
+        while let Some(i) = out.find("<a class=\"task\"") {
+            let j = out[i..].find("\">").unwrap() + i + 2;
+            out.replace_range(i..j, "");
+            let k = out[i..].find("</a>").unwrap() + i;
+            out.replace_range(k..k + 4, "");
+        }
         out
+    }
+
+    /// A task's box links to its item's line, which a tap on Android's page flips; an exported
+    /// file's is the box alone.
+    #[test]
+    fn a_tasks_box_links_to_its_line_on_the_page_alone() {
+        let text = "intro\n\n- [ ] open\n- [/] doing\n  - [x] nested\n";
+        let h = to_html(text);
+        for (line, input) in [
+            (3, "<input disabled=\"\" type=\"checkbox\"/>\n"),
+            (4, IN_PROGRESS),
+            (5, "<input disabled=\"\" type=\"checkbox\" checked=\"\"/>\n"),
+        ] {
+            let link = format!("<a class=\"task\" href=\"accent://task/{line}\">{input}</a>");
+            assert!(h.contains(&link), "{h}");
+        }
+        let file = to_html_file(text, "n.md");
+        assert!(!file.contains("accent://task"), "{file}");
+        assert!(file.contains("<input disabled"), "{file}");
     }
 
     #[test]
