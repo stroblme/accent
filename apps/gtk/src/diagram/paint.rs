@@ -15,7 +15,7 @@ use accent_drawio::{
     Align, Cap, Color, ImageSource, Join, Marks, Paint, PathCmd, Point, Prim, Rect, Run, Stroke,
 };
 use gtk::prelude::*;
-use gtk::{gdk, glib, graphene, gsk, pango};
+use gtk::{cairo, gdk, glib, graphene, gsk, pango};
 
 use super::files::{Files, is_file};
 use super::geometry::Frame;
@@ -59,6 +59,8 @@ pub struct Cache {
     vectors: Cell<bool>,
     /// Whether shapes are put on whole pixels as draw.io's SVG export puts them (`Snap::offset`).
     svg: Cell<bool>,
+    /// Whether a raster picture goes in at its own pixels, for a PDF or an SVG to scale.
+    own_pixels: Cell<bool>,
     /// The operators the display list's formulas declare, which each of them is read after
     /// (`accent_core::markdown::declarations`): the page is MathJax's page.
     declared: RefCell<Option<Rc<str>>>,
@@ -143,6 +145,7 @@ impl Cache {
             wants: RefCell::default(),
             vectors: self.vectors.clone(),
             svg: self.svg.clone(),
+            own_pixels: self.own_pixels.clone(),
             declared: self.declared.clone(),
         }
     }
@@ -200,6 +203,11 @@ impl Cache {
     /// Put shapes on whole pixels as draw.io's SVG export does, only those with a line.
     pub fn set_svg(&self, on: bool) {
         self.svg.set(on);
+    }
+
+    /// Put a raster picture in at its own pixels ([`own_pixels`]), as a PDF and an SVG take it.
+    pub fn set_own_pixels(&self, on: bool) {
+        self.own_pixels.set(on);
     }
 
     /// How far right and down `snap` puts its shape on `frame`'s whole pixels, in content units.
@@ -737,6 +745,9 @@ pub fn prim(
                                         cache.wants.borrow_mut().push((svg.clone(), want));
                                     }
                                 }
+                                (None, _) if cache.own_pixels.get() => {
+                                    own_pixels(&snapshot.append_cairo(&grect(&dest)), t, &dest)
+                                }
                                 _ => snapshot.append_scaled_texture(
                                     t,
                                     gsk::ScalingFilter::Linear,
@@ -953,6 +964,28 @@ pub fn outline(
             snapshot.append_stroke(path, &stroke_of(s, frame), &tint.rgba(s.color));
         }
     });
+}
+
+/// `texture` over `dest` on `cr` as its own pixels, which a PDF or an SVG keeps as they are and
+/// scales as it is viewed or printed: GSK's scaled texture would put it in at the frame's
+/// resolution, three pixels a unit (`render::DETAIL`), nine times a picture's own at its size.
+fn own_pixels(cr: &cairo::Context, texture: &gdk::Texture, dest: &Rect) {
+    let (w, h) = (texture.width(), texture.height());
+    let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, w, h);
+    let Some(mut surface) = surface.ok().filter(|_| dest.w > 0.0 && dest.h > 0.0) else {
+        return;
+    };
+    let stride = surface.stride() as usize;
+    match surface.data() {
+        // Cairo's ARGB32 is the format a texture downloads in.
+        Ok(mut pixels) => texture.download(&mut pixels, stride),
+        Err(_) => return,
+    }
+    cr.translate(dest.x, dest.y);
+    cr.scale(dest.w / f64::from(w), dest.h / f64::from(h));
+    if cr.set_source_surface(&surface, 0.0, 0.0).is_ok() {
+        let _ = cr.paint();
+    }
 }
 
 fn with_opacity(snapshot: &gtk::Snapshot, opacity: f64, paint: impl FnOnce()) {

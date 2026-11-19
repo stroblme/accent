@@ -1,7 +1,7 @@
 //! Shared diagram rendering for exports, printing and note embeds (`paint::prim`).
 //! Use file colours and paper (`Tint::FILE`) independently of the screen theme.
 //! Keep fills, strokes, text, formulas and SVG pictures (`sharp`) as PDF/SVG vectors; other
-//! pictures remain images.
+//! pictures remain images, at their own pixels.
 //! Drawing goes through GTK, so it runs on the main loop in slices (`work::Slices`), a prim or a
 //! part of the picture at a time; a PNG is encoded on a worker.
 
@@ -22,7 +22,8 @@ const PDF_POINT: f64 = 0.75;
 const PNG_SCALE: f64 = 2.0;
 
 /// Render detail in content units per page unit: GSK's cairo path rasterizes a scaled picture at
-/// this resolution, whatever the output's scale.
+/// this resolution, whatever the output's scale, so a PDF and an SVG take a raster picture at its
+/// own pixels instead (`paint::Cache::set_own_pixels`).
 const DETAIL: f64 = 3.0;
 
 /// What of a page goes out, as draw.io's export takes it by default.
@@ -140,6 +141,7 @@ pub async fn draw(
         Out::Png(pixels) => pixels,
     };
     cache.set_svg(out == Out::Svg);
+    cache.set_own_pixels(matches!(out, Out::Pdf | Out::Svg));
     let frame = Frame {
         scale: DETAIL,
         pixels,

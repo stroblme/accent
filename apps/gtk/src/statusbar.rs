@@ -95,7 +95,11 @@ impl Bar {
         let stop_label = label(false);
         stop_label.set_label("Stop");
         stop_label.set_visible(true);
-        let transfer_stop = bar_button(&stop_label, None, "Stop, keeping what is already done");
+        let transfer_stop = bar_button(
+            &stop_label,
+            None,
+            "Stop, keeping only the files already written",
+        );
         let shown_stop: Rc<RefCell<Option<Stop>>> = Rc::default();
         let pdf_stop_label = label(false);
         pdf_stop_label.set_label("Stop");
