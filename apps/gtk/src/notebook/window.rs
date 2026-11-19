@@ -151,6 +151,7 @@ impl App {
         });
         self.wire_notebook_places(tab);
         tab.set_debuggable(self.why_not_debug(tab).is_none());
+        self.debugger.place_notebook(tab);
         let weak = Rc::downgrade(self);
         tab.connect_breakpoint(move |tab, id, line| {
             if let Some(app) = weak.upgrade() {

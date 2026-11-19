@@ -645,6 +645,7 @@ impl App {
         // A notebook closing was asked about already (`wire.rs`), as a diagram was; its kernel
         // ends with its tab.
         if let Some(Doc::Notebook(n)) = self.doc_for_page(page) {
+            self.debugger.closing_notebook(&n);
             self.stop_kernel(&n);
             if let Err(e) = self.flush_model(&n) {
                 tracing::debug!("a closing notebook was not written: {e}");

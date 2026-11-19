@@ -122,6 +122,51 @@ impl NotebookTab {
             .collect()
     }
 
+    /// Its cells' breakpoints as lines of its code cells joined (`Notebook::program`), as the
+    /// vault's session keeps them (user decision 2026-11-19).
+    pub(crate) fn program_breakpoints(&self) -> Vec<Breakpoint> {
+        self.sync_model();
+        let program = self.model.borrow().program();
+        let mut all = Vec::new();
+        for (id, set) in self.cell_breakpoints() {
+            if let Some(lines) = program.lines(id) {
+                let at = |b: Breakpoint| Breakpoint {
+                    line: lines.start + b.line,
+                    ..b
+                };
+                all.extend(set.into_iter().map(at));
+            }
+        }
+        all
+    }
+
+    /// Put `set`, lines of its code cells joined, on its cells, in the place of what they hold; a
+    /// line past the cells is dropped, as a file's past its end is.
+    pub(crate) fn place_program_breakpoints(&self, set: &[Breakpoint]) {
+        self.sync_model();
+        let program = self.model.borrow().program();
+        let mut cells: HashMap<CellId, Vec<Breakpoint>> = HashMap::new();
+        for b in set {
+            if let Some((id, line)) = program.cell_at(b.line) {
+                let at = Breakpoint { line, ..b.clone() };
+                cells.entry(id).or_default().push(at);
+            }
+        }
+        let ids: Vec<CellId> = (self.views.borrow().iter())
+            .filter(|v| v.kind == Kind::Code)
+            .map(|v| v.id)
+            .collect();
+        for id in ids {
+            self.place_breakpoints(id, cells.get(&id).map_or(&[][..], Vec::as_slice));
+        }
+    }
+
+    /// The cell, from 1, and its line, from 0, that line `line` of its code cells joined is.
+    pub(crate) fn program_place(&self, line: u32) -> Option<(usize, u32)> {
+        let (id, at) = self.model.borrow().program().cell_at(line)?;
+        Some((self.cell_number(id)?, at))
+    }
+
     /// A breakpoint on 0-based `line` of cell `id`, or none there any more.
     pub(crate) fn toggle_breakpoint(self: &Rc<Self>, id: CellId, line: u32) {
         if let Some(marks) = self.marks_of(id) {

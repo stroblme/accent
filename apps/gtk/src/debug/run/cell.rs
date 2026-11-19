@@ -6,7 +6,7 @@
 
 use super::*;
 use crate::notebook::NotebookTab;
-use accent_api::debug::{Attach, Placed};
+use accent_api::debug::{Attach, Breakpoint, Placed};
 use accent_api::kernel::Cells;
 use accent_core::notebook::CellId;
 use std::rc::Weak;
@@ -111,7 +111,7 @@ impl App {
         }
         let attach = Attach {
             kernel: session,
-            breakpoints: self.debugger.saved(self).into_iter().collect(),
+            breakpoints: self.debugger.files(self),
             exceptions: self.debugger.exceptions(),
         };
         let attached = vault.debug_kernel(run.id, &attach);
@@ -190,6 +190,7 @@ impl App {
         line: u32,
     ) {
         tab.toggle_breakpoint(id, line);
+        self.save_session_soon();
         self.cell_breakpoints_changed(tab, id);
     }
 
@@ -208,6 +209,53 @@ impl App {
             });
         }
         self.refill_breakpoints();
+    }
+
+    /// The open notebook of `key` whose cells can be debugged.
+    pub(crate) fn debuggable_notebook(&self, key: &str) -> Option<Rc<NotebookTab>> {
+        let notebooks = self.notebooks().into_iter();
+        notebooks
+            .into_iter()
+            .find(|tab| tab.key() == key && tab.debuggable())
+    }
+
+    /// Set what a cell's breakpoint does beside stopping, from its Breakpoints row, `edited` on a
+    /// line of the notebook's code cells joined; a session debugging the notebook is told.
+    pub(crate) fn edit_cell_breakpoint(self: &Rc<Self>, tab: &Rc<NotebookTab>, edited: Breakpoint) {
+        let Some((number, line)) = tab.program_place(edited.line) else {
+            return;
+        };
+        let Some(id) = tab.cell_at(number) else {
+            return;
+        };
+        let edited = Breakpoint { line, ..edited };
+        if let Some(marks) = tab.marks_of(id)
+            && breakpoints::edit(&marks, &edited)
+        {
+            breakpoints::redraw(&marks);
+            self.save_session_soon();
+            self.cell_breakpoints_changed(tab, id);
+        }
+    }
+
+    /// A Breakpoints row of a notebook's, `run.ipynb cell 2:3`, opened: the caret on its line with
+    /// the keyboard in the cell. False for a file's row.
+    pub(crate) fn open_cell_row(self: &Rc<Self>, row: &str) -> bool {
+        let Some((key, place)) = row.rsplit_once(" cell ") else {
+            return false;
+        };
+        let Some((number, line)) = place.split_once(':') else {
+            return false;
+        };
+        let (Ok(number), Ok(line)) = (number.parse::<usize>(), line.parse::<i32>()) else {
+            return false;
+        };
+        let Some(tab) = self.debuggable_notebook(key) else {
+            return false;
+        };
+        self.reveal_page(&tab.page);
+        tab.goto_place(number.saturating_sub(1), line, 1);
+        true
     }
 
     /// Debug Cell's run `done` is done: the debugger lets the kernel go, and a cell to debug

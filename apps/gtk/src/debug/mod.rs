@@ -2,6 +2,7 @@
 //! the expressions it watches, the session itself (`run`), and its Debug Console (`console`).
 
 use super::*;
+use crate::notebook::NotebookTab;
 use accent_api::debug::{Breakpoint, ExceptionFilter, Supports, debuggable};
 use accent_core::notebook::CellId;
 use std::collections::BTreeMap;
@@ -56,18 +57,43 @@ impl Debugger {
         self.run.borrow().clone()
     }
 
-    /// Every file's breakpoints: those kept, with each open tab's as its marks stand now.
+    /// Every file's breakpoints: those kept, with each open tab's as its marks stand now, and each
+    /// open notebook's as lines of its code cells joined.
     pub(crate) fn saved(&self, app: &App) -> BTreeMap<String, Vec<Breakpoint>> {
         let mut saved = self.kept.borrow().clone();
         for tab in app.open_tabs() {
             keep(&mut saved, &tab);
         }
+        for tab in app.notebooks().iter().filter(|tab| tab.debuggable()) {
+            keep_cells(&mut saved, tab);
+        }
         saved
+    }
+
+    /// The files' breakpoints a session starts with: a notebook's cells' reach its kernel through
+    /// the files the kernel writes them to, never by the notebook's own path.
+    pub(crate) fn files(&self, app: &App) -> Vec<(String, Vec<Breakpoint>)> {
+        let saved = self.saved(app).into_iter();
+        saved.filter(|(key, _)| !is_notebook(key)).collect()
     }
 
     /// Hold on to a closing tab's breakpoints, for when its file is opened again.
     pub(crate) fn closing(&self, tab: &Tab) {
         keep(&mut self.kept.borrow_mut(), tab);
+    }
+
+    /// Hold on to a closing notebook's breakpoints likewise.
+    pub(crate) fn closing_notebook(&self, tab: &NotebookTab) {
+        if tab.debuggable() {
+            keep_cells(&mut self.kept.borrow_mut(), tab);
+        }
+    }
+
+    /// Put a notebook's kept breakpoints on its cells as it opens.
+    pub(crate) fn place_notebook(&self, tab: &NotebookTab) {
+        if let Some(kept) = self.kept.borrow().get(&tab.key()) {
+            tab.place_program_breakpoints(kept);
+        }
     }
 
     /// Put back the breakpoints a session kept, before any of its tabs opens, its watches and
@@ -131,6 +157,19 @@ fn keep(map: &mut BTreeMap<String, Vec<Breakpoint>>, tab: &Tab) {
     };
 }
 
+/// A notebook's breakpoints into `map` likewise, as lines of its code cells joined.
+fn keep_cells(map: &mut BTreeMap<String, Vec<Breakpoint>>, tab: &NotebookTab) {
+    match tab.program_breakpoints() {
+        saved if saved.is_empty() => map.remove(&tab.key()),
+        saved => map.insert(tab.key(), saved),
+    };
+}
+
+/// Whether file `key` is a Jupyter notebook, whose breakpoints are its cells'.
+pub(crate) fn is_notebook(key: &str) -> bool {
+    key.ends_with(".ipynb")
+}
+
 impl App {
     /// A breakpoint on `line` of `tab`, or none there any more; only where a debugger can run it.
     /// A running program is told the file's breakpoints, all of them, and the marks move to where
@@ -149,6 +188,9 @@ impl App {
     /// its Breakpoints row; a running program is told. Nothing when no breakpoint is on that line
     /// any more.
     pub(crate) fn edit_breakpoint(self: &Rc<Self>, key: &str, edited: Breakpoint) {
+        if let Some(tab) = self.debuggable_notebook(key) {
+            return self.edit_cell_breakpoint(&tab, edited);
+        }
         let now = match self.tab_for(key) {
             Some(tab) => {
                 if !breakpoints::edit(&tab, &edited) {
@@ -256,7 +298,7 @@ impl App {
             breakpoints::place(&tab, &[]);
             breakpoints::redraw(&tab);
         }
-        for key in had.into_keys() {
+        for key in had.into_keys().filter(|key| !is_notebook(key)) {
             self.send_breakpoints(key, Vec::new());
         }
         for tab in self.notebooks() {

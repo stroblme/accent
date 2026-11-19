@@ -28,11 +28,13 @@ const NOTEBOOK: &str = r#"{
 "#;
 
 /// `ACCENT_BENCH_NOTEBOOK_DEBUG=<rel>` writes [`NOTEBOOK`] at `<rel>` and debugs its cells: a
-/// breakpoint in the function's cell, the function's cell debugged first, which starts the
+/// breakpoint in the function's cell and a logpoint in the call's, set through its row, the
+/// function's cell debugged first, which starts the
 /// kernel, Start Debugging over the call's cell, the stop in the
 /// function's cell, its call, its locals and the Debug Console's answer, a step, the run going on
 /// to its end and the session with it, the kernel holding what the run left, the same cell
-/// debugged again, and Stop Debugging while the slow loop is paused, which interrupts it. It
+/// debugged again, Stop Debugging while the slow loop is paused, which interrupts it, and the
+/// breakpoints back once the notebook is closed and opened again. It
 /// prints `bench nbdebug …` lines as the window shows each, timings on `bench nbdebug_ms …`; a
 /// step that never comes prints `bench nbdebug timeout <what>` and quits.
 pub(super) fn bench_notebook_debug(app: &Rc<App>, rel: &str) {
@@ -62,13 +64,32 @@ pub(super) fn bench_notebook_debug(app: &Rc<App>, rel: &str) {
             println!("bench nbdebug timeout cells");
             return bench_quit(&app);
         };
+        let Some(call) = tab.cell_at(2) else {
+            return bench_quit(&app);
+        };
         app.toggle_cell_breakpoint(&tab, first, 1);
         app.toggle_cell_breakpoint(&tab, slow, 2);
-        for (number, id) in [(1, first), (4, slow)] {
-            let marks = tab.marks_of(id);
-            for (line, category) in marks.map(|m| breakpoints::shown(&m)).unwrap_or_default() {
-                println!("bench nbdebug breakpoint cell {number}:{line} {category}");
-            }
+        // A logpoint on the call's print, set through its row: line 4 of the code cells joined.
+        app.toggle_cell_breakpoint(&tab, call, 1);
+        if let Some(sidebar) = app.sidebar.get() {
+            sidebar.edit_breakpoint_row(&rel, 4, &[("Log Message", "total is {total}")]);
+        }
+        let logged = || {
+            let marks = tab.marks_of(call)?;
+            let shown = breakpoints::shown(&marks);
+            shown.iter().any(|(_, c)| c == "logpoint").then_some(())
+        };
+        if until(&app, "logpoint", logged).await.is_none() {
+            return;
+        }
+        print_marks(&tab, "");
+        for row in app
+            .sidebar
+            .get()
+            .map(|s| s.breakpoint_rows())
+            .unwrap_or_default()
+        {
+            println!("bench nbdebug row {row}");
         }
         println!("bench nbdebug strip {}", strip(&app));
         // Debug joins the kernel's strip in one row, if it fits the sidebar's narrowest.
@@ -141,6 +162,16 @@ pub(super) fn bench_notebook_debug(app: &Rc<App>, rel: &str) {
         }
         super::kernel::print_cell_as(&tab, 1, "nbdebug", "done ");
         println!("bench nbdebug ended {}", strip(&app));
+        let log = || {
+            let console = app.console()?;
+            let text = super::debug::text(&console);
+            let line = text.lines().find(|l| l.starts_with("total is "))?;
+            Some(line.trim_end().to_string())
+        };
+        let Some(log) = until(&app, "log", log).await else {
+            return;
+        };
+        println!("bench nbdebug log {log}");
 
         // The kernel lives on, holding what the debugged run left.
         tab.bench_select(2);
@@ -182,10 +213,36 @@ pub(super) fn bench_notebook_debug(app: &Rc<App>, rel: &str) {
             return;
         }
         super::kernel::print_cell_as(&tab, 2, "nbdebug", "alive ");
-        app.stop_kernel(&tab);
+
+        // Closed, its kernel with it, and opened again: the breakpoints come back with it.
+        app.close_page(&tab.page);
+        app.open_path(&rel);
+        let opened = || app.doc_for(&rel).and_then(|d| d.notebook().cloned());
+        let Some(tab) = until(&app, "reopened", opened).await else {
+            return;
+        };
+        print_marks(&tab, "reopened ");
+        for row in app
+            .sidebar
+            .get()
+            .map(|s| s.breakpoint_rows())
+            .unwrap_or_default()
+        {
+            println!("bench nbdebug reopened row {row}");
+        }
         glib::timeout_future(Duration::from_millis(2500)).await;
         bench_quit(&app);
     });
+}
+
+/// `bench nbdebug <said>breakpoint cell <n>:<line> <category>` for each code cell's breakpoints.
+fn print_marks(tab: &Rc<crate::notebook::NotebookTab>, said: &str) {
+    for number in 1..=tab.cell_count() {
+        let marks = tab.cell_at(number).and_then(|id| tab.marks_of(id));
+        for (line, category) in marks.map(|m| breakpoints::shown(&m)).unwrap_or_default() {
+            println!("bench nbdebug {said}breakpoint cell {number}:{line} {category}");
+        }
+    }
 }
 
 /// `ready`'s answer once it has one, for [`WAIT`]; past that, the toasts, and quit.

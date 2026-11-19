@@ -115,7 +115,7 @@ impl App {
         let launch = Launch {
             program: program.clone(),
             language: language.clone(),
-            breakpoints: self.debugger.saved(self).into_iter().collect(),
+            breakpoints: self.debugger.files(self),
             exceptions: self.debugger.exceptions(),
         };
         self.debugger
@@ -891,17 +891,29 @@ impl App {
         });
     }
 
-    /// The Breakpoints section's rows, every file's breakpoints, and the fields they offer.
+    /// The Breakpoints section's rows, every file's breakpoints, an open notebook's at their
+    /// cells' places, and the fields they offer. A closed notebook's wait for it to open: only an
+    /// open one's kernel runs its cells.
     pub(crate) fn refill_breakpoints(&self) {
         let Some(sidebar) = self.sidebar.get() else {
             return;
         };
-        let rows: Vec<sidebar::BreakpointRow> = self
-            .debugger
-            .saved(self)
-            .into_iter()
-            .flat_map(|(key, set)| set.into_iter().map(move |b| (key.clone(), b)))
-            .collect();
+        let mut rows: Vec<sidebar::BreakpointRow> = Vec::new();
+        for (key, set) in self.debugger.saved(self) {
+            let notebook = self.debuggable_notebook(&key);
+            if super::is_notebook(&key) && notebook.is_none() {
+                continue;
+            }
+            for b in set {
+                let place = match &notebook {
+                    Some(tab) => tab
+                        .program_place(b.line)
+                        .map(|(number, line)| format!("{key} cell {number}:{}", line + 1)),
+                    None => Some(format!("{key}:{}", b.line + 1)),
+                };
+                rows.extend(place.map(|place| (key.clone(), b, place)));
+            }
+        }
         sidebar.set_breakpoint_rows(&rows, self.debugger.supports());
     }
 

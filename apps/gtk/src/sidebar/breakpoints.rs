@@ -12,8 +12,9 @@ use gtk::{glib, pango};
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 
-/// A file key and one of its breakpoints, as the window lists them.
-pub type Row = (String, Breakpoint);
+/// A file key, one of its breakpoints, and the place its row names, `demo.py:2`, or a notebook
+/// cell's `run.ipynb cell 2:3`, as the window lists them.
+pub type Row = (String, Breakpoint, String);
 
 /// What a row hands on of a breakpoint edited: its file key, and it with what is now set beside
 /// its line.
@@ -46,7 +47,7 @@ pub(super) struct Rows {
     lines: RefCell<Vec<Line>>,
     supports: Cell<Option<Supports>>,
     editing: RefCell<Option<Editing>>,
-    /// A row activated, as its `path:line`.
+    /// A row activated, as the place it names.
     open: Rc<dyn Fn(&str)>,
     edit: Edited,
 }
@@ -56,6 +57,8 @@ struct Line {
     row: gtk::ListBoxRow,
     key: String,
     set: Breakpoint,
+    /// The place it names, which it opens.
+    place: gtk::Label,
     glyph: gtk::Image,
     detail: gtk::Label,
     button: gtk::Button,
@@ -92,7 +95,7 @@ impl Rows {
             };
             let lines = rows.lines.borrow();
             if let Some(line) = lines.iter().find(|l| l.row == *row) {
-                let at = format!("{}:{}", line.key, line.set.line + 1);
+                let at = line.place.text().to_string();
                 let open = rows.open.clone();
                 drop(lines);
                 open(&at);
@@ -110,7 +113,7 @@ impl Rows {
             .peekable();
         let mut lines = Vec::new();
         let place = |l: &Line| (l.key.clone(), l.set.line);
-        for (key, set) in rows {
+        for (key, set, named) in rows {
             let at = (key.clone(), set.line);
             while let Some(gone) = old.next_if(|l| place(l) < at) {
                 self.forget(gone);
@@ -118,11 +121,12 @@ impl Rows {
             match old.next_if(|l| place(l) == at) {
                 Some(mut line) => {
                     line.set = set.clone();
+                    line.place.set_label(named);
                     line.show(supports);
                     lines.push(line);
                 }
                 None => {
-                    let line = self.line(key, set.clone());
+                    let line = self.line(key, set.clone(), named);
                     line.show(supports);
                     // Before the next row kept, after the editor of the one before it.
                     let index = old.peek().map_or(-1, |next| next.row.index());
@@ -149,10 +153,10 @@ impl Rows {
     }
 
     /// A row for `set`, its button opening the editor, or committing the one open under it.
-    fn line(self: &Rc<Self>, key: &str, set: Breakpoint) -> Line {
+    fn line(self: &Rc<Self>, key: &str, set: Breakpoint, named: &str) -> Line {
         let glyph = gtk::Image::new();
         let place = gtk::Label::builder()
-            .label(format!("{key}:{}", set.line + 1))
+            .label(named)
             .xalign(0.0)
             .ellipsize(pango::EllipsizeMode::Middle)
             .build();
@@ -182,6 +186,7 @@ impl Rows {
             row,
             key: key.to_string(),
             set,
+            place,
             glyph,
             detail,
             button,
@@ -330,7 +335,7 @@ impl Rows {
     pub(super) fn shown(&self) -> Vec<String> {
         let lines = self.lines.borrow();
         let shown = lines.iter().map(|l| {
-            let place = format!("{}:{}", l.key, l.set.line + 1);
+            let place = l.place.text().to_string();
             match l.detail.text() {
                 detail if detail.is_empty() => place,
                 detail => format!("{place} {detail}"),

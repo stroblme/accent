@@ -639,6 +639,9 @@ fn debug_data(app: &Rc<App>) -> sidebar::DebugData {
             #[weak]
             app,
             move |row: &str| {
+                if app.open_cell_row(row) {
+                    return;
+                }
                 if let Some(loc) = reference_target(row) {
                     app.open_at(&loc);
                 }
