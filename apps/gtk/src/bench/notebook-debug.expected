@@ -1,0 +1,17 @@
+bench nbdebug breakpoint cell 1:2 breakpoint
+bench nbdebug breakpoint cell 4:3 breakpoint
+bench nbdebug strip No kernel spinner=0 run-all
+bench nbdebug debug shown=1
+bench nbdebug defined cell 1 count=[1] outputs=0
+bench nbdebug stopped cell 1:2 breakpoint
+bench nbdebug top double nbdebug.ipynb cell 1:2
+bench nbdebug locals x=21
+bench nbdebug repl 42
+bench nbdebug step cell 1:3
+bench nbdebug done cell 2 count=[2] outputs=stream:"total 42\n"
+bench nbdebug ended Idle spinner=0 run-all
+bench nbdebug alive cell 3 count=[3] outputs=execute_result:"42"
+bench nbdebug again stopped cell 1:2
+bench nbdebug slow stopped cell 4:3
+bench nbdebug stopped cell 4 count=[5] outputs=error:KeyboardInterrupt
+bench nbdebug alive cell 3 count=[6] outputs=execute_result:"42"

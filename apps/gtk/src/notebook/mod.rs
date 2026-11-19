@@ -9,6 +9,7 @@ mod bench;
 mod buttons;
 mod cell;
 mod changes;
+mod debug;
 mod editing;
 mod file;
 mod find;
@@ -39,6 +40,7 @@ use gtk::{gdk, gio, glib};
 
 use crate::editor::SaveState;
 use crate::widgets::{Debounce, Fade, Hook};
+pub use cell::Marks;
 use cell::{CellView, Tools};
 use history::{Change, History};
 #[cfg(feature = "bench")]
@@ -132,6 +134,8 @@ pub struct NotebookTab {
     fonts: RefCell<(Option<String>, Option<String>)>,
     /// The kernel its runs go to, and what they changed (`kernel`).
     kernel: kernel::Hold,
+    /// The marks column and the breakpoints in its cells (`debug`).
+    debug: debug::State,
     /// The notebook's fonts at its zoom, one rule for all its cells.
     font: RefCell<Option<gtk::CssProvider>>,
     /// Its zoom, which its outputs' pictures and formulas are drawn at as the rule sets its text.
@@ -303,6 +307,7 @@ fn build(
         followed: Cell::new(None),
         fonts: RefCell::default(),
         kernel: kernel::Hold::default(),
+        debug: debug::State::default(),
         font: RefCell::default(),
         zoom: Rc::new(Cell::new(1.0)),
         declared: Rc::default(),

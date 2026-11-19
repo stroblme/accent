@@ -40,6 +40,7 @@ mod minimap;
 mod motion;
 mod native;
 mod notebook;
+mod notebook_debug;
 mod notebook_lsp;
 mod opens;
 mod outline;
@@ -403,6 +404,8 @@ use user_commands::bench_commands;
 ///   adds a picture of the window while a cell's last outputs wait, dimmed, for its new ones.
 ///   `spec:<rel>`: notebooks on fake kernelspecs it writes into `JUPYTER_PATH`, a scratch
 ///   folder under `/tmp` (`kernel::bench_kernelspec`).
+/// - `ACCENT_BENCH_NOTEBOOK_DEBUG=<rel>`: a notebook it writes at `<rel>`, its cells debugged in
+///   its ipykernel (`notebook_debug::bench_notebook_debug`). Saves: a scratch vault under `/tmp`.
 /// - `ACCENT_BENCH_REPLACE=1`: Search-pane Replace All updates.
 /// - `ACCENT_BENCH_FIND=<rel_note>`: query selection/history; `options`:
 ///   search toggles, invalid patterns and replacement captures in a temporary note; `compare`:
@@ -566,6 +569,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let goals = std::env::var("ACCENT_BENCH_GOALS").ok();
     let debug = std::env::var("ACCENT_BENCH_DEBUG").ok();
     let kernel = std::env::var("ACCENT_BENCH_KERNEL").ok();
+    let notebook_debug = std::env::var("ACCENT_BENCH_NOTEBOOK_DEBUG").ok();
     let search = std::env::var("ACCENT_BENCH_SEARCH").ok();
     let find = std::env::var("ACCENT_BENCH_FIND").ok();
     let diag = std::env::var("ACCENT_BENCH_DIAG").ok();
@@ -599,6 +603,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && goals.is_none()
         && debug.is_none()
         && kernel.is_none()
+        && notebook_debug.is_none()
         && search.is_none()
         && clip.is_none()
         && transfer.is_none()
@@ -885,6 +890,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(rel) = kernel {
             return kernel::bench_kernel(&app, &rel);
+        }
+        if let Some(rel) = notebook_debug {
+            return notebook_debug::bench_notebook_debug(&app, &rel);
         }
         if let Some(rel) = tags {
             return bench_tags(&app, &rel);

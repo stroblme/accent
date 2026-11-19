@@ -150,6 +150,13 @@ impl App {
             }
         });
         self.wire_notebook_places(tab);
+        tab.set_debuggable(self.why_not_debug(tab).is_none());
+        let weak = Rc::downgrade(self);
+        tab.connect_breakpoint(move |tab, id, line| {
+            if let Some(app) = weak.upgrade() {
+                app.toggle_cell_breakpoint(tab, id, line);
+            }
+        });
         tab.connect_autosave(on(|app, tab| app.save_model(tab, false)));
         tab.connect_banner(on(|app, tab| app.resolve_model(tab)));
         let weak = Rc::downgrade(self);
@@ -186,6 +193,7 @@ impl App {
                 | "notebook-restart"
                 | "notebook-shut-down"
                 | "notebook-clear-all-outputs"
+                | "notebook-debug-cell"
         );
         let code = || self.code_doc().and_then(|doc| doc.notebook().cloned());
         let tab = self.active_notebook().or_else(|| code().filter(|_| strip));
@@ -210,6 +218,7 @@ impl App {
             "notebook-run-advance" => self.run_selected(&tab, true),
             "notebook-run-all" => self.run_all(&tab),
             "notebook-interrupt" => self.interrupt_kernel(&tab),
+            "notebook-debug-cell" => self.debug_cell(&tab),
             "notebook-restart" => self.restart_kernel(&tab),
             "notebook-shut-down" => self.shut_down_kernel(&tab),
             "notebook-clear-outputs" => tab.clear_outputs(false),

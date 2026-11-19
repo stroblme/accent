@@ -22,6 +22,9 @@ impl NotebookTab {
                 if view.kind == Kind::Markdown {
                     crate::editor::restyle_note(&editor.view, &editor.buffer, Syntax::Markdown);
                 }
+                if editor.marks.is_some() {
+                    crate::debug::breakpoints::restyle(&editor.view);
+                }
             }
             view.outputs.restyle();
         }
@@ -88,6 +91,7 @@ impl NotebookTab {
         self.gutter.set(cell::count_width(&self.scroller));
         let prose_font = self.fonts.borrow().1.clone();
         let rezoomed = self.zoom.replace(zoom) != zoom;
+        self.remeasure_marks();
         for view in self.views.borrow().iter() {
             view.set_gutter(self.gutter.get());
             if rezoomed {

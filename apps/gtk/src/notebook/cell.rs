@@ -12,9 +12,11 @@ use accent_core::note::Syntax;
 use accent_core::notebook::{Cell, CellId, Format, Kind, Output};
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
+use sourceview5::prelude::{GutterRendererExt as _, ViewExt as _};
 
 use super::output::Outputs;
 use super::placeholder::{Margins, Placeholder};
+use crate::debug::breakpoints::{self, Breakpoint, Gutter};
 use crate::editor::Flavour;
 use crate::preview::Preview;
 use crate::widgets::Fade;
@@ -37,6 +39,9 @@ pub struct CellView {
     count: gtk::Label,
     /// How wide the `[n]` column is ([`count_width`]).
     gutter: std::cell::Cell<i32>,
+    /// How wide a code cell's marks column is, which a markdown cell's text moves by too
+    /// ([`marks_width`]); 0 in a notebook that cannot be debugged.
+    marks: std::cell::Cell<i32>,
     /// Execution state shown beside Run Cell.
     pub execution: std::cell::Cell<Execution>,
     /// Last settled result while another request may still show Running.
@@ -125,6 +130,39 @@ pub struct Editor {
     pub buffer: sourceview5::Buffer,
     /// What the other occurrences of the selection are painted with.
     pub occurrence: gtk::TextTag,
+    /// A code cell's breakpoints and paused line, in a notebook that can be debugged.
+    pub marks: Option<Rc<Marks>>,
+}
+
+/// A code cell's breakpoints and the line its run is paused on, in its marks column, as a code
+/// tab holds its own.
+pub struct Marks {
+    view: sourceview5::View,
+    buffer: sourceview5::Buffer,
+    breakpoints: RefCell<Vec<Breakpoint>>,
+    pub execution: RefCell<Option<sourceview5::Mark>>,
+    /// The cell's diagnostics laid again around the breakpoints, once it has them.
+    pub remark: RefCell<Option<Box<dyn Fn()>>>,
+}
+
+impl Gutter for Marks {
+    fn buffer(&self) -> &sourceview5::Buffer {
+        &self.buffer
+    }
+
+    fn view(&self) -> &sourceview5::View {
+        &self.view
+    }
+
+    fn breakpoints(&self) -> &RefCell<Vec<Breakpoint>> {
+        &self.breakpoints
+    }
+
+    fn remarked(&self) {
+        if let Some(remark) = self.remark.borrow().as_ref() {
+            remark();
+        }
+    }
 }
 
 impl Editor {
@@ -136,11 +174,11 @@ impl Editor {
 
 impl CellView {
     /// `cell`'s widgets, its source shown by a placeholder until [`build_editor`](Self::build_editor),
-    /// its `[n]` column `gutter` wide, its outputs at the notebook's `zoom` and read after the
-    /// operators it `declared`.
+    /// its `[n]` column `gutter` wide and a code cell's marks column `marks`, its outputs at the
+    /// notebook's `zoom` and read after the operators it `declared`.
     pub fn new(
         cell: &Cell,
-        gutter: i32,
+        (gutter, marks): (i32, i32),
         zoom: &Rc<std::cell::Cell<f64>>,
         declared: &Rc<RefCell<String>>,
     ) -> CellView {
@@ -157,7 +195,7 @@ impl CellView {
             cell.source(),
             cell.kind(),
             Margins {
-                left: text_start(cell.kind(), gutter),
+                left: source_start(cell.kind(), gutter, marks),
                 right: MARGIN,
                 top: EDGE,
                 bottom: EDGE,
@@ -201,6 +239,7 @@ impl CellView {
             gap,
             count,
             gutter: std::cell::Cell::new(gutter),
+            marks: std::cell::Cell::new(marks),
             execution: std::cell::Cell::new(Execution::for_cell(cell)),
             last_result: std::cell::Cell::new(Execution::for_cell(cell)),
             body,
@@ -222,8 +261,26 @@ impl CellView {
             return;
         }
         self.count.set_width_request(gutter);
-        let start = text_start(self.kind, gutter);
-        self.placeholder.set_left_margin(start);
+        self.set_margins();
+    }
+
+    /// A code cell's marks column is `marks` wide now, which a markdown cell's text moves by.
+    pub fn set_marks(&self, marks: i32) {
+        if self.marks.replace(marks) == marks {
+            return;
+        }
+        if let Some(editor) = self.editor().filter(|e| e.marks.is_some()) {
+            size_marks(&editor.view, marks);
+        }
+        self.set_margins();
+    }
+
+    /// Where the text starts, as the `[n]` and marks columns stand.
+    fn set_margins(&self) {
+        let (gutter, marks) = (self.gutter.get(), self.marks.get());
+        let start = text_start(self.kind, gutter, marks);
+        self.placeholder
+            .set_left_margin(source_start(self.kind, gutter, marks));
         if let Some(editor) = self.editor() {
             editor.view.set_left_margin(start);
         }
@@ -324,7 +381,7 @@ impl CellView {
     }
 
     /// Build the editor over `source` in the placeholder's place, a code cell coloured as
-    /// `language`, read only while `presenting`.
+    /// `language`, read only while `presenting`, and its marks column shown where it has one.
     pub fn build_editor(
         &self,
         source: &str,
@@ -339,7 +396,7 @@ impl CellView {
         let (view, buffer) = crate::editor::build(flavour, language, source);
         // The notebook's one history records what is typed (`history.rs`).
         buffer.set_enable_undo(false);
-        view.set_left_margin(text_start(self.kind, self.gutter.get()));
+        view.set_left_margin(text_start(self.kind, self.gutter.get(), self.marks.get()));
         view.set_right_margin(MARGIN);
         view.set_top_margin(EDGE);
         view.set_bottom_margin(EDGE);
@@ -384,10 +441,25 @@ impl CellView {
         self.body.remove(&self.placeholder);
         // Read rendered, the cell keeps its editor out of sight for the caret's place.
         view.set_visible(!self.shows_rendered());
+        let marks = (self.kind == Kind::Code && self.marks.get() > 0).then(|| {
+            view.set_show_line_marks(true);
+            size_marks(&view, self.marks.get());
+            let marks = Rc::new(Marks {
+                view: view.clone(),
+                buffer: buffer.clone(),
+                breakpoints: RefCell::default(),
+                execution: RefCell::default(),
+                remark: RefCell::default(),
+            });
+            breakpoints::install(&marks);
+            view.connect_realize(breakpoints::restyle);
+            marks
+        });
         let editor = Editor {
             view,
             buffer,
             occurrence,
+            marks,
         };
         let _ = self.editor.set(editor.clone());
         editor
@@ -411,7 +483,8 @@ impl CellView {
     /// the notebook, which the page's links are read from, and `declared` the operators its
     /// formulas are read after.
     pub fn set_rendered(&self, page: Preview, rel: &str, source: &str, declared: &str) {
-        page.set_margins(text_start(self.kind, self.gutter.get()), MARGIN, EDGE, EDGE);
+        let start = text_start(self.kind, self.gutter.get(), self.marks.get());
+        page.set_margins(start, MARGIN, EDGE, EDGE);
         let widget = page.widget().clone();
         widget.set_visible(false);
         widget.set_focusable(false);
@@ -583,12 +656,45 @@ pub fn count_width(widget: &impl IsA<gtk::Widget>) -> i32 {
 }
 
 /// Where a cell's text starts in its editor. A markdown cell has no `[n]` column: its text starts
-/// where a code cell's does, and its heading markers hang in the column's room, as a note's hang
-/// in its page margin.
-fn text_start(kind: Kind, gutter: i32) -> i32 {
+/// where a code cell's does, past the code cells' marks column too, and its heading markers hang
+/// in the column's room, as a note's hang in its page margin.
+fn text_start(kind: Kind, gutter: i32, marks: i32) -> i32 {
     match kind {
-        Kind::Markdown => gutter + SPACING + MARGIN,
+        Kind::Markdown => gutter + SPACING + marks + MARGIN,
         Kind::Code | Kind::Raw => MARGIN,
+    }
+}
+
+/// Where a cell's text starts before its editor is built: a code cell's past the marks column its
+/// editor will have.
+fn source_start(kind: Kind, gutter: i32, marks: i32) -> i32 {
+    match kind {
+        Kind::Code => marks + MARGIN,
+        _ => text_start(kind, gutter, marks),
+    }
+}
+
+/// How wide a code cell's marks column is in the code font at `zoom`: GtkSourceView's renderer
+/// for them takes its view's line height less 2 px (`measure_line_height`), measured once as it
+/// is added, which [`size_marks`] keeps to the font as it changes.
+pub fn marks_width(widget: &impl IsA<gtk::Widget>, zoom: f64) -> i32 {
+    let mut font = gtk::pango::FontDescription::from_string(&crate::platform::monospace_font());
+    font.set_size((f64::from(font.size()) * zoom).round() as i32);
+    let layout = widget.create_pango_layout(Some("QWERTY"));
+    layout.set_font_description(Some(&font));
+    layout.pixel_size().1 - 2
+}
+
+/// Hold `view`'s marks column at `width`, its icons by each line's first row as a code tab's are.
+fn size_marks(view: &sourceview5::View, width: i32) {
+    let gutter = sourceview5::prelude::ViewExt::gutter(view, gtk::TextWindowType::Left);
+    let mut child = gutter.first_child();
+    while let Some(widget) = child {
+        if let Some(icons) = widget.downcast_ref::<sourceview5::GutterRendererPixbuf>() {
+            icons.set_alignment_mode(sourceview5::GutterRendererAlignmentMode::First);
+            icons.set_size_request(width, -1);
+        }
+        child = widget.next_sibling();
     }
 }
 
@@ -815,7 +921,11 @@ fn cell_menu() -> gio::Menu {
         }
         menu.append_section(None, &s);
     };
-    section(&["win.notebook-run-cell", "win.notebook-clear-outputs"]);
+    section(&[
+        "win.notebook-run-cell",
+        "win.notebook-debug-cell",
+        "win.notebook-clear-outputs",
+    ]);
     section(&["win.notebook-insert-above", "win.notebook-insert-below"]);
     section(&[
         "win.notebook-to-code",

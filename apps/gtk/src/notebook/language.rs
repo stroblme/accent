@@ -588,6 +588,15 @@ impl NotebookTab {
             ghost: ghost::State::default(),
         });
         follow_edits(&cell);
+        // A breakpoint coming or going takes its line's icon from a diagnostic.
+        if let Some(marks) = &editor.marks {
+            let weak = Rc::downgrade(&cell);
+            marks.remark.replace(Some(Box::new(move || {
+                if let Some(cell) = weak.upgrade() {
+                    cell.painted.remark();
+                }
+            })));
+        }
         let features: Rc<dyn lang::Editor> = cell.clone();
         crate::editor::attach_keys(&features);
         crate::hover::install(&features);

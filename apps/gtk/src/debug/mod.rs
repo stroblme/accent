@@ -3,6 +3,7 @@
 
 use super::*;
 use accent_api::debug::{Breakpoint, ExceptionFilter, Supports, debuggable};
+use accent_core::notebook::CellId;
 use std::collections::BTreeMap;
 
 pub(crate) mod breakpoints;
@@ -36,6 +37,10 @@ pub struct Debugger {
     run: RefCell<Option<Rc<Run>>>,
     /// The tab holding the paused line's mark.
     execution: RefCell<std::rc::Weak<Tab>>,
+    /// The notebook cell holding it, in a Debug Cell session.
+    paused_cell: RefCell<std::rc::Weak<crate::notebook::Marks>>,
+    /// The cell Restart Debugging debugs again once its run is done, and its notebook.
+    again: RefCell<Option<(std::rc::Weak<crate::notebook::NotebookTab>, CellId)>>,
     /// The values of the call selected, painted after the lines of its tab.
     values: inline::Values,
     console: console::Console,
@@ -227,8 +232,15 @@ impl App {
         self.send_exceptions();
     }
 
-    /// Toggle Breakpoint, on the caret's line of the tab in front.
+    /// Toggle Breakpoint, on the caret's line of the tab in front, or of a notebook's selected
+    /// cell.
     pub(crate) fn toggle_breakpoint_at_caret(self: &Rc<Self>) {
+        if let Some(tab) = self.active_notebook().filter(|tab| tab.debuggable()) {
+            if let Some((id, line)) = tab.selected_line() {
+                self.toggle_cell_breakpoint(&tab, id, line);
+            }
+            return;
+        }
         if let Some(tab) = self.active() {
             let line = editor::caret(&tab.buffer).line().max(0) as u32;
             self.toggle_breakpoint(&tab, line);
@@ -246,6 +258,12 @@ impl App {
         }
         for key in had.into_keys() {
             self.send_breakpoints(key, Vec::new());
+        }
+        for tab in self.notebooks() {
+            for (id, _) in tab.cell_breakpoints() {
+                tab.place_breakpoints(id, &[]);
+                self.cell_breakpoints_changed(&tab, id);
+            }
         }
         self.save_session_soon();
         self.refill_breakpoints();

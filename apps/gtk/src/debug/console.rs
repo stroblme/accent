@@ -57,14 +57,14 @@ impl App {
         self.terminals().into_iter().find(|term| term.is_console())
     }
 
-    /// The console of `session`, debugging `program`: the last session's where it is, else a new
-    /// one right after the program's tab and behind it, the program having the keyboard for its
-    /// input.
+    /// The console of `session`, debugging `program`, as its first line names it: the last
+    /// session's where it is, else a new one right after the program's tab and behind it, the
+    /// program having the keyboard for its input.
     pub(super) fn open_console(self: &Rc<Self>, session: u64, program: &str) {
         let console = &self.debugger.console;
         console
             .session
-            .replace(Some((session, doc::file_name(program).to_string())));
+            .replace(Some((session, program.to_string())));
         console.busy.set(false);
         console.queue.borrow_mut().clear();
         console.block.borrow_mut().clear();

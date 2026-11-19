@@ -28,6 +28,15 @@ Markdown cells offer note links, completion, spelling and ghost text, although t
 The Outline and [search](search.md) help you move between cells.
 Marimo notebooks can be edited here, but run through marimo itself.
 
+## Debug a cell
+
+Select a code cell and press `Ctrl+F5`, or choose **Debug Cell** from the cell's menu or **Debug** in the Code pane.
+Accent runs the cell with the debugger attached to its kernel and lets go of the kernel when the cell finishes, so the variables stay for the next run.
+Click beside a line in any code cell to add a breakpoint, and the run pauses when it reaches one, in that cell or in a function another cell defined.
+The Code pane then shows the call stack and the variables as it does for a [Python file](debugging.md), and the Debug Console evaluates expressions where the cell is paused.
+**Stop Debugging** interrupts the cell, and the kernel keeps what it holds.
+Debugging needs `debugpy` beside `ipykernel`, which installs it.
+
 ## Copy and export
 
 Right-click an output and choose **Copy Output** to copy a picture as an image, or other output as plain text.

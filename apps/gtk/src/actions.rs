@@ -93,7 +93,7 @@ impl App {
             breakable: tab.is_some_and(|tab| {
                 doc::host_file_path(&tab.rel()).is_none()
                     && accent_api::debug::debuggable(&lang::language_id(tab))
-            }),
+            }) || self.active_notebook().is_some_and(|tab| tab.debuggable()),
             breakpoints: !self.debugger.saved(self).is_empty(),
             python: self.vault().is_some()
                 && !running

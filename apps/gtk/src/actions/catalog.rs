@@ -398,6 +398,8 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.notebook-run-advance", "Run Cell and Advance", &[]),
     ("win.notebook-run-all", "Run All", &[]),
     ("win.notebook-interrupt", "Interrupt Kernel", &[]),
+    // Start Debugging's `Ctrl+F5` does it while a notebook is in front.
+    ("win.notebook-debug-cell", "Debug Cell", &[]),
     ("win.notebook-restart", "Restart Kernel", &[]),
     ("win.notebook-shut-down", "Shut Down Kernel", &[]),
     ("win.notebook-clear-outputs", "Clear Outputs", &[]),

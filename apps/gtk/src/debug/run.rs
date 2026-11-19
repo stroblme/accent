@@ -8,6 +8,10 @@ use accent_api::debug::{
 use accent_core::config::DebugTerminal;
 use sourceview5::prelude::BufferExt as _;
 
+mod cell;
+
+use cell::CellRun;
+
 /// One session, from Start until its end.
 #[derive(Default)]
 pub(super) struct Run {
@@ -29,6 +33,8 @@ pub(super) struct Run {
     changed: RefCell<std::collections::BTreeSet<String>>,
     /// Whether the exceptions to stop at changed while it started, likewise.
     exceptions_changed: Cell<bool>,
+    /// A notebook's cell, which Debug Cell debugs in its kernel, in the place of a program.
+    cell: Option<CellRun>,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
@@ -45,6 +51,10 @@ enum State {
 impl App {
     /// Start Debugging: the Code pane's Python file, else the program last debugged here.
     pub(crate) fn start_debugging(self: &Rc<Self>) {
+        // The Flatpak's kernels are the host's, and debugpy with them.
+        if let Some(tab) = self.code_notebook() {
+            return self.debug_cell(&tab);
+        }
         // A remote vault's adapter and program are its host's. On a local vault both would have
         // to be this machine's: debugpy's launcher calls back over a loopback the sandbox does
         // not share.
@@ -69,7 +79,9 @@ impl App {
     /// session runs.
     pub(crate) fn can_debug(&self) -> bool {
         !self.debugger.running()
-            && (self.code_program().is_some() || self.debugger.last.borrow().is_some())
+            && (self.code_program().is_some()
+                || self.code_notebook().is_some()
+                || self.debugger.last.borrow().is_some())
     }
 
     /// The Code pane's file and its language, where Start Debugging can run it.
@@ -160,10 +172,13 @@ impl App {
         else {
             return;
         };
-        run.state.set(State::Stopping);
+        let sent = run.state.replace(State::Stopping) != State::Starting;
         self.moved_on(&run);
         self.sync_debug();
-        self.send_stop(&run);
+        match run.cell {
+            Some(_) => self.stop_cell(&run, sent),
+            None => self.send_stop(&run),
+        }
     }
 
     fn send_stop(&self, run: &Run) {
@@ -279,7 +294,7 @@ impl App {
                 env,
             } => {
                 self.open_program(&run, seq, args, cwd, env);
-                self.open_console(run.id, &run.program);
+                self.open_console(run.id, doc::file_name(&run.program));
             }
             News::Stopped { .. } | News::Continued if stopping => {}
             News::Stopped {
@@ -328,6 +343,7 @@ impl App {
                 self.save_session_soon();
                 self.refill_exceptions();
             }
+            News::Breakpoints { path, placed } if self.bind_cell(&run, &path, &placed) => {}
             News::Breakpoints { path, placed } => {
                 if let Some(tab) = self.tab_for(&path) {
                     breakpoints::bind(&tab, &placed);
@@ -363,6 +379,7 @@ impl App {
             let Some(app) = weak.upgrade().filter(|app| app.current(&run, generation)) else {
                 return;
             };
+            let frames = app.cell_frames(&run, frames);
             if run.state.get() != (State::Paused { thread }) {
                 run.state.set(State::Paused { thread });
                 app.sync_debug();
@@ -401,6 +418,7 @@ impl App {
             app.current(run, generation) && run.frame.get() == Some(id)
         };
         let how = match frame.path.as_deref() {
+            _ if self.show_cell_frame(&run, frame) => None,
             Some(path) if !doc::is_loose_key(path) => Some(Opened::Preview),
             Some(_) if !vault.is_remote() => Some(Opened::Kept),
             _ => None,
@@ -518,6 +536,16 @@ impl App {
 
     /// A thread's calls, for Call Stack opening one; dropped once the program has moved on.
     pub(crate) fn debug_frames(self: &Rc<Self>, thread: i64, then: Box<dyn FnOnce(Vec<Frame>)>) {
+        let weak = Rc::downgrade(self);
+        let then = Box::new(move |frames: Vec<Frame>| {
+            let run = weak
+                .upgrade()
+                .and_then(|app| Some((app.debugger.run()?, app)));
+            match run {
+                Some((run, app)) => then(app.cell_frames(&run, frames)),
+                None => then(frames),
+            }
+        });
         self.ask_paused("listing the calls", then, move |vault, id| {
             vault.debug_stack(id, thread)
         });
@@ -614,6 +642,12 @@ impl App {
             tab.buffer.delete_mark(&mark);
             breakpoints::redraw(&tab);
         }
+        if let Some(marks) = self.debugger.paused_cell.take().upgrade()
+            && let Some(mark) = marks.execution.take()
+        {
+            breakpoints::Gutter::buffer(&*marks).delete_mark(&mark);
+            breakpoints::redraw(&marks);
+        }
     }
 
     /// The session is over: its marks and its sections go, the rings are dots again, which a
@@ -632,10 +666,15 @@ impl App {
                 breakpoints::redraw(&tab);
             }
         }
+        for tab in self.notebooks() {
+            tab.unbind_breakpoints();
+        }
         self.sync_debug();
         self.sync_code_pane();
-        if run.restart.get() {
-            self.launch_program(run.program.clone(), run.language.clone());
+        match (run.restart.get(), &run.cell) {
+            (true, Some(cell)) => self.debug_again(cell),
+            (true, None) => self.launch_program(run.program.clone(), run.language.clone()),
+            (false, _) => {}
         }
     }
 
@@ -684,7 +723,8 @@ impl App {
             return;
         };
         let (Some(run), Some(state)) = (run, state) else {
-            return sidebar.clear_debug(self.code_program().is_some());
+            let cells = self.code_notebook().is_some();
+            return sidebar.clear_debug(self.code_program().is_some(), cells);
         };
         let said = run.paused.borrow();
         let line = match state {

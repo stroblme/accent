@@ -128,13 +128,7 @@ mod tests {
         let id = notebook.cells()[0].id();
         let kernel = Kernel {
             session: 1,
-            info: RefCell::default(),
-            runs: RefCell::default(),
-            outbox: RefCell::default(),
-            sending: Cell::new(false),
-            clear_next: RefCell::default(),
-            stale: RefCell::default(),
-            last_run: Cell::new(0),
+            ..Kernel::default()
         };
         kernel.runs.borrow_mut().insert(
             1,
@@ -160,13 +154,7 @@ mod tests {
         let (a, b) = (notebook.cells()[0].id(), notebook.cells()[1].id());
         let kernel = Kernel {
             session: 1,
-            info: RefCell::default(),
-            runs: RefCell::default(),
-            outbox: RefCell::default(),
-            sending: Cell::new(false),
-            clear_next: RefCell::default(),
-            stale: RefCell::default(),
-            last_run: Cell::new(0),
+            ..Kernel::default()
         };
         assert_eq!(turn_of(None, a), Turn::Free);
         assert_eq!(turn_of(Some(&kernel), a), Turn::Free);
@@ -205,13 +193,7 @@ mod tests {
             accent_core::notebook::read("cell.ipynb", accent_core::notebook::EMPTY_IPYNB).unwrap();
         let kernel = Kernel {
             session: 1,
-            info: RefCell::default(),
-            runs: RefCell::default(),
-            outbox: RefCell::default(),
-            sending: Cell::new(false),
-            clear_next: RefCell::default(),
-            stale: RefCell::default(),
-            last_run: Cell::new(0),
+            ..Kernel::default()
         };
         assert!(output_save_due(Some(&kernel)));
         kernel.runs.borrow_mut().insert(
@@ -228,6 +210,7 @@ mod tests {
 }
 
 /// A tab's kernel, from its start until it ends.
+#[derive(Default)]
 pub(super) struct Kernel {
     /// The number the vault knows it by.
     session: u64,
@@ -245,6 +228,43 @@ pub(super) struct Kernel {
     /// output takes their place or they end with none, and the count each began as.
     stale: RefCell<HashMap<u64, Option<u32>>>,
     last_run: Cell<u64>,
+    /// The code each cell last ran as: the file the kernel names the cell's calls by.
+    sent: RefCell<HashMap<CellId, String>>,
+    /// The run Debug Cell runs under the debugger, while it is out: the outbox holds the rest
+    /// until it is done (user decision 2026-11-19).
+    debugged: Cell<Option<u64>>,
+    /// What waits for its start, told whether it started.
+    ready: RefCell<Vec<Ready>>,
+}
+
+/// What waits for a kernel's start, told whether it started.
+type Ready = Box<dyn FnOnce(bool)>;
+
+/// Tells what waits for a kernel's start whether it started, as the start ends however it ends.
+struct Started(Rc<Kernel>);
+
+impl Drop for Started {
+    fn drop(&mut self) {
+        let started = self.0.info.borrow().is_some();
+        for ready in self.0.ready.take() {
+            ready(started);
+        }
+    }
+}
+
+impl Kernel {
+    /// Cell `id`'s `code` as a run the kernel takes in turn: its number.
+    fn queue(&self, id: CellId, code: &str) -> u64 {
+        let run = self.last_run.get() + 1;
+        self.last_run.set(run);
+        let job = RunJob {
+            cell: id,
+            source: code.to_string(),
+        };
+        self.runs.borrow_mut().insert(run, job);
+        self.sent.borrow_mut().insert(id, code.to_string());
+        run
+    }
 }
 
 /// A tab's kernel, if it has one, and what runs changed that is yet to be drawn.
@@ -376,6 +396,30 @@ impl NotebookTab {
             }
             None => format!("No {} kernel is installed", model.language()),
         }
+    }
+
+    /// The number the vault knows the tab's kernel by, once it has answered.
+    pub(crate) fn kernel_session(&self) -> Option<u64> {
+        let kernel = self.kernel()?;
+        kernel.info.borrow().is_some().then_some(kernel.session)
+    }
+
+    /// Whether the kernel runs cells or has some waiting for it.
+    pub(crate) fn kernel_busy(&self) -> bool {
+        self.kernel().is_some_and(|k| !k.runs.borrow().is_empty())
+    }
+
+    /// Whether Debug Cell's run `run` is still out.
+    pub(crate) fn runs_debugged(&self, run: u64) -> bool {
+        self.kernel()
+            .is_some_and(|k| k.debugged.get() == Some(run) && k.runs.borrow().contains_key(&run))
+    }
+
+    /// The code each cell last ran as on the kernel.
+    pub(crate) fn sent_code(&self) -> Vec<(CellId, String)> {
+        let kernel = self.kernel();
+        let sent = kernel.as_ref().map(|k| k.sent.borrow().clone());
+        sent.unwrap_or_default().into_iter().collect()
     }
 
     /// Whether a kernel runs for the tab, which then stays in its window.
@@ -745,15 +789,7 @@ impl App {
             .kernel()
             .unwrap_or_else(|| self.start_kernel(tab, &vault));
         for (id, code) in codes {
-            let run = kernel.last_run.get() + 1;
-            kernel.last_run.set(run);
-            kernel.runs.borrow_mut().insert(
-                run,
-                RunJob {
-                    cell: id,
-                    source: code.clone(),
-                },
-            );
+            let run = kernel.queue(id, &code);
             kernel.outbox.borrow_mut().push_back((run, code));
             tab.set_execution(id, Execution::Running);
             tab.relabel(id);
@@ -762,24 +798,97 @@ impl App {
         self.sync_kernel();
     }
 
+    /// `tab`'s kernel, started if need be, once it has answered, `ready` told whether it did.
+    pub(crate) fn kernel_ready(
+        self: &Rc<Self>,
+        tab: &Rc<NotebookTab>,
+        ready: impl FnOnce(bool) + 'static,
+    ) {
+        let Some(vault) = self.vault().cloned() else {
+            return ready(false);
+        };
+        let kernel = tab
+            .kernel()
+            .unwrap_or_else(|| self.start_kernel(tab, &vault));
+        let started = kernel.info.borrow().is_some();
+        match started {
+            true => ready(true),
+            false => kernel.ready.borrow_mut().push(Box::new(ready)),
+        }
+        self.sync_kernel();
+    }
+
+    /// Run cell `id`'s `code` as Debug Cell does, once the debugger is attached: its run held out
+    /// of the outbox until then, and the rest held behind it until it is done. The run's number.
+    pub(crate) fn hold_run(
+        self: &Rc<Self>,
+        tab: &Rc<NotebookTab>,
+        id: CellId,
+        code: &str,
+    ) -> Option<u64> {
+        let vault = self.vault().cloned()?;
+        let kernel = tab
+            .kernel()
+            .unwrap_or_else(|| self.start_kernel(tab, &vault));
+        let run = kernel.queue(id, code);
+        kernel.debugged.set(Some(run));
+        tab.set_execution(id, Execution::Running);
+        tab.relabel(id);
+        self.sync_kernel();
+        Some(run)
+    }
+
+    /// Debug Cell's run `run` is not run after all: its cell is as it was, and the runs held
+    /// behind it go.
+    pub(crate) fn drop_run(self: &Rc<Self>, tab: &Rc<NotebookTab>, run: u64) {
+        let Some(kernel) = tab.kernel() else {
+            return;
+        };
+        if kernel.debugged.get() == Some(run) {
+            kernel.debugged.set(None);
+        }
+        if let Some(RunJob { cell: id, .. }) = kernel.runs.borrow_mut().remove(&run) {
+            tab.leave_execution(id);
+            tab.relabel(id);
+        }
+        self.send_runs(tab, &kernel);
+        self.sync_kernel();
+    }
+
+    /// Send Debug Cell's run `run`, held until now; one that cannot be sent is dropped.
+    pub(crate) fn send_held(self: &Rc<Self>, tab: &Rc<NotebookTab>, run: u64) {
+        let (Some(vault), Some(kernel)) = (self.vault().cloned(), tab.kernel()) else {
+            return;
+        };
+        let code = kernel.runs.borrow().get(&run).map(|job| job.source.clone());
+        let Some(code) = code else {
+            return;
+        };
+        let sent = vault.kernel_execute(kernel.session, run, code);
+        let (app, weak) = (Rc::downgrade(self), Rc::downgrade(tab));
+        glib::spawn_future_local(async move {
+            if let Err(e) = sent.await
+                && let (Some(app), Some(tab)) = (app.upgrade(), weak.upgrade())
+            {
+                app.kernel_toast(&format!("Cannot run the cell: {e}"));
+                app.drop_run(&tab, run);
+            }
+        });
+    }
+
     /// Start a kernel for `tab`; the runs it is given meanwhile wait for its answer.
     fn start_kernel(self: &Rc<Self>, tab: &Rc<NotebookTab>, vault: &Arc<Vault>) -> Rc<Kernel> {
         tab.stale_execution();
         let kernel = Rc::new(Kernel {
             session: SESSIONS.fetch_add(1, Ordering::Relaxed) + 1,
-            info: RefCell::default(),
-            runs: RefCell::default(),
-            outbox: RefCell::default(),
-            sending: Cell::new(false),
-            clear_next: RefCell::default(),
-            stale: RefCell::default(),
-            last_run: Cell::new(0),
+            ..Kernel::default()
         });
         tab.kernel.kernel.replace(Some(kernel.clone()));
         let (notebook, python) = (tab.key(), tab.is_python());
         let (app, weak) = (Rc::downgrade(self), Rc::downgrade(tab));
         let (vault, starting) = (vault.clone(), kernel.clone());
         glib::spawn_future_local(async move {
+            let _started = Started(starting.clone());
             let kernel = starting;
             let ours =
                 |tab: &Rc<NotebookTab>| tab.kernel().is_some_and(|k| Rc::ptr_eq(&k, &kernel));
@@ -843,7 +952,8 @@ impl App {
         let Some(vault) = self.vault().cloned() else {
             return;
         };
-        if kernel.info.borrow().is_none() || kernel.sending.replace(true) {
+        let held = kernel.debugged.get().is_some();
+        if kernel.info.borrow().is_none() || held || kernel.sending.replace(true) {
             return;
         }
         let (app, tab, kernel) = (Rc::downgrade(self), Rc::downgrade(tab), kernel.clone());
@@ -874,11 +984,16 @@ impl App {
     }
 
     /// Interrupt Kernel: SIGINT to what it runs, or an `interrupt_request` for a kernelspec that
-    /// asks for one, as Jupyter sends them.
-    pub(crate) fn interrupt_kernel(&self, tab: &NotebookTab) {
+    /// asks for one, as Jupyter sends them. While Debug Cell's run is out it is Stop Debugging,
+    /// which lets the debugger go first: debugpy paused at a breakpoint takes a SIGINT and the
+    /// kernel then answers nothing more.
+    pub(crate) fn interrupt_kernel(self: &Rc<Self>, tab: &NotebookTab) {
         let (Some(vault), Some(kernel)) = (self.vault(), tab.kernel()) else {
             return;
         };
+        if kernel.debugged.get().is_some() && self.debugger.running() {
+            return self.stop_debugging();
+        }
         let sent = vault.kernel_interrupt(kernel.session);
         glib::spawn_future_local(async move {
             if let Err(e) = sent.await {
@@ -1039,6 +1154,11 @@ impl App {
                 }
                 tab.end_ask(id);
                 tab.relabel(id);
+                if kernel.debugged.get() == Some(run) {
+                    kernel.debugged.set(None);
+                    self.debugged_run_done(&tab, run);
+                    self.send_runs(&tab, &kernel);
+                }
                 self.sync_kernel();
             }
             News::Ended { error } => {

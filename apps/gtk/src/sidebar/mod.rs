@@ -562,6 +562,13 @@ impl Sidebar {
         self.code.kernel_line()
     }
 
+    /// Whether the kernel's strip offers Debug, and how wide its row asks to be at least, with
+    /// Debug and without.
+    #[cfg(feature = "bench")]
+    pub fn kernel_debug(&self) -> Option<(bool, i32, i32)> {
+        self.code.kernel_debug()
+    }
+
     /// Name `command`, the vault's Python, on the Code pane's Python Environment dropdowns; empty
     /// is the default configuration.
     pub fn set_python(&self, command: &[String]) {
@@ -584,13 +591,15 @@ impl Sidebar {
         self.code.python_button()
     }
 
-    /// No session: Call Stack and Variables go, and the strip, offering Start Debugging, and
-    /// Breakpoints stay only while the tab in front can be debugged (`debuggable`).
-    pub fn clear_debug(&self, debuggable: bool) {
+    /// No session: Call Stack and Variables go, and the strip, offering Start Debugging, stays only
+    /// while the tab in front can be debugged (`debuggable`), and Watch and Breakpoints then or
+    /// while a notebook's `cells` can be, whose Debug is on the kernel's strip.
+    pub fn clear_debug(&self, debuggable: bool, cells: bool) {
         if let Some(debug) = &self.code.debug {
-            debug.set_idle(debuggable);
+            debug.set_idle(debuggable, debuggable || cells);
             self.code.set_debugging(debuggable);
         }
+        self.code.set_kernel_debug(cells);
     }
 
     /// The goals the Code pane shows, for `ACCENT_BENCH_GOALS`.

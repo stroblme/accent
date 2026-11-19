@@ -222,6 +222,11 @@ impl Code {
         }
     }
 
+    /// The kernel's strip offering Debug Cell, while the notebook's cells can be debugged.
+    pub(super) fn set_kernel_debug(&self, on: bool) {
+        self.kernel.debug.set_visible(on);
+    }
+
     /// Name `command`, the vault's Python, on the dropdowns.
     pub(super) fn set_python(&self, command: &[String]) {
         if let Some(python) = &self.python {
@@ -249,6 +254,25 @@ impl Code {
     pub(super) fn picker_face(&self) -> Option<String> {
         let python = self.python.as_ref().filter(|p| p.button.get_visible())?;
         Some(python.face())
+    }
+
+    /// Whether the kernel's strip offers Debug while it is up, and the least width of the row it
+    /// shares with the dropdown, which names the Python as narrow as that, with Debug and
+    /// without, for `ACCENT_BENCH_NOTEBOOK_DEBUG`.
+    #[cfg(feature = "bench")]
+    pub(super) fn kernel_debug(&self) -> Option<(bool, i32, i32)> {
+        let row = self.strips.parent()?;
+        let least = || row.measure(gtk::Orientation::Horizontal, -1).0;
+        let shown = self
+            .kernel
+            .root
+            .is_visible()
+            .then(|| self.kernel.debug.is_visible())?;
+        let with = least();
+        self.kernel.debug.set_visible(false);
+        let without = least();
+        self.kernel.debug.set_visible(shown);
+        Some((shown, with, without))
     }
 
     /// What the kernel's strip says and shows, while it is up, for `ACCENT_BENCH_KERNEL`.
@@ -349,8 +373,10 @@ pub enum KernelState {
 
 /// The kernel's strip, VS Code's notebook toolbar (user decision 2026-10-27): after a spinner
 /// while the kernel starts or runs cells, Run All, or Stop in its place meanwhile, then Restart
-/// Kernel and Clear All Outputs, flat icon buttons on the window's actions. Shut Down Kernel is
-/// the palette's, and Stop's while the kernel starts, there being nothing to interrupt yet.
+/// Kernel and Clear All Outputs, flat icon buttons on the window's actions, and the debugger's
+/// Debug after them for a notebook whose cells can be debugged (user decision 2026-11-19). Shut
+/// Down Kernel is the palette's, and Stop's while the kernel starts, there being nothing to
+/// interrupt yet.
 struct KernelStrip {
     root: gtk::Box,
     working: debug::Working,
@@ -360,6 +386,8 @@ struct KernelStrip {
     /// Stop while the kernel starts: Shut Down Kernel.
     cancel: gtk::Button,
     restart: gtk::Button,
+    /// Debug Cell, the debugger's idle strip joined to this one.
+    debug: gtk::Button,
 }
 
 impl KernelStrip {
@@ -369,6 +397,8 @@ impl KernelStrip {
         let interrupt = debug::strip_button(stop, "win.notebook-interrupt");
         let cancel = debug::strip_button(stop, "win.notebook-shut-down");
         let restart = debug::strip_button("view-refresh-symbolic", "win.notebook-restart");
+        let debug = debug::start_button("win.notebook-debug-cell");
+        debug.set_visible(false);
         let root = debug::strip_of(&[
             run_all.clone().upcast(),
             interrupt.clone().upcast(),
@@ -376,6 +406,7 @@ impl KernelStrip {
             restart.clone().upcast(),
             debug::strip_button("edit-clear-all-symbolic", "win.notebook-clear-all-outputs")
                 .upcast(),
+            debug.clone().upcast(),
         ]);
         let working = debug::Working::new(&root);
         root.prepend(&working.slot);
@@ -386,6 +417,7 @@ impl KernelStrip {
             interrupt,
             cancel,
             restart,
+            debug,
         }
     }
 

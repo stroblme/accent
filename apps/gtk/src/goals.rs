@@ -41,14 +41,16 @@ impl App {
         };
         let running = self.debugger.running();
         let debuggable = self.code_program().is_some();
+        // A notebook's Debug is on the kernel's strip (user decision 2026-11-19).
+        let cells = self.code_notebook().is_some();
         sidebar.set_code_visible(self.code_doc().is_some() || running);
         self.sync_kernel();
         self.name_kernel();
         if !running {
-            sidebar.clear_debug(debuggable);
+            sidebar.clear_debug(debuggable, cells);
             self.refill_watches();
         }
-        if running || debuggable {
+        if running || debuggable || cells {
             self.refill_breakpoints();
             self.refill_exceptions();
         }

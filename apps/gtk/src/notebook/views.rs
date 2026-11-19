@@ -111,7 +111,7 @@ impl NotebookTab {
             let at = model.position(id).expect("a cell of the model");
             Rc::new(CellView::new(
                 &model.cells()[at],
-                self.gutter.get(),
+                (self.gutter.get(), self.debug.marks()),
                 &self.zoom,
                 &self.declared,
             ))
@@ -287,6 +287,7 @@ impl NotebookTab {
         let query = self.occurrence.borrow().clone();
         crate::editor::paint_occurrences(&editor.buffer, &editor.occurrence, query.as_deref(), &[]);
         self.attach_cell(view, &editor);
+        self.attach_marks(id, &editor);
         editor
     }
 

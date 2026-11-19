@@ -140,6 +140,16 @@ drill_kernel() {
 	expect kernel kernel
 }
 
+# A notebook's cells debugged in its kernel, under a scratch HOME as the kernel's drill is.
+drill_notebook_debug() {
+	export HOME="$dir/home"
+	mkdir "$HOME"
+	python3 -c "import ipykernel, debugpy" 2>/dev/null ||
+		{ echo "SKIPPED the notebook debugger drill: no ipykernel or debugpy"; return 0; }
+	launch 120 ACCENT_BENCH_NOTEBOOK_DEBUG=nbdebug.ipynb >"$dir/notebook-debug"
+	expect notebook-debug nbdebug
+}
+
 drill_kernelspec() {
 	export HOME="$dir/home" JUPYTER_PATH="$dir/jupyter"
 	mkdir "$HOME"

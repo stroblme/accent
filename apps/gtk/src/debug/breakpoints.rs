@@ -1,4 +1,5 @@
-//! Breakpoints as source marks in a tab's gutter, which move with its text as it is edited.
+//! Breakpoints as source marks in a gutter, a code tab's or a notebook cell's, which move with
+//! its text as it is edited.
 
 use crate::diff;
 use crate::editor::Tab;
@@ -6,7 +7,53 @@ use accent_api::debug::{self, Placed};
 use gtk::glib;
 use gtk::prelude::*;
 use sourceview5::prelude::*;
+use std::cell::RefCell;
 use std::rc::Rc;
+
+/// What holds breakpoints' marks: a code tab, or a notebook's code cell.
+pub(crate) trait Gutter {
+    fn buffer(&self) -> &sourceview5::Buffer;
+    fn view(&self) -> &sourceview5::View;
+    fn breakpoints(&self) -> &RefCell<Vec<Breakpoint>>;
+    /// The diagnostics' icons laid again, around the breakpoints' ([`redraw`]).
+    fn remarked(&self);
+}
+
+impl Gutter for Tab {
+    fn buffer(&self) -> &sourceview5::Buffer {
+        &self.buffer
+    }
+
+    fn view(&self) -> &sourceview5::View {
+        &self.view
+    }
+
+    fn breakpoints(&self) -> &RefCell<Vec<Breakpoint>> {
+        &self.breakpoints
+    }
+
+    fn remarked(&self) {
+        self.remark_diagnostics();
+    }
+}
+
+impl<G: Gutter> Gutter for Rc<G> {
+    fn buffer(&self) -> &sourceview5::Buffer {
+        G::buffer(self)
+    }
+
+    fn view(&self) -> &sourceview5::View {
+        G::view(self)
+    }
+
+    fn breakpoints(&self) -> &RefCell<Vec<Breakpoint>> {
+        G::breakpoints(self)
+    }
+
+    fn remarked(&self) {
+        G::remarked(self);
+    }
+}
 
 /// A breakpoint the program has bound, or is yet to bind in a running session.
 const BREAKPOINT: &str = "breakpoint";
@@ -99,14 +146,14 @@ pub(crate) struct Breakpoint {
 
 impl Breakpoint {
     fn new(
-        tab: &Tab,
+        tab: &impl Gutter,
         start: &gtk::TextIter,
         set: debug::Breakpoint,
         unbound: bool,
         why: Option<String>,
     ) -> Self {
         let category = category(&set, unbound, false);
-        let mark = tab.buffer.create_source_mark(None, category, start);
+        let mark = tab.buffer().create_source_mark(None, category, start);
         Breakpoint {
             mark,
             set,
@@ -116,9 +163,9 @@ impl Breakpoint {
     }
 
     /// As it stands now: on its mark's line.
-    fn now(&self, tab: &Tab) -> debug::Breakpoint {
+    fn now(&self, tab: &impl Gutter) -> debug::Breakpoint {
         debug::Breakpoint {
-            line: tab.buffer.iter_at_mark(&self.mark).line().max(0) as u32,
+            line: tab.buffer().iter_at_mark(&self.mark).line().max(0) as u32,
             ..self.set.clone()
         }
     }
@@ -126,7 +173,7 @@ impl Breakpoint {
 
 /// Give `tab`'s view the categories, above the diagnostics' priority 2. GtkSourceView draws every
 /// icon on a line, the highest last, so a line gives its cell to one of them ([`redraw`]).
-pub(crate) fn install(tab: &Rc<Tab>) {
+pub(crate) fn install<G: Gutter + 'static>(tab: &Rc<G>) {
     let breakpoints = KINDS
         .into_iter()
         .flatten()
@@ -144,15 +191,15 @@ pub(crate) fn install(tab: &Rc<Tab>) {
             #[upgrade_or_default]
             move |_, mark| tooltip(&tab, mark)
         ));
-        tab.view
+        tab.view()
             .set_mark_attributes(category, &attributes, priority);
     }
 }
 
 /// What the mark says under the pointer: the paused line, or the breakpoint's settings and why
 /// the program has not bound it, where it said.
-fn tooltip(tab: &Tab, mark: &sourceview5::Mark) -> String {
-    let breakpoints = tab.breakpoints.borrow();
+fn tooltip(tab: &impl Gutter, mark: &sourceview5::Mark) -> String {
+    let breakpoints = tab.breakpoints().borrow();
     let Some(b) = breakpoints.iter().find(|b| b.mark == *mark) else {
         return "The program is paused here".to_string();
     };
@@ -198,9 +245,9 @@ pub(crate) fn on_line(buffer: &sourceview5::Buffer, line: i32) -> bool {
 
 /// `tab`'s breakpoints as they stand, by line, one a line: an edit can bring two together, and
 /// the first keeps the line.
-pub(crate) fn saved(tab: &Tab) -> Vec<debug::Breakpoint> {
+pub(crate) fn saved(tab: &impl Gutter) -> Vec<debug::Breakpoint> {
     let mut saved: Vec<debug::Breakpoint> = tab
-        .breakpoints
+        .breakpoints()
         .borrow()
         .iter()
         .map(|b| b.now(tab))
@@ -212,21 +259,21 @@ pub(crate) fn saved(tab: &Tab) -> Vec<debug::Breakpoint> {
 
 /// Replace `tab`'s breakpoints with `breakpoints`, those past the end dropped: the file may have
 /// lost their lines since they were set.
-pub(crate) fn place(tab: &Tab, breakpoints: &[debug::Breakpoint]) {
-    let mut marks = tab.breakpoints.borrow_mut();
+pub(crate) fn place(tab: &impl Gutter, breakpoints: &[debug::Breakpoint]) {
+    let mut marks = tab.breakpoints().borrow_mut();
     for b in marks.drain(..) {
-        tab.buffer.delete_mark(&b.mark);
+        tab.buffer().delete_mark(&b.mark);
     }
     for b in breakpoints {
-        if let Some(start) = tab.buffer.iter_at_line(b.line as i32) {
+        if let Some(start) = tab.buffer().iter_at_line(b.line as i32) {
             marks.push(Breakpoint::new(tab, &start, b.clone(), false, None));
         }
     }
 }
 
 /// Set what the breakpoint on `edited.line` does beside stopping there; false when none is.
-pub(crate) fn edit(tab: &Tab, edited: &debug::Breakpoint) -> bool {
-    let mut marks = tab.breakpoints.borrow_mut();
+pub(crate) fn edit(tab: &impl Gutter, edited: &debug::Breakpoint) -> bool {
+    let mut marks = tab.breakpoints().borrow_mut();
     match marks.iter_mut().find(|b| b.now(tab).line == edited.line) {
         Some(b) => {
             b.set = edited.clone();
@@ -261,10 +308,10 @@ pub(crate) fn put_back(tab: &Tab, lines: &[i32]) {
 
 /// Replace `tab`'s breakpoints with where the adapter holds them: a dot for each it bound, a ring
 /// for each it did not, saying why where it said, on the line it moved each to.
-pub(crate) fn bind(tab: &Tab, placed: &[Placed]) {
-    let mut marks = tab.breakpoints.borrow_mut();
+pub(crate) fn bind(tab: &impl Gutter, placed: &[Placed]) {
+    let mut marks = tab.breakpoints().borrow_mut();
     for b in marks.drain(..) {
-        tab.buffer.delete_mark(&b.mark);
+        tab.buffer().delete_mark(&b.mark);
     }
     let mut lines = Vec::new();
     for placed in placed {
@@ -272,7 +319,7 @@ pub(crate) fn bind(tab: &Tab, placed: &[Placed]) {
         if lines.contains(&line) {
             continue;
         }
-        if let Some(start) = tab.buffer.iter_at_line(line as i32) {
+        if let Some(start) = tab.buffer().iter_at_line(line as i32) {
             lines.push(line);
             let why = placed.message.clone().filter(|_| !placed.verified);
             let set = placed.breakpoint.clone();
@@ -285,28 +332,28 @@ pub(crate) fn bind(tab: &Tab, placed: &[Placed]) {
 /// line's cell from a breakpoint's dot or ring, which waits under it until the program moves on,
 /// and either from a diagnostic's icon (`diagnostics::render`). One drawn over another reads as
 /// neither.
-pub(crate) fn redraw(tab: &Tab) {
-    let mut marks = tab.breakpoints.borrow_mut();
+pub(crate) fn redraw(tab: &impl Gutter) {
+    let buffer = tab.buffer();
+    let mut marks = tab.breakpoints().borrow_mut();
     for b in marks.iter_mut() {
-        let at = tab.buffer.iter_at_mark(&b.mark);
-        let paused = !tab
-            .buffer
+        let at = buffer.iter_at_mark(&b.mark);
+        let paused = !buffer
             .source_marks_at_line(at.line(), Some(EXECUTION))
             .is_empty();
         let category = category(&b.set, b.unbound, paused);
         if b.mark.category() != category {
-            tab.buffer.delete_mark(&b.mark);
-            b.mark = tab.buffer.create_source_mark(None, category, &at);
+            buffer.delete_mark(&b.mark);
+            b.mark = buffer.create_source_mark(None, category, &at);
         }
     }
     drop(marks);
-    tab.remark_diagnostics();
+    tab.remarked();
 }
 
 /// Each breakpoint's 1-based line and its mark's category, as a drill reads them.
 #[cfg(feature = "bench")]
-pub(crate) fn shown(tab: &Tab) -> Vec<(u32, String)> {
-    let marks = tab.breakpoints.borrow();
+pub(crate) fn shown(tab: &impl Gutter) -> Vec<(u32, String)> {
+    let marks = tab.breakpoints().borrow();
     let mut shown: Vec<_> = marks
         .iter()
         .map(|b| (b.now(tab).line + 1, b.mark.category().to_string()))
@@ -316,17 +363,18 @@ pub(crate) fn shown(tab: &Tab) -> Vec<(u32, String)> {
 }
 
 /// A breakpoint on `line`, or none there any more.
-pub(crate) fn toggle(tab: &Tab, line: u32) {
-    let mut marks = tab.breakpoints.borrow_mut();
+pub(crate) fn toggle(tab: &impl Gutter, line: u32) {
+    let buffer = tab.buffer();
+    let mut marks = tab.breakpoints().borrow_mut();
     let (here, rest): (Vec<_>, Vec<_>) = marks
         .drain(..)
-        .partition(|b| tab.buffer.iter_at_mark(&b.mark).line() == line as i32);
+        .partition(|b| buffer.iter_at_mark(&b.mark).line() == line as i32);
     *marks = rest;
     for b in &here {
-        tab.buffer.delete_mark(&b.mark);
+        buffer.delete_mark(&b.mark);
     }
     if here.is_empty()
-        && let Some(start) = tab.buffer.iter_at_line(line as i32)
+        && let Some(start) = buffer.iter_at_line(line as i32)
     {
         let set = debug::Breakpoint::at(line);
         marks.push(Breakpoint::new(tab, &start, set, false, None));

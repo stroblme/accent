@@ -638,8 +638,13 @@ fn strip(app: &App) -> String {
 /// `bench kernel <said>cell <n+1> count=<label> outputs=<each>`, the outputs as the model holds
 /// them, and the view's own count where it differs.
 fn print_cell(tab: &NotebookTab, n: usize, said: &str) {
+    print_cell_as(tab, n, "kernel", said);
+}
+
+/// [`print_cell`] on a `bench <drill>` line.
+pub(super) fn print_cell_as(tab: &NotebookTab, n: usize, drill: &str, said: &str) {
     let Some((count, outputs, shown)) = tab.bench_cell(n) else {
-        return println!("bench kernel {said}cell {} missing", n + 1);
+        return println!("bench {drill} {said}cell {} missing", n + 1);
     };
     let each: Vec<String> = outputs.iter().map(describe).collect();
     let outputs = match each.is_empty() {
@@ -651,7 +656,7 @@ fn print_cell(tab: &NotebookTab, n: usize, said: &str) {
         false => format!(" shown={shown}"),
     };
     println!(
-        "bench kernel {said}cell {} count={count} outputs={outputs}{differs}",
+        "bench {drill} {said}cell {} count={count} outputs={outputs}{differs}",
         n + 1
     );
 }

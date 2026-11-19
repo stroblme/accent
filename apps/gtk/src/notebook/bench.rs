@@ -57,6 +57,21 @@ impl NotebookTab {
     }
 
     /// Select cell `n` and give it the keyboard.
+    /// The cell its debugged run is paused in and the line, each from 1: the cell whose marks
+    /// hold the paused line's.
+    pub fn bench_paused_at(&self) -> Option<(usize, u32)> {
+        self.views
+            .borrow()
+            .iter()
+            .enumerate()
+            .find_map(|(at, view)| {
+                let marks = view.editor()?.marks.clone()?;
+                let mark = marks.execution.borrow().clone()?;
+                let buffer = crate::debug::breakpoints::Gutter::buffer(&*marks);
+                Some((at + 1, buffer.iter_at_mark(&mark).line() as u32 + 1))
+            })
+    }
+
     pub fn bench_select(self: &Rc<Self>, n: usize) {
         let id = self.views.borrow().get(n).map(|v| v.id);
         if let Some(id) = id {

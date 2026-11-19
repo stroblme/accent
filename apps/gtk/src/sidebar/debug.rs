@@ -659,9 +659,10 @@ impl Debug {
     }
 
     /// No session: nothing of one is left on screen, and while the tab in front can be debugged
-    /// (`debuggable`) the strip offers Start Debugging over the breakpoints.
-    pub(super) fn set_idle(&self, debuggable: bool) {
-        self.strip.set_visible(debuggable);
+    /// the strip offers Start Debugging (`strip`) over Watch and the breakpoints (`sections`).
+    pub(super) fn set_idle(&self, strip: bool, sections: bool) {
+        let debuggable = sections;
+        self.strip.set_visible(strip);
         self.working.say("Not running", false);
         self.controls.session.set_visible(false);
         self.controls.start.set_visible(true);
@@ -775,19 +776,7 @@ fn strip() -> (gtk::Box, Working, Controls) {
     ] {
         session.append(button);
     }
-    // The Git pane's Commit: a text button in the accent colour, one word as Commit is, after
-    // the Debug Console and 6 px from it as Commit is from Sync. The greyed steps it replaces had
-    // nothing to offer before a program runs.
-    let start = gtk::Button::builder()
-        .label("Debug")
-        .tooltip_text(crate::actions::label_of("win.debug-start"))
-        .action_name("win.debug-start")
-        .focus_on_click(false)
-        .margin_start(6)
-        // At its own height, as the icon buttons are, rather than stretched to a taller row.
-        .valign(gtk::Align::Center)
-        .build();
-    start.add_css_class("suggested-action");
+    let start = start_button("win.debug-start");
     let strip = strip_of(&[
         session.clone().upcast(),
         strip_button("dap-console-symbolic", "win.debug-console").upcast(),
@@ -803,6 +792,23 @@ fn strip() -> (gtk::Box, Working, Controls) {
         start,
     };
     (strip, working, controls)
+}
+
+/// Debug, on the window's `action`: the Git pane's Commit, a text button in the accent colour, one
+/// word as Commit is, after the strip's last button and 6 px from it as Commit is from Sync. The
+/// greyed steps it replaces had nothing to offer before a program runs.
+pub(super) fn start_button(action: &str) -> gtk::Button {
+    let start = gtk::Button::builder()
+        .label("Debug")
+        .tooltip_text(crate::actions::label_of(action))
+        .action_name(action)
+        .focus_on_click(false)
+        .margin_start(6)
+        // At its own height, as the icon buttons are, rather than stretched to a taller row.
+        .valign(gtk::Align::Center)
+        .build();
+    start.add_css_class("suggested-action");
+    start
 }
 
 /// A strip's flat icon button on the window's `action`, named by its label. A press leaves the

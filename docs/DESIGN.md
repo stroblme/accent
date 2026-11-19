@@ -494,6 +494,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Shut Down Kernel is otherwise the palette's.
   No words say what the kernel does: Not started, Starting…, Idle and Busy are the strip's description, for a screen reader, and a kernel that ended says why in its toast (Notebook).
   While a debug session runs the pane keeps the debugger's strip, and the kernel's commands stay in the palette.
+  A notebook whose cells can be debugged (Notebook) has the debugger's Debug at the end of the kernel's strip, which then runs Debug Cell, in the one row with the dropdown and the kernel's buttons, and Watch and Breakpoints under it, the debugger's own strip staying away until a session runs (user decision 2026-11-19).
 - **Call Stack** lists the threads, counted, the one that stopped open on its calls, innermost first, and the innermost selected; another thread's calls are asked for as it is opened.
   A call is its function's name with its file and line dimmed beside it, the whole row dimmed for code outside the vault.
   One click on a call shows it (Debugger), as a result list's row opens; a dim "Running" stands in while the program runs.
@@ -1604,6 +1605,16 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - `input()` asks under its cell: an entry with the prompt before it, fading in, a password's characters hidden, Return answering; in the notebook in front it takes the keyboard and is brought into view.
 - Interrupt Kernel sends the kernel's process group SIGINT, as Jupyter does, or an `interrupt_request` on its control channel for a kernelspec whose `interrupt_mode` is `message`, and ipykernel drops the runs waiting behind the one it stops; Restart Kernel ends it and starts another, the cells keeping their outputs and counts; Shut Down Kernel ends it, and the next run starts a new one.
   Stop, on the kernel's strip and a running cell's buttons, is Interrupt Kernel, which keeps what the kernel holds, and Shut Down Kernel while the kernel starts (user decision 2026-10-27): stopping only the runs waiting is not offered, as the kernel holds them once sent and Jupyter takes none back.
+- **Debugging** a Python notebook's code cell happens in the notebook's own kernel, as VS Code's Debug Cell does it (user decisions 2026-11-19).
+  Debug Cell, on the cell's More menu, the kernel strip's Debug and Start Debugging (`Ctrl+F5`) while the notebook is in front, runs the selected cell with the window's debugger attached to the kernel, which it starts first if need be, and lets go once the run is done, so the kernel and what it holds live on.
+  Every code cell of a notebook that can be debugged has a code tab's marks column, and its markdown cells' text moves by the column's width so the cells' text lines up.
+  A click in the column, or Toggle Breakpoint at the cell's caret, puts a breakpoint on that line.
+  The kernel names each cell's file by the code the cell last ran (ipykernel's `dumpCell`), so a breakpoint stops in a function a cell defined when another cell calls it, and a cell edited since it ran keeps its old code's stops until it runs again.
+  A stop brings the notebook to the front of its pane with the caret and the keyboard on the paused line of its cell, which is marked as a file's is, and Call Stack names a cell's call by the notebook and the cell's place, as in `run.ipynb cell 2:3`.
+  Debug Cell is refused while the kernel runs or waits for cells ("Cannot debug the cell: the kernel is busy"), and Run Cell and Run All wait for a debugged cell's end and then run undebugged.
+  Stop Debugging and Interrupt Kernel let the debugger go before they interrupt the kernel, so the cell ends with `KeyboardInterrupt` and the kernel keeps what it holds, because a SIGINT while debugpy holds a cell at a breakpoint leaves the kernel answering nothing (measured 2026-11-19).
+  The kernel's Python needs debugpy, which ipykernel 6 and later install, and a missing one is named ("Cannot debug the cell: debugpy is not installed in .venv/bin/python"), and marimo's notebooks and other languages' are not debugged.
+- Every ipykernel starts with `-Xfrozen_modules=off`, as ipykernel's own kernelspec starts it, so debugpy can stop in the standard library's frozen modules, at no measurable cost to its start (0.66 s against 0.67 s, the median of ten starts each, 2026-11-19).
 - A run is not an edit: it costs no undo step, marks the notebook changed and saves with it (user decision 2026-10-20), its cells' outputs and counts written as nbformat writes them and the notebook's metadata left as it was.
   Clear Outputs and Clear All Outputs are edits, which Undo walks back.
 - A kernel that ends on its own says so ("The kernel ended: <why>", its last words), and a link that drops ends it in the window; the cells it ran or held keep what they had.
@@ -1821,6 +1832,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - A breakpoint is a foreground symbolic glyph, never red, one size whatever its kind, as VS Code's: a dot, a dot with `=` for a condition or a hit count, a diamond for a log message, and each as an outline for one the program has not bound, its tooltip saying what is set and why it is not bound where the program said.
   The dot takes its line's cell from a diagnostic's icon, which GtkSourceView would draw under it rather than hide; the line's message and underline stay.
 - **Start Debugging** (`Ctrl+F5`) runs the Code pane's Python file — the one in front, else the last one in front (Code) — else the program last debugged in the window, which the window remembers for its life and never in the vault's session.
+  With a Python notebook as the Code pane's tab it is Debug Cell, a session like a program's whose debugger is the kernel's own debugpy, reached through the kernel's control channel, so the strip, the sections, the Debug Console and the keys are the same and the vault's files' breakpoints hold in it too (Notebook).
   The vault's tabs with edits are written first, as VS Code's `debug.saveBeforeStart` does: the program runs what is on disk.
   One session at a time: a second Start says "Cannot start debugging: a program is already being debugged".
   The sidebar stays on the pane it shows, and hidden if it was: the session is in the Code pane, which its button in the switcher brings up (user decision 2026-10-18).
@@ -1832,6 +1844,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A breakpoint toggled while the program runs tells it the file's breakpoints, all of them, and the marks move to where it holds them; the program runs the text it started with, so edits since are not its business.
   One toggled while it starts is told once it runs, the adapter's answer for the lines it was launched with leaving the marks be, and an answer that does not come leaves them as the reader set them.
 - **Restart Debugging** is Stop, then Start with the same program once the session has ended: debugpy has no restart of its own.
+  A notebook's cell (Notebook) is debugged again once its interrupted run has ended.
   **Stop Debugging** ends the program, then the adapter.
 - The session's end — the program's, Stop's, or the vault's link dropping — takes Call Stack, Variables and the mark away, the strip offering Debug again over Breakpoints while the tab in front can be debugged and the pane otherwise staying only for goals; a ring is a dot again, for the next session to bind.
 - A failure is a toast under one key, so the next takes its place: "Cannot start debugging: <why>", the why being the adapter's own last words where it exited before answering — Python's `No module named debugpy`, once — and "The debug session ended: <why>" for an adapter that died under a running program.
@@ -2231,6 +2244,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 - Insert Markdown Cell Below, Delete Cell, Change Cell to Code, to Markdown and to Raw (an `.ipynb`'s) and Join with Next Cell are unbound; every cell command acts on the selected cell, Split Cell at the caret, and is in the palette and on the cell's buttons and More menu.
 - Run Cell is `Ctrl+Return`, Insert Line Below's chord, which a notebook in front answers, and Run Cell and Advance `Shift+Return`, the notebook's own key: Jupyter's and VS Code's (user decision 2026-10-20).
   Run All, Interrupt Kernel, Restart Kernel, Shut Down Kernel, Clear Outputs and Clear All Outputs are unbound and in the palette; Clear Outputs is on the cell's More menu beside Run Cell, Shut Down Kernel only in the palette but as the kernel strip's Stop while a kernel starts, and the rest on that strip, Interrupt Kernel as its Stop.
+  Debug Cell is unbound too, on the cell's More menu after Run Cell and the kernel strip's Debug, Start Debugging's `Ctrl+F5` doing it while the notebook is in front.
 
 ### History
 
@@ -2373,6 +2387,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 ### Debugging
 
 - Start Debugging `Ctrl+F5`, Toggle Breakpoint `Ctrl+F9`, Remove All Breakpoints and Add to Watch (unbound).
+  With a Python notebook in front `Ctrl+F5` is Debug Cell, and `Ctrl+F9` takes the selected cell's caret line.
 - While a session runs, VS Code's keys (user decision 2026-10-17): Continue `F5`, Stop Debugging `Shift+F5`, Restart Debugging `Ctrl+Shift+F5`, Pause `F6`, Step Over `F10`, Step Into `F11`, Step Out `Shift+F11`.
   They are the Code pane's strip and the palette's as well, each greyed on the strip and out of the palette while the session cannot take it.
 - Outside a session the seven mean nothing, so `F5` presents, `F10` opens the primary menu, `F11` goes fullscreen and `F6` is GtkPaned's (Widget chords).
