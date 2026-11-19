@@ -8,8 +8,9 @@ use crate::markdown::{clicked_box, toggle_box};
 use std::ops::Range;
 use unicode_width::UnicodeWidthStr;
 
-/// What a click on the checkbox on line `line` (1-based) of `text` writes, as a markdown note's
-/// does ([`crate::markdown::click_box`]): an open box ticked `X`, a `[-]` or `[X]` one opened.
+/// What a click on the checkbox on line `line` (1-based) of `text` writes, as org's
+/// `org-toggle-checkbox` writes it ([`crate::markdown::click_box`]): an open or `[-]` box ticked
+/// `X`, a ticked one opened.
 pub fn click_box(text: &str, line: u32) -> Option<(usize, char)> {
     clicked_box(text, line, &[' ', '\t'], b'-', 'X')
 }
@@ -93,7 +94,7 @@ mod tests {
     }
 
     #[test]
-    fn a_click_ticks_an_open_checkbox_and_opens_any_other() {
+    fn a_click_opens_a_ticked_checkbox_and_ticks_any_other() {
         let text = "* Plan\n- [ ] open\n- [-] doing\n  + [X] done\n> - [ ] quote\n";
         let ticks: Vec<_> = (1..=5).map(|line| click_box(text, line)).collect();
         assert_eq!(
@@ -101,7 +102,7 @@ mod tests {
             [
                 None,
                 Some((10, 'X')),
-                Some((21, ' ')),
+                Some((21, 'X')),
                 Some((35, ' ')),
                 None
             ]

@@ -816,7 +816,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - A render that panics shows "Cannot Preview Note.md" in the page's place, over what the panic said and with Retry, as a file that fails to load does (Loading).
   Any later render of the note tries again too, and the page comes back once one goes through.
 - A click on a link into the vault is followed as a link is; one out of it goes to the system when Go to Definition's would (`markdown::is_url`); either only on a release that selected nothing.
-- A click on a task's box flips it in the note as Obsidian's reading view does, an open box ticked and any other (`[x]`, `[/]`, org's `[-]`) opened, and the pointer over a box is a hand (`markdown::click_box`).
+- A click on a task's box flips it in the note, a done box opened and an open or in-progress one (`[/]`, org's `[-]`) ticked as org's `org-toggle-checkbox` ticks it (user decision 2026-11-19), and the pointer over a box is a hand (`markdown::click_box`).
   It is one undo step in the note's buffer, which the save and the page follow as they follow typing, and the page keeps the keyboard and so is not pulled to the note's caret.
   A note open in a terminal editor has its file written instead, a presented one keeps its boxes as they are, and the page has no key for a box, as it has none for a link.
 - A wikilink without an alias reads as in Obsidian's reading view, its target's headings and block apart: `[[Note#Part#Sub]]` as `Note > Part > Sub`, `[[#Part]]` as `Part`; printouts, the HTML export and Android's rendered note show it so too.

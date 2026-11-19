@@ -200,7 +200,8 @@ mod tests {
         }
     }
 
-    /// The tick's range is in UTF-16 units, past an emoji too, and an org note ticks `X`.
+    /// The tick's range is in UTF-16 units, past an emoji too, and an org note ticks `X`, its
+    /// `[-]` too.
     #[test]
     fn a_tapped_box_is_its_ticks_range_in_utf16() {
         let edit = click_box("🙂\n- [ ] a\n".to_string(), "n.md".into(), 2).unwrap();
@@ -209,7 +210,7 @@ mod tests {
             (6, 7, "x")
         );
         let edit = click_box("- [-] a\n".to_string(), "n.org".into(), 1).unwrap();
-        assert_eq!((edit.range.start, edit.text.as_str()), (3, " "));
+        assert_eq!((edit.range.start, edit.text.as_str()), (3, "X"));
         assert!(click_box("- a\n".to_string(), "n.md".into(), 1).is_none());
     }
 

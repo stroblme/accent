@@ -30,10 +30,11 @@ pub(crate) fn toggle_box(line: &str, lead: &[char], doing: u8, done: u8) -> Stri
     format!("{head}{marker}[{}]{}", next as char, &body[3..])
 }
 
-/// What a click on the box of the task item on line `line` (1-based) of `text` writes, as
-/// Obsidian's reading view writes it: an open box is ticked `x`, and any other (`[x]`, `[X]`,
-/// `[/]`) is opened. The byte of its tick and the tick it becomes, the rest of the line as it was;
-/// `None` where no box follows the line's indentation, quote markers and list markers.
+/// What a click on the box of the task item on line `line` (1-based) of `text` writes: a done
+/// box (`[x]`, `[X]`) is opened, and any other (`[ ]`, `[/]`) ticked `x`, as org's
+/// `org-toggle-checkbox` ticks an in-progress one (user decision 2026-11-19). The byte of its
+/// tick and the tick it becomes, the rest of the line as it was; `None` where no box follows the
+/// line's indentation, quote markers and list markers.
 pub fn click_box(text: &str, line: u32) -> Option<(usize, char)> {
     clicked_box(text, line, &[' ', '\t', '>'], b'/', 'x')
 }
@@ -60,7 +61,10 @@ pub(crate) fn clicked_box(
         at += rest.len() - rest.trim_start_matches(lead).len();
         at += marker(&row[at..])?;
         if let Some(tick) = tick(&row[at..], doing) {
-            let next = if tick == b' ' { done } else { ' ' };
+            let next = match tick {
+                b'x' | b'X' => ' ',
+                _ => done,
+            };
             return Some((start + at + 1, next));
         }
     }
@@ -127,10 +131,10 @@ mod tests {
         }
     }
 
-    /// An open box is ticked and any other opened, the rest of the note byte for byte as it was;
+    /// A done box is opened and any other ticked, the rest of the note byte for byte as it was;
     /// a line without a box after its markers is left alone.
     #[test]
-    fn a_click_ticks_an_open_box_and_opens_any_other() {
+    fn a_click_opens_a_done_box_and_ticks_any_other() {
         let text = "# T\n- [ ] open\n- [x] done\n- [X] Done\n  * [/] doing\r\n> 1. [ ] quoted\n\
                     - - [ ] nested\n- > - [x] deep\n[ ] bare\n- item\n- [ ]word\n";
         let clicked = |line| {
@@ -148,7 +152,7 @@ mod tests {
                 Some("- [x] open".into()),
                 Some("- [ ] done".into()),
                 Some("- [ ] Done".into()),
-                Some("  * [ ] doing".into()),
+                Some("  * [x] doing".into()),
                 Some("> 1. [x] quoted".into()),
                 Some("- - [x] nested".into()),
                 Some("- > - [ ] deep".into()),

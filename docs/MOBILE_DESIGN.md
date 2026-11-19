@@ -138,7 +138,7 @@ Provide a visible control for each action that otherwise depends on a gesture.
 | Tap another reader's comment on a page | Shows it with its author in a dialog | The mark pdfium paints |
 | Back on a tag's notes | Returns to the tags | The tag's heading |
 | Tap a tag in a note | Opens Browse on that tag's notes | The tag, in the accent |
-| Tap a task's box in a note | Ticks an open box and opens any other | The box |
+| Tap a task's box in a note | Opens a done box and ticks an open or in-progress one | The box |
 | Long press on a PDF page | Selects the word under the finger; a drag grows it, and the handles move either end | The handles and the floating toolbar it raises |
 | Long press on a note | Selects the text under the finger with the WebView's own handles, as a page of prose does everywhere else on the platform | The handles it raises |
 | Tap an image in a note | Opens it on its own screen, to zoom and invert; an image inside a link follows the link | The image |
