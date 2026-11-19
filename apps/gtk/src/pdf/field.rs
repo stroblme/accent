@@ -3,9 +3,11 @@
 //! tooltip over them.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
-use accent_core::pdf::{self, FieldKind, FormField};
+use accent_core::pdf::{self, FieldKind, FieldValue, FormField};
 
+use super::protocol::Request;
 use super::tab::PdfTab;
 use super::{Mode, PdfView};
 
@@ -59,6 +61,58 @@ impl PdfTab {
             Some((page, tip_of(field)?, field.rect))
         })??;
         Some((tip, self.view.widget_rect(page, &rect)?))
+    }
+}
+
+impl PdfTab {
+    /// A click at a point of the reading view: a field a reader fills in under it takes it, and
+    /// is filled in as its kind is, a check box toggled, a radio button turned on, or off again
+    /// where its group lets it. Whether a field took it.
+    pub(super) fn click_field(self: &Rc<Self>, view: &PdfView, x: f64, y: f64) -> bool {
+        let Some(field) = self.over_field(view, (x, y), |_, f| f.clone()) else {
+            return false;
+        };
+        if !fillable(&field) {
+            return false;
+        }
+        match &field.kind {
+            FieldKind::Check { on, checked } => {
+                self.fill_state(&field, (!checked).then(|| on.clone()))
+            }
+            FieldKind::Radio {
+                on,
+                checked,
+                no_toggle_off,
+            } => match (checked, no_toggle_off) {
+                (true, true) => {}
+                (true, false) => self.fill_state(&field, None),
+                (false, _) => self.fill_state(&field, Some(on.clone())),
+            },
+            _ => {}
+        }
+        true
+    }
+
+    /// Turn `field`'s check box or radio group on in the state `on`, or off. What the tab knows of
+    /// its widgets says so at once, the pages being read again once the fill has landed, so a
+    /// second click goes on from this one.
+    fn fill_state(&self, field: &FormField, on: Option<Vec<u8>>) {
+        for fields in self.fields.borrow_mut().values_mut() {
+            for f in fields.iter_mut().filter(|f| f.field == field.field) {
+                if let FieldKind::Check { on: state, checked }
+                | FieldKind::Radio {
+                    on: state, checked, ..
+                } = &mut f.kind
+                {
+                    *checked = on.as_ref() == Some(state);
+                }
+            }
+        }
+        let value = FieldValue::On(on);
+        self.ask(Request::Fill {
+            field: field.field,
+            value,
+        });
     }
 }
 

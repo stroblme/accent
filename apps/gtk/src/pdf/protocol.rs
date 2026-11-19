@@ -288,6 +288,11 @@ pub enum Request {
         matrix: pdf::Matrix,
         names: Vec<u32>,
     },
+    /// Fill in the form field `field`, the terminal field's object, with `value`, as one step.
+    Fill {
+        field: pdf::Ref,
+        value: pdf::FieldValue,
+    },
     /// Put blank pages in, take pages out or move them, one edit after another, as one step.
     Pages(Vec<pdf::PageEdit>),
     /// Put the pages of the PDF at `source`, called `name`, in at page `at`, after the last

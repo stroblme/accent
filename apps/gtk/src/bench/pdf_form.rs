@@ -1,9 +1,10 @@
 //! The form drill, `ACCENT_BENCH_PDF=form`: `accent_pdf`'s fixture form written into the vault
 //! as `form-drill.pdf`, the fields of its first page as the tab reads them, and through XTEST the
 //! pointer over each with the tooltip a reader is shown, the page pictured as `form.png` under
-//! `ACCENT_BENCH_SHOTS=<dir>`. Takes the file away again.
+//! `ACCENT_BENCH_SHOTS=<dir>`; then a check box ticked and a radio button picked by real clicks,
+//! and the pick undone, each against the file. Takes the file away again.
 
-use super::pdf::opened;
+use super::pdf::{opened, written};
 use super::*;
 use accent_core::pdf::{FieldKind, FormField};
 
@@ -109,8 +110,54 @@ pub(super) fn bench_pdf_form(app: &Rc<App>) {
             .collect();
         println!("bench form tips {}", tips.join(" "));
         shot(&view, "form.png");
+
+        let click = async |f: &FormField| {
+            if let Some((x, y)) = middle(f).map(on_screen) {
+                super::git::xtest(&format!("move {x:.0} {y:.0}; down; up; sleep 0.3")).await;
+            }
+        };
+        let save = async || {
+            pdf.flush();
+            written(&app).await;
+        };
+        let named = |name: &str| fields.iter().find(|f| f.name == name).cloned();
+        let (Some(agree), Some(small)) = (named("agree"), named("size")) else {
+            println!("bench form unnamed");
+            return quit(&app, &path);
+        };
+        click(&agree).await;
+        save().await;
+        println!("bench form ticked {}", filed(&path));
+        click(&small).await;
+        click(&small).await;
+        save().await;
+        println!("bench form picked {}", filed(&path));
+        let _ = WidgetExt::activate_action(&app.window, "win.pdf-undo", None);
+        save().await;
+        println!("bench form undone {}", filed(&path));
         quit(&app, &path);
     });
+}
+
+/// The check boxes, radio buttons and text fields of the first page of `path` as its file says
+/// them, in `/Annots` order: `name=value`.
+fn filed(path: &std::path::Path) -> String {
+    let Ok(doc) = accent_core::pdf::PdfDoc::open(path) else {
+        return "unreadable".to_string();
+    };
+    let fields = doc.fields(0).unwrap_or_default();
+    let said: Vec<String> = (fields.iter())
+        .filter_map(|f| {
+            let value = match &f.kind {
+                FieldKind::Check { checked, .. } => checked.to_string(),
+                FieldKind::Radio { checked, .. } => checked.to_string(),
+                FieldKind::Text { value, .. } if !value.is_empty() => format!("{value:?}"),
+                _ => return None,
+            };
+            Some(format!("{}={value}", f.name))
+        })
+        .collect();
+    said.join(" ")
 }
 
 fn quit(app: &Rc<App>, path: &std::path::Path) {

@@ -64,6 +64,13 @@ pub enum Step {
         at: Ref,
         kept: pdf::Typed,
     },
+    /// A form field was filled in: `kept` is each object the fill wrote as it was before, and
+    /// once Undo has put those back, as the fill wrote them, for Redo; `areas` are the pages it
+    /// changed and where.
+    Filled {
+        kept: Vec<(Ref, accent_pdf::Object)>,
+        areas: Vec<(usize, pdf::Rect)>,
+    },
     /// A page was put in, taken out or moved. A delete, and an import, keep the pages they take
     /// out, which Undo and Redo put back: the page objects stay in the file, so each comes back
     /// as itself, its ink, links and bookmarks into it included. `id` names the step to whatever
@@ -362,6 +369,20 @@ impl Ink {
         );
     }
 
+    /// Fill the field `field` in with `value`, as a step of its own: the pages it changed and
+    /// where.
+    pub fn fill(
+        &mut self,
+        doc: &mut PdfDoc,
+        field: Ref,
+        value: &pdf::FieldValue,
+    ) -> Result<Vec<(usize, pdf::Rect)>> {
+        let pdf::Filled { kept, areas } = doc.fill(field, value)?;
+        let changed = areas.clone();
+        self.record(Step::Filled { kept, areas }, false);
+        Ok(changed)
+    }
+
     /// Put a page in, take one out or move one, as a step of its own, or `joined` to the one
     /// before, as several pages deleted or moved together are: Undo takes it back as it takes
     /// back a stroke. A delete keeps the page it takes out of the page tree, so its Undo puts
@@ -520,6 +541,14 @@ impl Ink {
                 self.edit(doc, made, kept.as_mut())?;
                 return Ok(vec![Walked::Pages(made, *id)]);
             }
+            // Either way, the objects it wrote swap with the ones kept.
+            (Step::Filled { kept, areas }, _) => {
+                doc.swap(kept)?;
+                return Ok(areas
+                    .iter()
+                    .map(|&(page, area)| Walked::Ink(page, area))
+                    .collect());
+            }
             // Either way, what it says swaps with what was kept.
             (Step::Retyped { page, at, kept }, _) => {
                 let (was, area) = doc.retype(*page, *at, &kept.text, kept.style)?;
@@ -642,7 +671,7 @@ impl Batch {
             (Step::Drawn { page, .. }, false) | (Step::Erased { page, .. }, true) => {
                 Batch::Off(*page)
             }
-            (Step::Paged { .. } | Step::Retyped { .. }, _) => return None,
+            (Step::Paged { .. } | Step::Retyped { .. } | Step::Filled { .. }, _) => return None,
         })
     }
 }

@@ -6,6 +6,7 @@ use std::rc::Rc;
 use accent_core::pdf::{self, LinkTarget, link_with_alias};
 use adw::prelude::*;
 
+use super::field;
 use super::protocol::Request;
 use super::tab::PdfTab;
 use super::{PdfView, Span};
@@ -147,9 +148,9 @@ impl PdfTab {
         self.view.set_selection(Vec::new());
     }
 
-    /// On click release, open the note behind a highlight or pin comments. Link presses take
-    /// priority; Ctrl invokes Go to Source when enabled. Ignore clicks with a tool active
-    /// because the gesture belongs to that tool.
+    /// On click release, fill in a form field, open the note behind a highlight or pin comments.
+    /// Link presses take priority over all but a field; Ctrl invokes Go to Source when enabled.
+    /// Ignore clicks with a tool active because the gesture belongs to that tool.
     pub(super) fn clicked_highlight(
         self: &Rc<Self>,
         view: &PdfView,
@@ -157,10 +158,15 @@ impl PdfTab {
         y: f64,
         state: gtk::gdk::ModifierType,
     ) {
-        if view.mode() != super::Mode::Read || self.link_at(view, x, y).is_some() {
+        if view.mode() != super::Mode::Read {
             return;
         }
-        if state.contains(crate::platform::PRIMARY_MODIFIER) {
+        let primary = state.contains(crate::platform::PRIMARY_MODIFIER);
+        // A form field takes the click before a link under it, as the topmost widget does.
+        if (!primary && self.click_field(view, x, y)) || self.link_at(view, x, y).is_some() {
+            return;
+        }
+        if primary {
             self.pointed.set(view.page_point(x, y));
             let _ = view.activate_action("win.pdf-go-to-source", None);
             return;
@@ -178,9 +184,13 @@ impl PdfTab {
         }
     }
 
-    /// A press on the page: drop the selection, and follow a link if there is one under it.
+    /// A press on the page: drop the selection, and follow a link if there is one under it and
+    /// no form field over it, which takes the click instead.
     pub(super) fn click(self: &Rc<Self>, view: &PdfView, x: f64, y: f64) {
         self.clear_selection();
+        if self.over_field(view, (x, y), |_, f| field::fillable(f)) == Some(true) {
+            return;
+        }
         let Some(target) = self.link_at(view, x, y) else {
             return;
         };

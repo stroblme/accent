@@ -1,10 +1,11 @@
 //! Form fields (ISO 32000-1 §12.7) as a reader fills them in: each widget of a page with the
 //! field it shows, read by `accent_pdf`, and what kind of field that is.
 
-use accent_pdf::{Object, Ref, Widget, text_string};
+use accent_pdf::{Dict, Object, Ref, Widget, text_string};
 
+use super::cos::{Objects, name};
 use super::{PdfDoc, Rect};
-use crate::Result;
+use crate::{Error, Result};
 
 /// `/Ff` bits (ISO 32000-1 Tables 221, 226, 228 and 230).
 const READ_ONLY: u32 = 1;
@@ -113,6 +114,21 @@ impl Da {
     }
 }
 
+/// What a reader fills a field with.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FieldValue {
+    /// A check box or a radio button on, in the state named, or off.
+    On(Option<Vec<u8>>),
+}
+
+/// What a fill wrote: each object it changed as it was before, which its Undo puts back, and each
+/// page it changed with the box that covers what changed there.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Filled {
+    pub kept: Vec<(Ref, Object)>,
+    pub areas: Vec<(usize, Rect)>,
+}
+
 impl PdfDoc {
     /// The widgets of `page` with their fields, in `/Annots` order.
     pub fn fields(&self, page: usize) -> Result<Vec<FormField>> {
@@ -120,6 +136,152 @@ impl PdfDoc {
         let widgets = self.reading(|doc| doc.fields(at))?;
         let (_, height) = self.page_size(page)?;
         Ok(widgets.into_iter().map(|w| field_of(w, height)).collect())
+    }
+
+    /// The terminal field `field` filled with `value`, as pdf.js saves a fill: a check box's or a
+    /// radio group's `/V` the state turned on, or `/Off`, and `/AS` on each of its widgets that
+    /// state where the widget draws it, `/Off` where it does not. The document is opened again
+    /// once.
+    pub fn fill(&mut self, field: Ref, value: &FieldValue) -> Result<Filled> {
+        let widgets = self.cos.widgets_of(field)?;
+        let kept = match value {
+            FieldValue::On(on) => self.cos.put_state(field, &widgets, on.as_deref())?,
+        };
+        let areas = self.areas_of(&widgets)?;
+        self.reopen()?;
+        Ok(Filled { kept, areas })
+    }
+
+    /// The objects `kept` holds put back as they are there, each taking in its place what it
+    /// replaces: a fill walked back by Undo, or forward again by Redo. The document is opened
+    /// again once.
+    pub fn swap(&mut self, kept: &mut [(Ref, Object)]) -> Result<()> {
+        for (at, object) in kept.iter_mut() {
+            let now = self.cos.get(*at)?;
+            self.cos.update.set(*at, std::mem::replace(object, now));
+        }
+        self.reopen()
+    }
+
+    /// Each page `widgets` are on, with the box round those on it, in top-left page points.
+    fn areas_of(&self, widgets: &[Ref]) -> Result<Vec<(usize, Rect)>> {
+        let mut areas: Vec<(usize, Rect)> = Vec::new();
+        for &widget in widgets {
+            let Some(page) = self.cos.page_of(widget)? else {
+                continue;
+            };
+            let dict = self.cos.dict(widget)?;
+            let Some(file) = dict.get(b"Rect").and_then(|r| self.cos.area(r)) else {
+                continue;
+            };
+            let (_, height) = self.page_size(page)?;
+            let rect = Rect::from_corners(
+                (file.left, height - file.bottom),
+                (file.right, height - file.top),
+            );
+            match areas.iter_mut().find(|(p, _)| *p == page) {
+                Some((_, area)) => *area = area.union(rect),
+                None => areas.push((page, rect)),
+            }
+        }
+        Ok(areas)
+    }
+}
+
+impl Objects {
+    /// The widgets of the terminal field `field`: its `/Kids`, or itself, a field merged with its
+    /// only widget.
+    pub(super) fn widgets_of(&self, field: Ref) -> Result<Vec<Ref>> {
+        let dict = self.dict(field)?;
+        let kids = match dict.get(b"Kids") {
+            Some(kids) => self.resolve(kids)?,
+            None => return Ok(vec![field]),
+        };
+        let kids = kids.as_array().unwrap_or_default().iter();
+        Ok(kids.filter_map(Object::reference).collect())
+    }
+
+    /// The page the annotation `at` is on: the one its `/P` names when that page lists it, else
+    /// the first whose `/Annots` does; `None` for one no page lists.
+    pub(super) fn page_of(&self, at: Ref) -> Result<Option<usize>> {
+        let listed =
+            |page: usize| -> Result<bool> { Ok(self.annots(page)?.contains(&Object::Ref(at))) };
+        let named = self.dict(at)?.get(b"P").and_then(Object::reference);
+        if let Some(page) = named.and_then(|p| self.pages.iter().position(|&r| r == p))
+            && listed(page)?
+        {
+            return Ok(Some(page));
+        }
+        for page in 0..self.pages.len() {
+            if listed(page)? {
+                return Ok(Some(page));
+            }
+        }
+        Ok(None)
+    }
+
+    /// The check box or radio group `field`, shown by `widgets`, turned on in the state `on`, or
+    /// off: its `/V`, and each widget's `/AS`. What each object was before.
+    fn put_state(
+        &mut self,
+        field: Ref,
+        widgets: &[Ref],
+        on: Option<&[u8]>,
+    ) -> Result<Vec<(Ref, Object)>> {
+        let mut edits = Edits::default();
+        let value = name(on.unwrap_or(b"Off"));
+        edits.edit(self, field, |d| d.set(b"V", value.clone()))?;
+        for &widget in widgets {
+            let dict = self.dict(widget)?;
+            let normal = match dict.get(b"AP") {
+                Some(ap) => self.resolve(ap)?,
+                None => Object::Null,
+            };
+            let normal = match normal.as_dict().and_then(|ap| ap.get(b"N")) {
+                Some(n) => self.resolve(n)?,
+                None => Object::Null,
+            };
+            let draws = |state: &[u8]| normal.as_dict().is_some_and(|n| n.get(state).is_some());
+            let state = match on {
+                Some(on) if draws(on) => name(on),
+                _ => name(b"Off"),
+            };
+            edits.edit(self, widget, |d| d.set(b"AS", state.clone()))?;
+        }
+        Ok(edits.write(self))
+    }
+}
+
+/// The dictionaries a fill changes, each read once and kept as it was, written together at the
+/// end: a field merged with its widget is one object edited twice.
+#[derive(Default)]
+struct Edits(Vec<(Ref, Object, Dict)>);
+
+impl Edits {
+    /// `change` made to the dictionary `at`, as the earlier edits left it.
+    fn edit(&mut self, cos: &Objects, at: Ref, change: impl FnOnce(&mut Dict)) -> Result<()> {
+        let at_now = match self.0.iter_mut().find(|(r, ..)| *r == at) {
+            Some((_, _, dict)) => dict,
+            None => {
+                let was = cos.get(at)?;
+                let dict = (was.as_dict().cloned())
+                    .ok_or_else(|| Error::Pdf(format!("object {} is no dictionary", at.num)))?;
+                self.0.push((at, was, dict));
+                &mut self.0.last_mut().expect("pushed above").2
+            }
+        };
+        change(at_now);
+        Ok(())
+    }
+
+    /// Every dictionary edited written into the session's update: what each was before.
+    fn write(self, cos: &mut Objects) -> Vec<(Ref, Object)> {
+        (self.0.into_iter())
+            .map(|(at, was, now)| {
+                cos.update.set(at, Object::Dict(now));
+                (at, was)
+            })
+            .collect()
     }
 }
 

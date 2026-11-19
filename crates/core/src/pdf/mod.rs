@@ -21,10 +21,12 @@ mod text;
 mod typed;
 
 pub use crate::page_edit::PageEdit;
+/// An object of the document: what a form field and its widgets are named by.
+pub use accent_pdf::Ref;
 pub use annot::{LinkHighlights, highlight_quads, link_annotations};
 pub use clip::Clip;
 pub use doc::{A4, PdfDoc, blank_pdf};
-pub use form::{Da, FieldKind, FormField};
+pub use form::{Da, FieldKind, FieldValue, Filled, FormField};
 pub use ink::{
     Drawn, IDENTITY, Matrix, apply, catmull_rom, cut, hit, invert, lassoed, rotation, swept, then,
     thin,

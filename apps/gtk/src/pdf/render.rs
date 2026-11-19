@@ -467,6 +467,15 @@ fn render_loop(
                         }
                     }
                 }
+                Request::Fill { field, value } => match ink.fill(&mut doc, field, &value) {
+                    Ok(areas) => {
+                        ink.dirty = true;
+                        for (page, area) in areas {
+                            send(view, Reply::PageChanged(page, area, None));
+                        }
+                    }
+                    Err(e) => tracing::warn!("filling field {}: {e:#}", field.num),
+                },
                 Request::Pages(edits) => {
                     for (i, edit) in edits.into_iter().enumerate() {
                         match ink.edit_pages(&mut doc, edit, i > 0) {
