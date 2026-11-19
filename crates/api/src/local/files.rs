@@ -399,6 +399,23 @@ mod tests {
         );
     }
 
+    /// A page edit made in a tab on a second path to the PDF, a link into the vault, carries the
+    /// links into the file by either name, as one made on the file's own path does.
+    #[test]
+    fn a_page_edit_through_an_alias_moves_the_links_into_its_file() {
+        let f = Fixture::open(VaultConfig::default());
+        f.write("paper.pdf", "%PDF-1.4\n");
+        f.write("a.md", "[[paper.pdf#page=2]] [[doc.pdf#page=1]]\n");
+        std::os::unix::fs::symlink("paper.pdf", f.vault.root().join("doc.pdf")).unwrap();
+        f.vault.rescan().unwrap();
+        assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
+
+        let move_first = crate::PageEdit::Move { from: 0, to: 2 };
+        let report = f.vault.repage_links("doc.pdf", move_first, &[]).unwrap();
+        assert_eq!(report.moved, 2);
+        assert_eq!(f.read("a.md"), "[[paper.pdf#page=1]] [[doc.pdf#page=3]]\n");
+    }
+
     /// A reference definition and an HTML `href` follow a page edit, also where no link the index
     /// holds spells their path: `[[paper]]` is keyed by the name alone.
     #[test]

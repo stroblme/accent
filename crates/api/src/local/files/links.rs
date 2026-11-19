@@ -240,9 +240,14 @@ impl Local {
         keep: &[KeptLink],
     ) -> Result<RepageReport> {
         self.settle_index();
+        // A tab on a second path to the PDF edits the file, which the notes' links name by its
+        // row whatever name they are written to.
+        let pdf = (self.index().aliases()?.into_iter())
+            .find(|(_, alias)| alias == rel)
+            .map_or_else(|| rel.to_string(), |(row, _)| row);
         let notes: BTreeSet<String> = self
             .index()
-            .backlinks(rel)?
+            .backlinks(&pdf)?
             .into_iter()
             .map(|b| b.src_rel_path)
             .collect();
@@ -253,7 +258,7 @@ impl Local {
                 .filter(|k| k.note == note)
                 .map(|k| (k.anchor.clone(), k.nth))
                 .collect();
-            match self.repage_one(&note, rel, edit, &kept) {
+            match self.repage_one(&note, &pdf, edit, &kept) {
                 Ok(done) => {
                     report.moved += done.moved;
                     report
