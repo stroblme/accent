@@ -424,6 +424,33 @@ fn a_link_into_the_vault_is_listed_beside_its_file_under_one_row() {
     );
 }
 
+/// A folder renamed keeps its files' rows, a hard link outside it staying the second path to the
+/// file it holds, as the walk ranks them (the shallowest, then the first by name).
+#[test]
+fn a_folder_renamed_keeps_its_files_rows_over_a_hard_link_outside() {
+    let root = tempfile::tempdir().unwrap();
+    for dir in ["f", "z"] {
+        std::fs::create_dir(root.path().join(dir)).unwrap();
+    }
+    std::fs::write(root.path().join("f/a.md"), "a\n").unwrap();
+    std::fs::hard_link(root.path().join("f/a.md"), root.path().join("z/h.md")).unwrap();
+    let f = Fixture::open_dir(root, VaultConfig::default());
+    // The rows, and the second paths as Go to File finds files by them.
+    let held = |row: &str, alias: &str| {
+        assert_eq!(f.vault.file_paths(false).unwrap(), [row]);
+        let pair = (alias.to_string(), row.to_string());
+        assert_eq!(f.vault.note_aliases().unwrap(), [pair]);
+    };
+    held("f/a.md", "z/h.md");
+
+    let moves = [("f".to_string(), "g".to_string())];
+    f.vault
+        .rename(&f.vault.plan_moves(&moves).unwrap(), true)
+        .unwrap();
+    f.vault.settle_index();
+    held("g/a.md", "z/h.md");
+}
+
 /// A link written to a second path's name follows that path, not the file's: the file renamed
 /// leaves it as written, leading on through a hard link and nowhere through a link into the
 /// vault, which the rename leaves leading nowhere, and the second path renamed takes it along.

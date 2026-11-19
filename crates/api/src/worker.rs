@@ -472,9 +472,18 @@ impl Worker {
                 Msg::Moved { from, to } => {
                     self.follow(&from, &to);
                     batched.moved.insert(to.clone());
-                    // The new path first, so a hard link the old one's row leaves behind is
-                    // taken in as the alias of the row the file has there (`retake`).
+                    // The new path first, and in a folder the new path of each file a second
+                    // path leads to, so a hard link the old rows leave behind is taken in as the
+                    // alias of the row its file has there (`retake`), not as a row of its own
+                    // ahead of the folder's walk.
+                    let aliased: Vec<String> = (self.aliases().into_iter())
+                        .filter(|(row, _)| *row != from && is_under(row, &from))
+                        .map(|(row, _)| format!("{to}{}", &row[from.len()..]))
+                        .collect();
                     self.posted(to, true, &mut batched);
+                    for rel in aliased {
+                        self.update(&rel, true, &mut batched);
+                    }
                     self.posted(from, true, &mut batched);
                 }
                 Msg::Saved {
