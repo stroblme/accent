@@ -555,6 +555,14 @@ drill_diagram_render() {
 	has "$dir/render" 'bench diagram render size=102x1568 line=[255, 0, 255] hairline=true'
 }
 
+# A picture in a diagram's PDF as pdfium draws it at 72, 99, 150 and 300 dpi, with no seam around
+# its box darker than the paper.
+drill_diagram_edges() {
+	test -e "$pdfium" || { echo "SKIPPED the picture edges drill: no libpdfium"; return 0; }
+	launch 60 ACCENT_BENCH_DIAGRAM=edges >"$dir/edges"
+	has "$dir/edges" 'bench diagram edges drawn=true seams=[0, 0, 0, 0]'
+}
+
 # What real clicks and bands select among a diagram's groups, as draw.io selects, a drag moving
 # only what is selected, and how the groups fit what they hold (DESIGN.md, Diagram).
 drill_diagram_select() {

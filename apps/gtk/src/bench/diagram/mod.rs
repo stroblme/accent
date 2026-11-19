@@ -68,6 +68,7 @@ pub(super) const SAMPLE: &str = r#"<mxfile host="accent">
 ///   star and closing with the cell.
 /// - `=select:<rel>` writes groups to `<rel>` and prints what real clicks and bands select.
 /// - `=render` draws a page as `accent --render-diagram` does and prints where its lines fall.
+/// - `=edges` exports a picture on paper as a PDF and counts the seams pdfium draws around it.
 ///
 /// `ACCENT_BENCH_DIAGRAM_SHOT=<png>` adds a picture of the window to the plain round, `props:`,
 /// `layers:`, `hold:` and `select:` (a group open), for looking at.
@@ -77,6 +78,9 @@ pub(super) fn bench_diagram(app: &Rc<App>, arg: &str) {
     }
     if arg == "render" {
         return output::render(app);
+    }
+    if arg == "edges" {
+        return output::edges(app);
     }
     if let Some(rel) = arg.strip_prefix("sharp:") {
         return pictures::sharp(app, rel);

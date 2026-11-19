@@ -113,6 +113,49 @@ async fn render_tall(app: &Rc<App>) {
     bench_quit(app);
 }
 
+/// A page of paper a shade off white holding an opaque white picture of 64 × 32 pixels in a box
+/// off whole units, so pdfium draws the picture at fewer pixels than its own and at more, and any
+/// seam round it shows darker than the paper.
+fn edges_page() -> String {
+    let white = glib::Bytes::from_owned(vec![255u8; 64 * 32 * 4]);
+    let texture = gdk::MemoryTexture::new(64, 32, gdk::MemoryFormat::R8g8b8a8, &white, 64 * 4);
+    let png = glib::base64_encode(&texture.save_to_png_bytes());
+    format!(
+        r##"<mxfile><diagram name="Edges" id="edges"><mxGraphModel page="1" pageWidth="120" pageHeight="80" background="#FAFAFA"><root><mxCell id="0"/><mxCell id="1" parent="0"/>
+<mxCell id="p" style="shape=image;imageAspect=0;image=data:image/png,{png};" vertex="1" parent="1"><mxGeometry x="20.3" y="15.6" width="60.37" height="30.19" as="geometry"/></mxCell>
+</root></mxGraphModel></diagram></mxfile>"##
+    )
+}
+
+/// `=edges`: [`edges_page`] as a PDF, drawn by pdfium at 72, 99, 150 and 300 dpi: whether the
+/// middle of the picture is white at each, and how many pixels are darker than the paper, the
+/// seam a viewer drew around a picture's box while it went in through GSK's scaled texture,
+/// padded with clear black pixels under a soft mask (`paint::own_pixels` says what goes in now).
+pub(super) fn edges(app: &Rc<App>) {
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        let file = accent_drawio::File::from_bytes(edges_page().as_bytes()).expect("the page");
+        let slices = crate::work::Slices::new();
+        let pdf = crate::diagram::render::pdf(&file, Default::default(), &slices, |_, _| {});
+        let path = std::env::temp_dir().join("edges.pdf");
+        std::fs::write(&path, pdf.await.expect("a PDF")).expect("write the PDF");
+        let doc = accent_core::pdf::PdfDoc::open(&path).expect("pdfium opens it");
+        let (mut drawn, mut seams) = (true, Vec::new());
+        for scale in [1.0, 1.375, 150.0 / 72.0, 300.0 / 72.0] {
+            let page = doc.render_page(0, scale, accent_core::pdf::Theme::Plain);
+            let page = page.expect("a rendered page");
+            // The picture's middle, (50.485, 30.695) units, at 0.75 points a unit.
+            let (x, y) = ((37.86 * scale) as usize, (23.02 * scale) as usize);
+            let at = (y * page.width as usize + x) * 4;
+            drawn &= page.data[at..at + 3] == [255, 255, 255];
+            let pixels = page.data.as_chunks::<4>().0.iter();
+            seams.push(pixels.filter(|p| p[..3].iter().any(|&c| c < 246)).count());
+        }
+        println!("bench diagram edges drawn={drawn} seams={seams:?}");
+        bench_quit(&app);
+    });
+}
+
 /// What an export wrote: a PDF's page sizes in points, a picture's size and its commonest pixel,
 /// and the pictures and glyphs an SVG holds (a formula is glyphs, no picture).
 fn exported(path: &Path) -> String {

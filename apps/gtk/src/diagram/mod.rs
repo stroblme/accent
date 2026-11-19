@@ -18,7 +18,7 @@ mod layers;
 mod link;
 mod paint;
 mod props;
-mod render;
+pub(crate) mod render;
 mod sharp;
 mod strip;
 mod style;
