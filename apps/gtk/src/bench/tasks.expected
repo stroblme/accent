@@ -1,0 +1,17 @@
+bench tasks click line=3 "- [x] open, see [[tasks-other]]" cursor=Some("pointer") moved=false
+bench tasks undo line=3 restored=true
+bench tasks click line=4 "- [ ] done" cursor=Some("pointer") moved=false
+bench tasks undo line=4 restored=true
+bench tasks click line=5 "- [ ] upper" cursor=Some("pointer") moved=false
+bench tasks undo line=5 restored=true
+bench tasks click line=6 "- [ ] doing" cursor=Some("pointer") moved=false
+bench tasks undo line=6 restored=true
+bench tasks click line=7 "> - [x] quoted" cursor=Some("pointer") moved=false
+bench tasks undo line=7 restored=true
+bench tasks drag changed=false
+bench tasks link opened=true changed=false
+bench tasks org alone=true line=2 "- [X] open"
+bench tasks org alone=true line=3 "- [ ] doing"
+bench tasks org alone=true line=4 "- [ ] done"
+bench tasks org saved=true
+bench tasks presented cursor=Some("text") changed=false

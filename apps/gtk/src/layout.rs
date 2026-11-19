@@ -583,10 +583,11 @@ impl App {
         }
     }
 
-    /// Keep the previews showing `tab` at its caret: its preview tab, while that is on screen, and
-    /// the presented one.
+    /// Keep the previews showing `tab` at its caret: its preview tab, while that is on screen and
+    /// does not have the keyboard, as after a click on its page, and the presented one.
     pub fn sync_scroll(&self, tab: &Rc<Tab>) {
-        if let Some(rendered) = self.rendered_of(&tab.page) {
+        if let Some(rendered) = (self.rendered_of(&tab.page)).filter(|r| !r.key_target().is_focus())
+        {
             rendered.scroll_to_line(tab.cursor_line());
         }
         if !self.shows_preview() {

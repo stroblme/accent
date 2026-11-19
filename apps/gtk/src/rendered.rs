@@ -11,6 +11,7 @@ use super::*;
 use crate::notebook::NotebookTab;
 use crate::preview::Preview;
 use crate::terminal::Term;
+use accent_core::note::Syntax;
 use accent_core::notebook::CellId;
 use std::cell::Ref;
 use std::rc::Weak;
@@ -105,6 +106,16 @@ impl Note {
         match self {
             Note::Tab(tab) => Some(tab.cursor_line()),
             Note::Editor(_) | Note::Notebook(_) => None,
+        }
+    }
+
+    /// Whether a click on a task's box in the preview can flip it in the note: accent's own buffer
+    /// where it is editable, or a terminal editor's file; a notebook's view is read only.
+    fn writable(&self) -> bool {
+        match self {
+            Note::Tab(tab) => tab.view.is_editable(),
+            Note::Editor(_) => true,
+            Note::Notebook(_) => false,
         }
     }
 
@@ -479,6 +490,25 @@ impl App {
                     }
                 }
             ));
+            // A presented document is read only.
+            let (app, held) = (Rc::downgrade(self), Rc::downgrade(rendered));
+            let live = {
+                let (app, held) = (app.clone(), held.clone());
+                move || {
+                    let note = held.upgrade().and_then(|r| r.note());
+                    let presenting = app.upgrade().is_none_or(|a| a.presenting.get().is_some());
+                    note.is_some_and(|note| note.writable()) && !presenting
+                }
+            };
+            let flip = move |shown: &str, line| {
+                if let (Some(app), Some(rendered)) = (app.upgrade(), held.upgrade()) {
+                    app.click_box(&rendered, shown, line);
+                }
+            };
+            preview.connect_tasks(crate::preview::Tasks {
+                live: Box::new(live),
+                flip: Box::new(flip),
+            });
             rendered.frame.set_child(Some(preview.widget()));
             *rendered.preview.borrow_mut() = Some(preview);
         }
@@ -509,9 +539,99 @@ impl App {
         }
     }
 
+    /// A click on the box of the task on line `line` in `rendered`'s page, which showed `shown`:
+    /// the box flipped in accent's buffer as one undo step, which its save follows as a typed
+    /// edit's, and the page rendered at once where it is being read; or in a terminal editor's
+    /// file. Nothing where the note is no longer what the page shows, whose render is on its way.
+    fn click_box(self: &Rc<Self>, rendered: &Rendered, shown: &str, line: u32) {
+        let tab = match rendered.note() {
+            Some(Note::Tab(tab)) => tab,
+            Some(Note::Editor(term)) => return self.click_saved_box(&term, shown, line),
+            Some(Note::Notebook(_)) | None => return,
+        };
+        let text = tab.text();
+        let syntax = Syntax::of(&tab.rel());
+        let Some((at, tick)) = (text == shown)
+            .then(|| syntax.click_box(&text, line))
+            .flatten()
+        else {
+            return;
+        };
+        let at = text[..at].chars().count() as i32;
+        let buffer = &tab.buffer;
+        // The new tick after the old, then the old out, so a caret either side of it stays there.
+        buffer.begin_user_action();
+        buffer.insert(&mut buffer.iter_at_offset(at + 1), &tick.to_string());
+        buffer.delete(
+            &mut buffer.iter_at_offset(at),
+            &mut buffer.iter_at_offset(at + 1),
+        );
+        buffer.end_user_action();
+        self.render_rendered(rendered, false);
+    }
+
+    /// [`click_box`](Self::click_box) in a terminal editor's file, read as it is saved: flipped
+    /// where it still holds what the page shows and written over that read, its line endings as
+    /// they were, then read again for the preview. The editor hears of it as of any save from
+    /// outside.
+    fn click_saved_box(self: &Rc<Self>, term: &Rc<Term>, shown: &str, line: u32) {
+        let Some(key) = term.file() else {
+            return;
+        };
+        let loose = doc::is_loose_key(&key);
+        let vault = self.vault().filter(|_| !loose).cloned();
+        let path = match loose {
+            true => PathBuf::from(&key),
+            false => self.root().join(&key),
+        };
+        let (shown, rel) = (shown.to_string(), key.clone());
+        let app = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let wrote = work::attempt("change the task's box", move || {
+                let read = match &vault {
+                    Some(vault) => vault.read_text(&rel)?,
+                    None => accent_core::fs::read_text(&path)?,
+                };
+                let accent_core::fs::Read::Text(read) = read else {
+                    return Ok(false);
+                };
+                let flipped = (!read.lossy && read.text == shown)
+                    .then(|| Syntax::of(&rel).click_box(&read.text, line))
+                    .flatten();
+                let Some((at, tick)) = flipped else {
+                    return Ok(false);
+                };
+                let mut text = read.text;
+                text.replace_range(at..at + 1, &tick.to_string());
+                let disk = accent_core::fs::for_disk(&text, read.crlf, false);
+                match &vault {
+                    Some(vault) => vault.save(&rel, &disk, Some(read.etag))?,
+                    None => accent_core::fs::write_note(&path, &disk, Some(read.etag))?,
+                };
+                Ok::<_, accent_api::Error>(true)
+            })
+            .await;
+            let Some(app) = app.upgrade() else {
+                return;
+            };
+            match wrote {
+                // A save of the window's own brings no news from the watcher.
+                Ok(true) => {
+                    app.saved_changed(&key);
+                    if let Some(git) = app.git.get() {
+                        git.schedule_paths([key], false);
+                    }
+                }
+                Ok(false) => {}
+                Err(why) => app.toast(&why),
+            }
+        });
+    }
+
     /// Render the preview tab of the note or notebook whose own tab is `page` [`RENDER`] after
-    /// the last change. It follows the caret while the note is on screen too; one changed behind
-    /// it, as a sync does, leaves the page where it is being read.
+    /// the last change. It follows the caret while the note is on screen too, and the preview
+    /// does not have the keyboard; one changed behind it, as a sync does, or by a click on the
+    /// page, leaves the page where it is being read.
     pub(crate) fn queue_rendered(self: &Rc<Self>, page: &adw::TabPage) {
         let Some(rendered) = self.rendered_of(page) else {
             return;
@@ -522,7 +642,8 @@ impl App {
             self,
             move || {
                 if let Some(rendered) = weak.upgrade() {
-                    let follow = rendered.note().is_some_and(|note| note.on_screen());
+                    let follow = rendered.note().is_some_and(|note| note.on_screen())
+                        && !rendered.key_target().is_focus();
                     app.render_rendered(&rendered, follow);
                 }
             }

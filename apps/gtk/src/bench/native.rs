@@ -178,6 +178,15 @@ pub(super) fn bench_preview(app: &Rc<App>, arg: &str) {
         });
         return;
     }
+    if arg == "tasks" {
+        scratch_only(app, "ACCENT_BENCH_PREVIEW=tasks");
+        let app = app.clone();
+        glib::spawn_future_local(async move {
+            super::tasks::run(&app).await;
+            bench_quit(&app);
+        });
+        return;
+    }
     if let Some(rel) = arg.strip_prefix("time:") {
         let (app, rel) = (app.clone(), rel.to_string());
         glib::spawn_future_local(async move {

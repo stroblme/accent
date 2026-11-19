@@ -42,9 +42,9 @@ pub(crate) use page::{Part, cut, formulas, math, parts};
 /// What an org table shares with a pipe table's layout (`crate::org`).
 pub(crate) use table::{Align, Cell, Rules, Table, split};
 pub use table::{TableEdit, TableKey, in_table, table_key};
+pub use task::{click_box, toggle_task};
 /// What org's Toggle Task shares with a markdown note's (`crate::org`).
-pub(crate) use task::toggle_box;
-pub use task::toggle_task;
+pub(crate) use task::{clicked_box, toggle_box};
 pub use uri::{Click, accent_file, base_uri, click};
 
 use frontmatter::{frontmatter, scan_tags};

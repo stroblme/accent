@@ -14,6 +14,7 @@ bench editor panes view_mode=true preview_front=true before=true outline=["Panes
 bench editor panes saved=true before=false outline=["Panes", "  First", "  Saved"]
 bench editor panes references=Some("Links:open(1)")
 bench editor panes closed=true previews=0
+bench editor tasks written=true shown=true "# Boxes\n\n- [x] open\n"
 bench editor hold started=true starts=1
 bench editor back title=Some("held.md") starts=1 preview=true
 bench editor back title=Some("held.md") starts=2 preview=true

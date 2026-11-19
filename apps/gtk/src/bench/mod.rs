@@ -75,6 +75,7 @@ mod surfaces;
 mod symbols;
 mod synctex;
 mod tags;
+mod tasks;
 mod terminal_editor;
 mod toasts;
 mod toggle;
@@ -236,7 +237,7 @@ use user_commands::bench_commands;
 ///   each picture's menu and Copy Image.
 /// - `ACCENT_BENCH_ANIMATION=1`: an animated GIF playing in the preview and its tab, and its
 ///   timer stopped where hidden (`animation::bench_animation`).
-/// - `ACCENT_BENCH_PREVIEW=render`: the preview's page of a note it writes, against `preview.expected`; `saved`: a saved search's rows as the vault changes and a link to a search's results followed into the Search pane (a scratch vault); `time:<rel>`: its render, patch and scroll
+/// - `ACCENT_BENCH_PREVIEW=render`: the preview's page of a note it writes, against `preview.expected`; `saved`: a saved search's rows as the vault changes and a link to a search's results followed into the Search pane (a scratch vault); `tasks`: each kind of task box clicked through XTEST, beside its note, alone and presented (a scratch vault, `tasks::run`); `time:<rel>`: its render, patch and scroll
 ///   costs (`native::bench_preview`).
 /// - `ACCENT_BENCH_COAST=1`: a zoom while the scrolled window coasts from a fling, in a diagram,
 ///   an image, a notebook, a note and its preview, by pinch, Ctrl+wheel and chord

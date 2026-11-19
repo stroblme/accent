@@ -52,6 +52,15 @@ impl Syntax {
         }
     }
 
+    /// What a click on the box of the task on line `line` of `text` writes
+    /// ([`markdown::click_box`]).
+    pub fn click_box(self, text: &str, line: u32) -> Option<(usize, char)> {
+        match self {
+            Syntax::Markdown => markdown::click_box(text, line),
+            Syntax::Org => org::click_box(text, line),
+        }
+    }
+
     /// The `id` `text`'s page gives what `anchor` names ([`markdown::anchor_id`]).
     pub fn anchor_id(self, text: &str, anchor: &str) -> Option<String> {
         match self {

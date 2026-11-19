@@ -1,5 +1,5 @@
-//! Task boxes: Toggle Task's cycle `[ ]` → `[/]` → `[x]` → `[ ]`, and the in-progress box `[/]`,
-//! which GFM, and so pulldown-cmark, reads as text.
+//! Task boxes: Toggle Task's cycle `[ ]` → `[/]` → `[x]` → `[ ]`, a click on a rendered box, and
+//! the in-progress box `[/]`, which GFM, and so pulldown-cmark, reads as text.
 
 use std::ops::Range;
 
@@ -28,6 +28,42 @@ pub(crate) fn toggle_box(line: &str, lead: &[char], doing: u8, done: u8) -> Stri
         None => return format!("{head}{marker}[ ] {body}"),
     };
     format!("{head}{marker}[{}]{}", next as char, &body[3..])
+}
+
+/// What a click on the box of the task item on line `line` (1-based) of `text` writes, as
+/// Obsidian's reading view writes it: an open box is ticked `x`, and any other (`[x]`, `[X]`,
+/// `[/]`) is opened. The byte of its tick and the tick it becomes, the rest of the line as it was;
+/// `None` where no box follows the line's indentation, quote markers and list markers.
+pub fn click_box(text: &str, line: u32) -> Option<(usize, char)> {
+    clicked_box(text, line, &[' ', '\t', '>'], b'/', 'x')
+}
+
+/// [`click_box`] for a syntax whose lines start with `lead`, whose task in progress is
+/// `[{doing}]` and whose done box is ticked `done`: org's.
+pub(crate) fn clicked_box(
+    text: &str,
+    line: u32,
+    lead: &[char],
+    doing: u8,
+    done: char,
+) -> Option<(usize, char)> {
+    let start = match line {
+        0 => return None,
+        1 => 0,
+        n => text.match_indices('\n').nth(n as usize - 2)?.0 + 1,
+    };
+    let row = text[start..].split('\n').next().unwrap_or_default();
+    // A list in a quote in an item (`- > - [ ]`) has a marker of each before its box.
+    let mut at = 0;
+    loop {
+        let rest = &row[at..];
+        at += rest.len() - rest.trim_start_matches(lead).len();
+        at += marker(&row[at..])?;
+        if let Some(tick) = tick(&row[at..], doing) {
+            let next = if tick == b' ' { done } else { ' ' };
+            return Some((start + at + 1, next));
+        }
+    }
 }
 
 /// The `[/]` of an in-progress task item whose list marker ends at `after` in `text`.
@@ -89,6 +125,42 @@ mod tests {
         ] {
             assert_eq!(toggle_task(line), toggled, "{line:?}");
         }
+    }
+
+    /// An open box is ticked and any other opened, the rest of the note byte for byte as it was;
+    /// a line without a box after its markers is left alone.
+    #[test]
+    fn a_click_ticks_an_open_box_and_opens_any_other() {
+        let text = "# T\n- [ ] open\n- [x] done\n- [X] Done\n  * [/] doing\r\n> 1. [ ] quoted\n\
+                    - - [ ] nested\n- > - [x] deep\n[ ] bare\n- item\n- [ ]word\n";
+        let clicked = |line| {
+            let (at, tick) = click_box(text, line)?;
+            let mut out = text.to_string();
+            out.replace_range(at..at + 1, &tick.to_string());
+            Some(out.lines().nth(line as usize - 1)?.to_string())
+        };
+        let lines: Vec<_> = (0..=13).map(clicked).collect();
+        assert_eq!(
+            lines,
+            [
+                None,
+                None,
+                Some("- [x] open".into()),
+                Some("- [ ] done".into()),
+                Some("- [ ] Done".into()),
+                Some("  * [ ] doing".into()),
+                Some("> 1. [x] quoted".into()),
+                Some("- - [x] nested".into()),
+                Some("- > - [ ] deep".into()),
+                None,
+                None,
+                None,
+                None,
+                None,
+            ]
+        );
+        let (at, _) = click_box(text, 2).unwrap();
+        assert_eq!(&text[at - 1..at + 2], "[ ]");
     }
 
     #[test]

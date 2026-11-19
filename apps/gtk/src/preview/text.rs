@@ -819,6 +819,9 @@ pub(super) struct Facts {
     pub links: Vec<(Range<i32>, Href)>,
     /// In the order they stand in the text.
     pub objects: Vec<Object>,
+    /// Each task's box and the line of the block its item starts on, which a click on the box
+    /// flips.
+    pub tasks: Vec<(i32, u32)>,
 }
 
 /// Write `laid` at `at`, ending on a line of its own, its source `source` (the note's bytes of
@@ -849,6 +852,7 @@ pub(super) fn write(
         code: None,
         callout: String::new(),
         line_start: true,
+        line: 0,
         facts: Facts::default(),
     };
     for node in &laid.block.nodes {
@@ -935,6 +939,8 @@ pub(super) struct Writer<'a> {
     /// The type of the callout whose title comes next.
     callout: String,
     line_start: bool,
+    /// The line of the block the element last started is on ([`Node::Line`]).
+    line: u32,
     facts: Facts,
 }
 
@@ -1084,6 +1090,7 @@ impl Writer<'_> {
     }
 
     fn task(&mut self, task: Task) {
+        self.facts.tasks.push((self.offset(), self.line));
         let source = match task {
             Task::Open => "[ ]",
             Task::Doing => "[/]",
@@ -1187,6 +1194,7 @@ impl Writer<'_> {
         match node {
             Node::Event(event) => self.event(event),
             Node::Line { at, id } => {
+                self.line = *at;
                 self.facts.lines.push((*at, self.offset()));
                 if let Some(id) = id {
                     self.facts.ids.push((id.clone(), self.offset()));

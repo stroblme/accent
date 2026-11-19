@@ -62,6 +62,15 @@ pub struct Wiring {
     pub search: SavedSearch,
 }
 
+/// What a page's task boxes reach: whether a click flips one now, and what flips it.
+pub struct Tasks {
+    pub live: Box<dyn Fn() -> bool>,
+    pub flip: Flip,
+}
+
+/// Flips a task's box, told the text the page shows and the line of the task's item.
+pub type Flip = Box<dyn Fn(&str, u32)>;
+
 /// How long one batch of a first render may hold the main loop.
 const BATCH: Duration = Duration::from_millis(8);
 
@@ -155,6 +164,9 @@ struct Page {
     /// cell; its room left and right of the text, which the owner sets as it sets its font.
     settled_hook: crate::widgets::Hook<dyn Fn()>,
     anchor_hook: crate::widgets::Hook<dyn Fn(&str)>,
+    /// What its task boxes reach; a page without, a presented note's or a notebook's, leaves its
+    /// boxes as they are.
+    task_hook: crate::widgets::Hook<Tasks>,
     margins: Cell<(i32, i32)>,
     /// An inline page's last line break is taken out while the render is settled, so it ends with
     /// its text rather than an empty line ([`Page::trim`]).
@@ -314,6 +326,7 @@ impl Page {
             frame,
             settled_hook: Default::default(),
             anchor_hook: Default::default(),
+            task_hook: Default::default(),
             margins: Cell::new((0, 0)),
             trimmed: Cell::new(false),
             zoom: Cell::new(1.0),
@@ -505,6 +518,12 @@ impl Preview {
     /// another cell, rather than looking for it on the page alone.
     pub fn connect_anchor(&self, f: impl Fn(&str) + 'static) {
         self.page.anchor_hook.set(Rc::new(f));
+    }
+
+    /// Hand a click on a task's box to `tasks`, which flips it in the note; the pointer over a
+    /// box is a hand while `tasks` says a click flips it.
+    pub fn connect_tasks(&self, tasks: Tasks) {
+        self.page.task_hook.set(Rc::new(tasks));
     }
 
     /// Where source line `line` (1-based) shows: the start of the element it is in, the page's
@@ -1008,6 +1027,28 @@ impl Page {
         Some(href.clone())
     }
 
+    /// The line of the task whose box is character `offset`, where a click flips it: its
+    /// [`Tasks`] say so, and the page shows the note's latest text, all of it in.
+    fn task_at(&self, offset: i32) -> Option<u32> {
+        let tasks = self.task_hook.get()?;
+        if !(tasks.live)() || !self.settled.get() {
+            return None;
+        }
+        let (i, within) = self.block_at(offset)?;
+        let shown = self.shown.borrow();
+        let s = &shown[i];
+        let (_, line) = s.facts.tasks.iter().find(|(at, _)| *at == within)?;
+        Some(s.laid.block.lines.start + line)
+    }
+
+    /// Flip the box of the task on line `line` of the note, in the text the page shows.
+    fn flip(&self, line: u32) {
+        let text = self.note.borrow().1.clone();
+        if let Some(tasks) = self.task_hook.get().filter(|tasks| (tasks.live)()) {
+            (tasks.flip)(&text, line);
+        }
+    }
+
     /// Where `href` goes, by `markdown::click` as on Android: a vault file or wikilink to
     /// `on_open`, a tag to `on_tag`, a search to `on_search`, a place on the page scrolled to,
     /// the web to the system.
@@ -1096,8 +1137,8 @@ fn offset_at(view: &PreviewView, x: f64, y: f64) -> Option<i32> {
     view.iter_at_position(bx, by).map(|(at, _)| at.offset())
 }
 
-/// The view's input: a click on a link follows it, the pointer over one is a hand, Space pages,
-/// and the menu offers Copy and Select All (refresh T7).
+/// The view's input: a click on a link follows it and one on a task's box flips it, the pointer
+/// over either is a hand, Space pages, and the menu offers Copy and Select All (refresh T7).
 fn wire(page: &Rc<Page>) {
     let view = &page.view;
     let click = gtk::GestureClick::builder().button(1).build();
@@ -1109,9 +1150,15 @@ fn wire(page: &Rc<Page>) {
             if page.buffer.has_selection() {
                 return;
             }
-            if let Some(href) = offset_at(&page.view, x, y).and_then(|o| page.href_at(o)) {
+            let Some(offset) = offset_at(&page.view, x, y) else {
+                return;
+            };
+            if let Some(href) = page.href_at(offset) {
                 gesture.set_state(gtk::EventSequenceState::Claimed);
                 page.follow(&href);
+            } else if let Some(line) = page.task_at(offset) {
+                gesture.set_state(gtk::EventSequenceState::Claimed);
+                page.flip(line);
             }
         }
     ));
@@ -1122,8 +1169,9 @@ fn wire(page: &Rc<Page>) {
         #[weak]
         page,
         move |_, x, y| {
-            let link = offset_at(&page.view, x, y).and_then(|o| page.href_at(o));
-            let cursor = if link.is_some() { "pointer" } else { "text" };
+            let at = offset_at(&page.view, x, y);
+            let link = at.is_some_and(|o| page.href_at(o).is_some() || page.task_at(o).is_some());
+            let cursor = if link { "pointer" } else { "text" };
             page.view.set_cursor_from_name(Some(cursor));
         }
     ));
@@ -1183,6 +1231,59 @@ impl Preview {
         }
         let status = frame.visible_child().and_downcast::<adw::StatusPage>()?;
         Some((status.title().into(), status.description()?.into()))
+    }
+
+    /// Each task box's line and its middle, in the window's coordinates, where a click flips it.
+    pub fn boxes(&self) -> Vec<(u32, (f64, f64))> {
+        let page = &self.page;
+        let shown = page.shown.borrow();
+        let boxes = shown.iter().flat_map(|s| {
+            let start = page.buffer.iter_at_mark(&s.mark).offset();
+            let lines = s.laid.block.lines.start;
+            s.facts
+                .tasks
+                .iter()
+                .map(move |(at, line)| (lines + line, start + at))
+        });
+        let boxes: Vec<(u32, i32)> = boxes.collect();
+        drop(shown);
+        boxes
+            .into_iter()
+            .filter_map(|(line, offset)| Some((line, self.point_at(offset)?)))
+            .collect()
+    }
+
+    /// The middle of the first `text` on the page, in the window's coordinates.
+    pub fn point_of(&self, text: &str) -> Option<(f64, f64)> {
+        let buffer = &self.page.buffer;
+        let flags = gtk::TextSearchFlags::empty();
+        let (start, _) = buffer.start_iter().forward_search(text, flags, None)?;
+        self.point_at(start.offset() + text.chars().count() as i32 / 2)
+    }
+
+    /// The middle of character `offset`, in the window's coordinates.
+    fn point_at(&self, offset: i32) -> Option<(f64, f64)> {
+        let view = &self.page.view;
+        let rect = view.iter_location(&self.page.buffer.iter_at_offset(offset));
+        let (x, y) = view.buffer_to_window_coords(
+            gtk::TextWindowType::Widget,
+            rect.x() + rect.width() / 2,
+            rect.y() + rect.height() / 2,
+        );
+        let window = view.root()?;
+        let point = gtk::graphene::Point::new(x as f32, y as f32);
+        let point = view.compute_point(&window, &point)?;
+        Some((f64::from(point.x()), f64::from(point.y())))
+    }
+
+    /// Whether the page is all in and shows `text`.
+    pub fn shows(&self, text: &str) -> bool {
+        self.page.settled.get() && &*self.page.note.borrow().1 == text
+    }
+
+    /// The pointer's name over the page.
+    pub fn cursor(&self) -> Option<String> {
+        Some(self.page.view.cursor()?.name()?.into())
     }
 
     /// The failure page's Retry, clicked.

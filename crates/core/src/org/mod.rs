@@ -21,7 +21,7 @@ pub use links::{link, path_link_keys, rewrite_moved};
 pub use page::{page, to_html, to_html_file};
 pub use search::{Search, file_line};
 pub use table::table_key;
-pub use task::toggle_task;
+pub use task::{click_box, toggle_task};
 
 use crate::markdown::{Analysis, CodeBlock, Heading, Span, Style, Tag, heading_for, slugs};
 use links::OrgLink;

@@ -21,7 +21,8 @@ use vte4::TerminalExt as _;
 /// search hit and Go to Symbol open the editor at their line, and a hit in a file it has open
 /// brings its tab to the front without starting it again; a custom command gets its file and line.
 /// `=panes`: a note in the editor has a preview tab, an Outline and References of its own, which
-/// follow a save made while the editor runs, pictured into `$TMPDIR`.
+/// follow a save made while the editor runs, pictured into `$TMPDIR`. `=tasks`: a click on a
+/// task's box in that preview tab (XTEST) writes the file, which the page then shows.
 pub(super) fn bench_editor(app: &Rc<App>, step: &str) {
     let (app, step) = (app.clone(), step.to_string());
     glib::spawn_future_local(async move {
@@ -33,6 +34,7 @@ pub(super) fn bench_editor(app: &Rc<App>, step: &str) {
             "accent" => accent(&app).await,
             "line" => line(&app).await,
             "panes" => panes(&app).await,
+            "tasks" => tasks(&app).await,
             "hold" => return hold(&app).await,
             "back" => return back(&app).await,
             _ => println!("bench editor unknown step {step}"),
@@ -533,6 +535,48 @@ fn finish(app: &Rc<App>) {
     }
     app.save_session();
     bench_quit(app);
+}
+
+/// `=tasks`: the box of a note the editor has open, clicked in its preview tab.
+async fn tasks(app: &Rc<App>) {
+    std::fs::write(app.root().join("boxes.md"), "# Boxes\n\n- [ ] open\n").unwrap();
+    until("editor", "tasks reconciled", 30_000, || {
+        app.reconciled.get()
+    })
+    .await;
+    pick(app, Editor::Nano);
+    app.open_path("boxes.md");
+    let Some(term) = started(app, "boxes.md").await else {
+        return println!("bench editor tasks started=false");
+    };
+    app.toggle_preview();
+    let shown = until("editor", "tasks preview", 10_000, || {
+        let rendered = app.rendered_of(&term.page)?;
+        let at = rendered.preview().as_ref()?.boxes().first()?.1;
+        Some(at)
+    })
+    .await;
+    let Some((x, y)) = shown else {
+        return;
+    };
+    let (sx, sy) = app.window.surface_transform();
+    super::git::xtest(&format!("move {} {}; focus; down; up", x + sx, y + sy)).await;
+    let file = || std::fs::read_to_string(app.root().join("boxes.md")).unwrap_or_default();
+    let written = until("editor", "tasks written", 10_000, || {
+        file().contains("- [x] open")
+    })
+    .await
+    .is_some();
+    let shows = until("editor", "tasks shown", 10_000, || {
+        let rendered = app.rendered_of(&term.page)?;
+        rendered.preview().as_ref()?.shows(&file()).then_some(())
+    })
+    .await
+    .is_some();
+    println!(
+        "bench editor tasks written={written} shown={shows} {:?}",
+        file()
+    );
 }
 
 /// Quit as Ctrl+Q does, through the window's close, which writes the session and lets the editor

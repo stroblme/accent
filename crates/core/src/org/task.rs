@@ -4,9 +4,15 @@
 //! `[1/3]` or `[33%]`, is left as written, and `[/]`, an empty one to org, is never written.
 
 use super::{closed, heading, keywords};
-use crate::markdown::toggle_box;
+use crate::markdown::{clicked_box, toggle_box};
 use std::ops::Range;
 use unicode_width::UnicodeWidthStr;
+
+/// What a click on the checkbox on line `line` (1-based) of `text` writes, as a markdown note's
+/// does ([`crate::markdown::click_box`]): an open box ticked `X`, a `[-]` or `[X]` one opened.
+pub fn click_box(text: &str, line: u32) -> Option<(usize, char)> {
+    clicked_box(text, line, &[' ', '\t'], b'-', 'X')
+}
 
 /// Each of the lines `lines` of `text`, numbered from 0, one step on, or `None` for a line passed
 /// over as a markdown note's front matter and code blocks are: one in a block or a drawer, a
@@ -84,6 +90,22 @@ mod tests {
 
     fn one(text: &str, line: usize) -> String {
         toggle_task(text, line..line + 1).remove(0).unwrap()
+    }
+
+    #[test]
+    fn a_click_ticks_an_open_checkbox_and_opens_any_other() {
+        let text = "* Plan\n- [ ] open\n- [-] doing\n  + [X] done\n> - [ ] quote\n";
+        let ticks: Vec<_> = (1..=5).map(|line| click_box(text, line)).collect();
+        assert_eq!(
+            ticks,
+            [
+                None,
+                Some((10, 'X')),
+                Some((21, ' ')),
+                Some((35, ' ')),
+                None
+            ]
+        );
     }
 
     #[test]

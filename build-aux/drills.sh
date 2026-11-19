@@ -235,7 +235,7 @@ drill_editor() {
 	launch 60 ACCENT_BENCH_EDITOR=prefs >"$dir/editor"
 	launch 90 ACCENT_BENCH_EDITOR=open >>"$dir/editor"
 	launch 90 ACCENT_BENCH_EDITOR=keys ACCENT_FAKE_EDITOR=keys >>"$dir/editor"
-	for step in accent line panes hold back; do
+	for step in accent line panes tasks hold back; do
 		launch 60 ACCENT_BENCH_EDITOR=$step >>"$dir/editor"
 	done
 	# The holder has to end here, or the second `back` finds its editor still held (starts=1).
@@ -310,6 +310,12 @@ drill_preview() {
 drill_saved() {
 	launch 60 ACCENT_BENCH_PREVIEW=saved >"$dir/saved"
 	expect saved "preview saved"
+}
+
+# Each kind of task box clicked in a preview through XTEST: beside its note, alone, presented.
+drill_tasks() {
+	launch 90 ACCENT_BENCH_PREVIEW=tasks >"$dir/tasks"
+	expect tasks tasks
 }
 
 # A notebook's and a diagram's saves and reloads, a fresh tab a case. An answer to the conflict
