@@ -3,6 +3,7 @@ package io.github.stroblme.accent.ui
 import io.github.stroblme.accent.ffi.Glyph
 import io.github.stroblme.accent.ffi.Point
 import io.github.stroblme.accent.ffi.Rect
+import kotlin.math.abs
 
 /*
  * The text on a PDF's pages, as a selection sees it: runs of glyphs in the order pdfium reads
@@ -119,6 +120,28 @@ internal fun nearest(glyphs: List<Glyph>, at: Point): Int? {
         }
     }
     return best
+}
+
+/**
+ * Where a loupe magnifies for the end at glyph [at] under a finger [x] across the page, both in
+ * points, as the platform's text magnifier does (`Editor.obtainMagnifierShowCoordinates`): the
+ * middle of the end's line, at the finger's x kept within the line, and nothing once the finger is
+ * more than [reach] past it. A space is taken at the glyph before it, having no box of its own.
+ */
+internal fun loupeAt(glyphs: List<Glyph>, at: Int, x: Float, reach: Float): Point? {
+    fun boxed(i: Int) = glyphs[i].rect.let { it.right > it.left && it.bottom > it.top }
+    val end = (minOf(at, glyphs.lastIndex) downTo 0).firstOrNull(::boxed) ?: return null
+    val box = glyphs[end].rect
+    // The line runs on either side while the boxes share its height, past the spaces between.
+    fun onLine(i: Int) = !boxed(i) || glyphs[i].rect.run { top < box.bottom && box.top < bottom }
+    var lo = end
+    var hi = end
+    while (lo > 0 && onLine(lo - 1)) lo--
+    while (hi < glyphs.lastIndex && onLine(hi + 1)) hi++
+    val line = (lo..hi).filter(::boxed).map { glyphs[it].rect }
+    val kept = x.coerceIn(line.minOf { it.left }, line.maxOf { it.right })
+    if (abs(x - kept) > reach) return null
+    return Point(kept, (box.top + box.bottom) / 2)
 }
 
 /** Select the alphanumeric word around glyph [at], or that glyph alone. */

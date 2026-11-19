@@ -6,6 +6,7 @@ import io.github.stroblme.accent.ffi.Rect
 import io.github.stroblme.accent.ui.Caret
 import io.github.stroblme.accent.ui.Selection
 import io.github.stroblme.accent.ui.grownTo
+import io.github.stroblme.accent.ui.loupeAt
 import io.github.stroblme.accent.ui.nearest
 import io.github.stroblme.accent.ui.pieces
 import io.github.stroblme.accent.ui.text
@@ -60,6 +61,21 @@ class SelectionTest {
         assertEquals(4, nearest(glyphs, Point(30f, 5f)))
         assertEquals(0, nearest(glyphs, Point(-3f, 12f)))
         assertNull(nearest(emptyList(), Point(0f, 0f)))
+    }
+
+    /** The loupe keeps to the end's line, a space taken at the glyph before it. */
+    @Test
+    fun `a loupe keeps to the line its end is on and lets go far past it`() {
+        val below = line("xyz").map {
+            it.copy(rect = Rect(it.rect.left + 10f, 20f, it.rect.right + 10f, 30f))
+        }
+        val glyphs = line("ab cd") + below
+        assertEquals(Point(1.5f, 5f), loupeAt(glyphs, 1, 1.5f, 2f))
+        assertEquals(Point(1f, 5f), loupeAt(glyphs, 2, 1f, 2f))
+        // Past the line's end the loupe stops at it, the next line's boxes no part of it.
+        assertEquals(Point(5f, 5f), loupeAt(glyphs, 4, 6f, 2f))
+        assertNull(loupeAt(glyphs, 4, 8f, 2f))
+        assertEquals(Point(10f, 25f), loupeAt(glyphs, 5, 9f, 2f))
     }
 
     @Test

@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.magnifier
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
@@ -60,6 +61,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
@@ -439,6 +441,8 @@ private fun Pages(
     var menu by remember(doc) { mutableStateOf(false) }
     /** A finger is on a handle or still growing a long press's word. */
     var dragging by remember(doc) { mutableStateOf(false) }
+    /** Where the loupe magnifies in the pages' box while a finger drags an end, else nothing. */
+    var loupe by remember(doc) { mutableStateOf(Offset.Unspecified) }
     /** Where the pages' box is in the window, which is where the menu is placed from. */
     var origin by remember { mutableStateOf(Offset.Zero) }
     val haptics = LocalHapticFeedback.current
@@ -533,6 +537,18 @@ private fun Pages(
                 .also { select(it) }
             menu = true
         }
+    }
+
+    /** Where the loupe magnifies for an end dragged to [caret] under a finger at [x]. */
+    fun loupeFor(caret: Caret, x: Float): Offset {
+        val on = glyphs[caret.page] ?: return Offset.Unspecified
+        val width = viewport.width
+        val page = doc.sizes.getOrNull(caret.page) ?: return Offset.Unspecified
+        val scale = width * zoom / page.width
+        val reach = with(density) { LOUPE.width.toPx() } / 2 / scale
+        val at = loupeAt(on, caret.glyph, (x - panX) / scale, reach) ?: return Offset.Unspecified
+        val above = pages.above(list, width, zoom)
+        return pages.screen(caret.page, at.x, at.y, above, panX, width, zoom)
     }
 
     /** Screen positions of selection handles, unavailable during a live pinch. */
@@ -733,6 +749,8 @@ private fun Pages(
                 .clipToBounds()
                 .onSizeChanged { viewport = it }
                 .onGloballyPositioned { origin = it.positionInRoot() }
+                // The platform's text loupe over an end a finger drags, as a text view shows one.
+                .magnifier(sourceCenter = { loupe }, size = LOUPE, cornerRadius = LOUPE_CORNER)
                 .onTap(chrome, claimed = ::claimed)
                 .pointerInput(doc, viewport) {
                     val decay = exponentialDecay<Float>()
@@ -813,9 +831,11 @@ private fun Pages(
                                 val caret = caretAt(change.position) ?: return@drag
                                 if (held != null) select(Selection.between(held, caret))
                                 else word?.let { select(it.grownTo(caret)) }
+                                loupe = loupeFor(caret, change.position.x)
                             }
                         } finally {
                             dragging = false
+                            loupe = Offset.Unspecified
                         }
                     }
                 },
@@ -1313,6 +1333,14 @@ private fun DrawScope.handle(at: Offset, r: Float, toRight: Boolean, colour: Col
 /** How big a selection handle is drawn, and how far from its middle a finger still takes it. */
 private val HANDLE = 10.dp
 private val HANDLE_REACH = 24.dp
+
+/**
+ * The loupe: the platform text magnifier's size (`Magnifier.createBuilderWithOldMagnifierDefaults`,
+ * whose zoom, lift and shade the builder's defaults are too) and its corner, the device dialogs'
+ * 28 dp, which is the theme's pill step as well.
+ */
+private val LOUPE = DpSize(100.dp, 48.dp)
+private val LOUPE_CORNER = 28.dp
 
 /**
  * Show the system selection toolbar around [around], updating its position on scroll.
