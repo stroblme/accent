@@ -4,6 +4,7 @@
 //! scopes no lines, so every line up to the paused one is looked at).
 
 use super::*;
+use breakpoints::Gutter;
 use sourceview5::AnnotationStyle;
 use sourceview5::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -29,9 +30,9 @@ impl Values {
     /// Paint `values`, name and value, the first of a name winning, after the lines of `tab` from
     /// the first to `paused` that name them. A line a diagnostic's message ends keeps it: two
     /// annotations on one line draw over each other.
-    pub(super) fn show(&self, tab: &Tab, paused: u32, values: &[(String, String)]) {
+    pub(super) fn show(&self, tab: &impl Gutter, paused: u32, values: &[(String, String)]) {
         self.clear();
-        let buffer = &tab.buffer;
+        let buffer = tab.buffer();
         let end = buffer
             .iter_at_line(paused as i32 + 1)
             .unwrap_or_else(|| buffer.end_iter());
@@ -69,7 +70,7 @@ impl Values {
                 continue;
             }
             let said = cut(&named.join(", "), LONGEST);
-            let fits = crate::diagnostics::fit(&tab.view, line, said);
+            let fits = crate::diagnostics::fit(tab.view(), line, said);
             let annotation = sourceview5::Annotation::new(
                 Some(&fits),
                 None::<gtk::gio::Icon>,
@@ -80,8 +81,8 @@ impl Values {
             #[cfg(feature = "bench")]
             shown.push((line, fits));
         }
-        tab.view.annotations().add_provider(&provider);
-        self.painted.replace(Some((tab.view.clone(), provider)));
+        tab.view().annotations().add_provider(&provider);
+        self.painted.replace(Some((tab.view().clone(), provider)));
         #[cfg(feature = "bench")]
         self.shown.replace(shown);
     }

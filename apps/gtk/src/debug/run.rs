@@ -461,7 +461,13 @@ impl App {
     /// where it is paused: the variables of each scope cheap to list, as Variables lists them,
     /// rather than an `evaluate` a name. Dropped once the program has moved on or another call
     /// is selected.
-    fn show_values(self: &Rc<Self>, tab: &Rc<Tab>, run: &Rc<Run>, frame: i64, line: u32) {
+    fn show_values<G: breakpoints::Gutter + 'static>(
+        self: &Rc<Self>,
+        tab: &Rc<G>,
+        run: &Rc<Run>,
+        frame: i64,
+        line: u32,
+    ) {
         let Some(vault) = self.vault().cloned() else {
             return;
         };

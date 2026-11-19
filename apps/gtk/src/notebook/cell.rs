@@ -143,7 +143,12 @@ pub struct Marks {
     pub execution: RefCell<Option<sourceview5::Mark>>,
     /// The cell's diagnostics laid again around the breakpoints, once it has them.
     pub remark: RefCell<Option<Box<dyn Fn()>>>,
+    /// Whether a diagnostic's message ends a line of the cell, once it has them.
+    pub messages: RefCell<Option<Messages>>,
 }
+
+/// Whether a diagnostic's message ends a line of a cell.
+pub type Messages = Box<dyn Fn(i32) -> bool>;
 
 impl Gutter for Marks {
     fn buffer(&self) -> &sourceview5::Buffer {
@@ -162,6 +167,10 @@ impl Gutter for Marks {
         if let Some(remark) = self.remark.borrow().as_ref() {
             remark();
         }
+    }
+
+    fn has_message(&self, line: i32) -> bool {
+        (self.messages.borrow().as_ref()).is_some_and(|messages| messages(line))
     }
 }
 
@@ -450,6 +459,7 @@ impl CellView {
                 breakpoints: RefCell::default(),
                 execution: RefCell::default(),
                 remark: RefCell::default(),
+                messages: RefCell::default(),
             });
             breakpoints::install(&marks);
             view.connect_realize(breakpoints::restyle);

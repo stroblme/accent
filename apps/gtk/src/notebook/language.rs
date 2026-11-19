@@ -215,6 +215,17 @@ impl lang::Editor for CellEditor {
         self.snippet.replace(Some(snippet.clone()));
     }
 
+    /// The paused cell's value of the name at `start`, while the notebook's cells are debugged.
+    fn value(
+        self: Rc<Self>,
+        start: &gtk::TextIter,
+    ) -> Option<(String, accent_api::Task<accent_api::debug::Evaluated>)> {
+        let tab = self.tab.upgrade().filter(|_| self.kind == Kind::Code)?;
+        let expression = crate::hover::expression_at_iter(start)?;
+        let asked = tab.evaluate(expression.clone())?;
+        Some((expression, asked))
+    }
+
     fn ghost(&self) -> Option<&ghost::State> {
         (self.kind == Kind::Markdown).then_some(&self.ghost)
     }
@@ -588,13 +599,19 @@ impl NotebookTab {
             ghost: ghost::State::default(),
         });
         follow_edits(&cell);
-        // A breakpoint coming or going takes its line's icon from a diagnostic.
+        // A breakpoint coming or going takes its line's icon from a diagnostic, and a line its
+        // message ends keeps it from an inline value.
         if let Some(marks) = &editor.marks {
             let weak = Rc::downgrade(&cell);
             marks.remark.replace(Some(Box::new(move || {
                 if let Some(cell) = weak.upgrade() {
                     cell.painted.remark();
                 }
+            })));
+            let weak = Rc::downgrade(&cell);
+            marks.messages.replace(Some(Box::new(move |line| {
+                let cell = weak.upgrade();
+                cell.is_some_and(|c| c.painted.messages().contains_key(&line))
             })));
         }
         let features: Rc<dyn lang::Editor> = cell.clone();
@@ -830,6 +847,24 @@ fn follow_edits(cell: &Rc<CellEditor>) {
             diagnostics::restyle(&cell.buffer, view);
         }
     });
+}
+
+/// What `ACCENT_BENCH_NOTEBOOK_DEBUG` reads.
+#[cfg(feature = "bench")]
+impl NotebookTab {
+    /// What a hover over 1-based `line` and 0-based `column` of cell `n`, from 0, asks the paused
+    /// program.
+    pub fn bench_value(
+        self: &Rc<Self>,
+        n: usize,
+        line: i32,
+        column: i32,
+    ) -> Option<(String, accent_api::Task<accent_api::debug::Evaluated>)> {
+        let id = self.views.borrow().get(n)?.id;
+        let cell = self.lang.editors.borrow().get(&id).cloned()?;
+        let start = cell.buffer.iter_at_line_offset(line - 1, column)?;
+        lang::Editor::value(cell, &start)
+    }
 }
 
 #[cfg(test)]

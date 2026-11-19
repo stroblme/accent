@@ -158,6 +158,8 @@ impl App {
                 app.toggle_cell_breakpoint(tab, id, line);
             }
         });
+        let weak = Rc::downgrade(self);
+        tab.connect_evaluate(move |tab, expression| weak.upgrade()?.cell_value(tab, expression));
         tab.connect_autosave(on(|app, tab| app.save_model(tab, false)));
         tab.connect_banner(on(|app, tab| app.resolve_model(tab)));
         let weak = Rc::downgrade(self);

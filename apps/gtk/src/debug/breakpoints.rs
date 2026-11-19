@@ -17,6 +17,8 @@ pub(crate) trait Gutter {
     fn breakpoints(&self) -> &RefCell<Vec<Breakpoint>>;
     /// The diagnostics' icons laid again, around the breakpoints' ([`redraw`]).
     fn remarked(&self);
+    /// Whether a diagnostic's message ends `line`, which then keeps it from an inline value.
+    fn has_message(&self, line: i32) -> bool;
 }
 
 impl Gutter for Tab {
@@ -35,6 +37,10 @@ impl Gutter for Tab {
     fn remarked(&self) {
         self.remark_diagnostics();
     }
+
+    fn has_message(&self, line: i32) -> bool {
+        Tab::has_message(self, line)
+    }
 }
 
 impl<G: Gutter> Gutter for Rc<G> {
@@ -52,6 +58,10 @@ impl<G: Gutter> Gutter for Rc<G> {
 
     fn remarked(&self) {
         G::remarked(self);
+    }
+
+    fn has_message(&self, line: i32) -> bool {
+        G::has_message(self, line)
     }
 }
 

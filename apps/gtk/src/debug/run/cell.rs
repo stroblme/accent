@@ -348,7 +348,7 @@ impl App {
     /// Show `frame` in its cell, where it is one of the debugged notebook's: the notebook to the
     /// front of its pane, the caret on the line with the keyboard in the cell as a stop in a file
     /// takes it, and the line marked. False for any other frame.
-    pub(super) fn show_cell_frame(self: &Rc<Self>, run: &Run, frame: &Frame) -> bool {
+    pub(super) fn show_cell_frame(self: &Rc<Self>, run: &Rc<Run>, frame: &Frame) -> bool {
         let Some(cell) = &run.cell else {
             return false;
         };
@@ -371,8 +371,20 @@ impl App {
         tab.goto_place(number - 1, line, column);
         if let Some(marks) = tab.pause_at(id, frame.pos.line) {
             self.debugger.paused_cell.replace(Rc::downgrade(&marks));
+            self.show_values(&marks, run, frame.id, frame.pos.line);
         }
         true
+    }
+
+    /// What a hover over `tab`'s cells asks the paused program, while its cells are debugged.
+    pub(crate) fn cell_value(
+        &self,
+        tab: &Rc<NotebookTab>,
+        expression: String,
+    ) -> Option<accent_api::Task<Evaluated>> {
+        let run = self.debugger.run()?;
+        let ours = (run.cell.as_ref()).is_some_and(|c| c.notebook.ptr_eq(&Rc::downgrade(tab)));
+        ours.then(|| self.debug_evaluate(expression, Context::Hover))?
     }
 
     /// Where the session holds the breakpoints of a cell's file: `false` where `path` is no cell's.

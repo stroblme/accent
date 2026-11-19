@@ -131,6 +131,24 @@ pub(super) fn bench_notebook_debug(app: &Rc<App>, rel: &str) {
             return;
         };
         println!("bench nbdebug locals {}", locals.join(" "));
+        let painted = || Some(app.debugger.inline_values()).filter(|lines| !lines.is_empty());
+        let Some(painted) = until(&app, "inline", painted).await else {
+            return;
+        };
+        println!("bench nbdebug inline {}", painted.join(" | "));
+        // The `x` of `y = x * 2`.
+        let Some((expression, asked)) = tab.bench_value(0, 2, 8) else {
+            println!("bench nbdebug timeout hover");
+            return bench_quit(&app);
+        };
+        match glib::future_with_timeout(Duration::from_millis(WAIT), asked).await {
+            Ok(Ok(value)) => println!("bench nbdebug hover {expression} = {}", value.result),
+            Ok(Err(e)) => println!("bench nbdebug hover {expression} failed: {e}"),
+            Err(_) => {
+                println!("bench nbdebug timeout hover");
+                return bench_quit(&app);
+            }
+        }
         // In front with the keyboard, as a reader brings it forward to type at it.
         act("win.debug-console");
         app.console_typed("x * 2\r");
@@ -156,6 +174,18 @@ pub(super) fn bench_notebook_debug(app: &Rc<App>, rel: &str) {
             return;
         };
         println!("bench nbdebug step cell {number}:{line}");
+        let at = format!("{line}:");
+        let painted = || {
+            let painted = app.debugger.inline_values();
+            painted
+                .iter()
+                .any(|l| l.starts_with(&at))
+                .then_some(painted)
+        };
+        let Some(painted) = until(&app, "inline step", painted).await else {
+            return;
+        };
+        println!("bench nbdebug inline {}", painted.join(" | "));
         act("win.debug-continue");
         if until(&app, "ended", ended).await.is_none() {
             return;

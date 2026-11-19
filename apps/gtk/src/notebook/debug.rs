@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use accent_api::debug::{Breakpoint, Placed};
+use accent_api::debug::{Breakpoint, Evaluated, Placed};
 use accent_core::notebook::{CellId, Kind};
 use adw::prelude::*;
 use sourceview5::prelude::{BufferExt as _, ViewExt as _};
@@ -24,10 +24,15 @@ pub(super) struct State {
     kept: std::cell::RefCell<HashMap<CellId, Vec<Breakpoint>>>,
     /// A click in a cell's marks column, on its 0-based line.
     on_breakpoint: Hook<Toggled>,
+    /// What a hover asks the paused program, while its cells are debugged.
+    on_evaluate: Hook<Evaluate>,
 }
 
 /// A breakpoint toggled on a 0-based line of a notebook's cell.
 type Toggled = dyn Fn(&Rc<NotebookTab>, CellId, u32);
+
+/// A hover's expression, asked of the program paused in a notebook's cells.
+type Evaluate = dyn Fn(&Rc<NotebookTab>, String) -> Option<accent_api::Task<Evaluated>>;
 
 impl State {
     pub(super) fn marks(&self) -> i32 {
@@ -64,6 +69,21 @@ impl NotebookTab {
 
     pub fn connect_breakpoint(&self, f: impl Fn(&Rc<NotebookTab>, CellId, u32) + 'static) {
         self.debug.on_breakpoint.set(Rc::new(f));
+    }
+
+    pub fn connect_evaluate(
+        &self,
+        f: impl Fn(&Rc<NotebookTab>, String) -> Option<accent_api::Task<Evaluated>> + 'static,
+    ) {
+        self.debug.on_evaluate.set(Rc::new(f));
+    }
+
+    /// What `expression` holds in the paused program, while its cells are debugged.
+    pub(super) fn evaluate(
+        self: &Rc<Self>,
+        expression: String,
+    ) -> Option<accent_api::Task<Evaluated>> {
+        (self.debug.on_evaluate.get()?)(self, expression)
     }
 
     /// Wire code cell `id`'s editor, just built: a click in its marks column is a breakpoint, and

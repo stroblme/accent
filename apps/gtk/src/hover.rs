@@ -141,15 +141,20 @@ fn diagnostic_markup(item: &accent_api::Diagnostic) -> String {
 /// What the hovered name at `start` holds in the paused program, `self.items` on its `items`,
 /// as it is asked for; `None` unless a program is paused in a file its debugger runs.
 pub(crate) fn value_of(tab: &Rc<Tab>, start: &gtk::TextIter) -> Option<(String, Task<Evaluated>)> {
+    let expression = expression_at_iter(start)?;
+    let asked = (tab.lang.hooks()?.evaluate)(tab, expression.clone())?;
+    Some((expression, asked))
+}
+
+/// What a hover at `start` asks the paused program for ([`crate::debug::expression_at`]).
+pub(crate) fn expression_at_iter(start: &gtk::TextIter) -> Option<String> {
     let mut from = *start;
     from.set_line_offset(0);
     let mut to = *start;
     if !to.ends_line() {
         to.forward_to_line_end();
     }
-    let expression = crate::debug::expression_at(&from.text(&to), start.line_offset() as usize)?;
-    let asked = (tab.lang.hooks()?.evaluate)(tab, expression.clone())?;
-    Some((expression, asked))
+    crate::debug::expression_at(&from.text(&to), start.line_offset() as usize)
 }
 
 /// `expression = value` in monospace, the value's type dimmed after it.
