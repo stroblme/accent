@@ -1,8 +1,66 @@
 //! Run vault work off the main loop so remote round trips cannot block the UI.
 //!
-//! These helpers centralise worker dispatch, awaiting results and reporting worker panics.
+//! These helpers centralise worker dispatch, awaiting results and reporting worker panics, and
+//! cut what has to run on the main loop, drawing with GTK, into slices ([`Slices`]).
 
-use gtk::gio;
+use std::cell::Cell;
+use std::time::{Duration, Instant};
+
+use accent_api::link::Stop;
+use gtk::{gio, glib};
+
+/// How long a slice of work on the main loop runs before the window draws a frame and takes its
+/// input again: three frames at 60 Hz, a pause nobody reads as a freeze.
+const SLICE: Duration = Duration::from_millis(50);
+
+/// What a stop ends work in slices with, which the toast saying how it went keeps quiet about.
+pub(crate) const STOPPED: &str = "stopped";
+
+/// Work that has to run on the main loop, as drawing with GTK does, cut into slices of about
+/// [`SLICE`]: between two of its steps, [`Slices::pause`] lets the window draw a frame and take
+/// its input once the slice is used up, and ends the work once its [`Stop`] is pressed.
+pub(crate) struct Slices {
+    /// When the slice running began.
+    since: Cell<Instant>,
+    stop: Stop,
+}
+
+impl Slices {
+    /// Slices that nothing stops.
+    pub(crate) fn new() -> Slices {
+        Slices::stopped_by(Stop::default())
+    }
+
+    pub(crate) fn stopped_by(stop: Stop) -> Slices {
+        Slices {
+            since: Cell::new(Instant::now()),
+            stop,
+        }
+    }
+
+    /// Give the main loop back once the slice is used up; [`STOPPED`] once the stop is pressed.
+    pub(crate) async fn pause(&self) -> Result<(), String> {
+        match self.since.get().elapsed() >= SLICE {
+            true => self.yield_now().await,
+            false => self.stopped(),
+        }
+    }
+
+    /// Give the main loop back now, before a step that cannot be cut and so takes a slice of its
+    /// own, at a priority below GTK's redraw, so a frame that is due is drawn first.
+    pub(crate) async fn yield_now(&self) -> Result<(), String> {
+        glib::timeout_future_with_priority(glib::Priority::DEFAULT_IDLE, Duration::ZERO).await;
+        self.since.set(Instant::now());
+        self.stopped()
+    }
+
+    fn stopped(&self) -> Result<(), String> {
+        match self.stop.stopped() {
+            true => Err(STOPPED.to_string()),
+            false => Ok(()),
+        }
+    }
+}
 
 /// Run `work` on a worker thread; log panics under `what` and return `None`.
 ///
@@ -61,7 +119,17 @@ pub fn or_empty<T: Default>(what: &str, answer: accent_api::Result<T>) -> T {
 
 #[cfg(test)]
 mod tests {
-    use super::panic_message;
+    use super::{STOPPED, Slices, Stop, panic_message};
+
+    #[test]
+    fn a_stop_ends_work_in_slices_at_its_next_step() {
+        let stop = Stop::default();
+        let slices = Slices::stopped_by(stop.clone());
+        let context = gtk::glib::MainContext::new();
+        assert_eq!(context.block_on(slices.pause()), Ok(()));
+        stop.stop();
+        assert_eq!(context.block_on(slices.pause()), Err(STOPPED.to_string()));
+    }
 
     #[test]
     fn a_panic_says_what_it_said() {

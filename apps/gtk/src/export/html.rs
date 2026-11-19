@@ -74,7 +74,7 @@ impl App {
         self.busy_with(
             format!("Exporting {name}…"),
             format!("export {name}"),
-            async move {
+            move |_| async move {
                 let html = page(&app, paper, Csp::File).await?;
                 written(dest, html).await?;
                 Ok(Some(format!("Exported {name}")))
@@ -91,7 +91,7 @@ impl App {
         self.busy_with(
             format!("Opening {name} in your browser…"),
             format!("open {name} in your browser"),
-            async move {
+            move |_| async move {
                 let html = page(&app, paper, Csp::Browser).await?;
                 let file = browser_file(&rel);
                 written(file.clone(), html).await?;

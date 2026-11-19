@@ -2,9 +2,9 @@
 //! bounds in file colours, which the preview recolours through `look::show_diagram` and an
 //! export writes into the page.
 //!
-//! Read on a worker and draw on the GTK main thread. Cache by file version and page, until a
-//! picture the diagram names by a path changes, so note renders, theme changes and repeated
-//! embeds avoid redundant drawing.
+//! Read on a worker and draw on the GTK main thread in slices (`work::Slices`). Cache by file
+//! version and page, until a picture the diagram names by a path changes, so note renders, theme
+//! changes and repeated embeds avoid redundant drawing.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -70,7 +70,10 @@ pub async fn svg(
         web,
         files: files.as_ref(),
     };
-    let bytes = render::svg(&file, i, Area::Drawing, pictures).ok()?;
+    let slices = crate::work::Slices::new();
+    let bytes = render::svg(&file, i, Area::Drawing, pictures, &slices)
+        .await
+        .ok()?;
     let svg: Rc<str> = String::from_utf8(bytes).ok()?.into();
     DRAWN.with_borrow_mut(|drawn| drawn.insert(key, (stamp, svg.clone(), files)));
     Some(svg)

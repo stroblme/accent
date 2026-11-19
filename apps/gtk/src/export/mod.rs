@@ -5,6 +5,8 @@
 //! their own export modules.
 
 use super::*;
+use crate::work::Slices;
+use accent_api::link::Stop;
 
 pub(crate) mod css;
 mod html;
@@ -166,25 +168,125 @@ impl App {
         doc.and_then(rendered::note_for)
     }
 
-    /// Run `work` while the status bar says `busy`, then say how it went: the toast it asks for,
-    /// or that the window cannot `what`, with its reason. A PDF's print and export say it so too.
-    pub(crate) fn busy_with(
+    /// Run the work `start` hands back as a [`Job`] that says `busy`, then say how it went: the
+    /// toast it asks for, or that the window cannot `what`, with its reason, and nothing once the
+    /// reader stopped it. A PDF's print and export say it so too.
+    pub(crate) fn busy_with<F>(
         self: &Rc<Self>,
         busy: String,
         what: String,
-        work: impl Future<Output = Result<Option<String>, String>> + 'static,
-    ) {
-        self.statusbar.set_transfer(&busy, true);
+        start: impl FnOnce(Rc<Job>) -> F,
+    ) where
+        F: Future<Output = Result<Option<String>, String>> + 'static,
+    {
+        let job = Job::start(self, busy);
+        let work = start(job.clone());
         let app = self.clone();
         glib::spawn_future_local(async move {
             let said = work.await;
-            app.statusbar.set_transfer(&busy, false);
+            job.end();
             match said {
                 Ok(Some(done)) => app.toast(&done),
                 Ok(None) => {}
+                // The reader stopped it, which is answer enough.
+                Err(why) if why == work::STOPPED => {}
                 Err(why) => app.cannot(&what, why),
             }
         });
+    }
+}
+
+/// A print or an export being made, from its command to its toast (DESIGN.md, Status bar): its
+/// line on the status bar, which counts the pages done where the work says, with a Stop where the
+/// work runs in slices; and the bar across the top of the document column, once the work has taken
+/// [`loading::OPENING`], so a quick export never flashes it.
+pub(crate) struct Job {
+    app: Rc<App>,
+    busy: String,
+    /// What its line says now.
+    line: RefCell<String>,
+    stop: Stop,
+    stoppable: Cell<bool>,
+    /// How far it has got, where the work says.
+    fraction: Cell<Option<f64>>,
+    bar: Cell<Held>,
+}
+
+/// Where a job is with the bar.
+#[derive(Clone, Copy, PartialEq)]
+enum Held {
+    /// Not up yet.
+    Soon,
+    Up,
+    /// Done with it: the job is over, or waits on the reader.
+    Done,
+}
+
+impl Job {
+    fn start(app: &Rc<App>, busy: String) -> Rc<Job> {
+        app.statusbar.set_transfer(&busy, true);
+        let job = Rc::new(Job {
+            app: app.clone(),
+            line: RefCell::new(busy.clone()),
+            busy,
+            stop: Stop::default(),
+            stoppable: Cell::new(false),
+            fraction: Cell::new(None),
+            bar: Cell::new(Held::Soon),
+        });
+        let weak = Rc::downgrade(&job);
+        glib::timeout_add_local_once(loading::OPENING, move || {
+            if let Some(job) = weak.upgrade()
+                && job.bar.get() == Held::Soon
+            {
+                job.bar.set(Held::Up);
+                job.app.connect.hold(job.fraction.get());
+            }
+        });
+        job
+    }
+
+    /// The work runs on the main loop in slices, which the Stop beside its line ends between two
+    /// of them.
+    pub(crate) fn slices(&self) -> Slices {
+        if !self.stoppable.replace(true) {
+            let line = self.line.borrow();
+            self.app.statusbar.set_transfer(&line, false);
+            self.app.statusbar.set_stoppable(&line, true, &self.stop);
+        }
+        Slices::stopped_by(self.stop.clone())
+    }
+
+    /// `done` of `total` pages are made: "Exporting flow.pdf… 3/12 pages", the bar as far along.
+    pub(crate) fn pages(&self, done: usize, total: usize) {
+        let line = format!("{} {done}/{total} pages", self.busy);
+        let old = self.line.replace(line.clone());
+        self.app.statusbar.retell_transfer(&old, &line);
+        let fraction = done as f64 / total.max(1) as f64;
+        self.fraction.set(Some(fraction));
+        if self.bar.get() == Held::Up {
+            self.app.connect.advance(Some(fraction));
+        }
+    }
+
+    /// The work waits on the reader now, as a print dialog does: the bar lets go, and the line
+    /// says what it said at first, with no Stop.
+    pub(crate) fn settle(&self) {
+        self.let_go();
+        let old = self.line.replace(self.busy.clone());
+        self.app.statusbar.set_transfer(&old, false);
+        self.app.statusbar.set_transfer(&self.busy, true);
+    }
+
+    fn end(&self) {
+        self.let_go();
+        self.app.statusbar.set_transfer(&self.line.borrow(), false);
+    }
+
+    fn let_go(&self) {
+        if self.bar.replace(Held::Done) == Held::Up {
+            self.app.connect.release();
+        }
     }
 }
 

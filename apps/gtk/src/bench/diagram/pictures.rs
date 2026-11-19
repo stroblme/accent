@@ -222,7 +222,7 @@ const PICTURES: usize = 30;
 
 /// An SVG picture of its own for picture `i`: 160 curves, 40 rings and a line of text in a
 /// colour of its own, line art a few hundred elements big as a diagram's icons and charts are.
-fn svg_picture(i: usize) -> String {
+pub(in crate::bench) fn svg_picture(i: usize) -> String {
     let curves: String = (0..160)
         .map(|k| {
             let (x, y) = ((k * 7 + i) % 200, (k * 13 + i * 3) % 150);
@@ -241,7 +241,7 @@ fn svg_picture(i: usize) -> String {
 
 /// A PNG picture of its own for picture `i`: 320 × 240 pixels of a gradient under noise, which
 /// compresses as little as a photo does.
-fn png_picture(i: usize) -> Vec<u8> {
+pub(in crate::bench) fn png_picture(i: usize) -> Vec<u8> {
     let (w, h) = (320, 240);
     let mut seed = 0x9e37_79b9_u32.wrapping_mul(i as u32 + 1);
     let mut pixels = Vec::with_capacity(w * h * 3);

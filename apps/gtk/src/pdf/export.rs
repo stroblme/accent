@@ -18,7 +18,7 @@ pub fn export_to(app: &Rc<App>, pdf: &Rc<PdfTab>, dest: PathBuf) {
     app.busy_with(
         format!("Exporting {name}…"),
         format!("export {name}"),
-        async move { copied(&pdf, dest).await.map(|()| Some(done)) },
+        move |_| async move { copied(&pdf, dest).await.map(|()| Some(done)) },
     );
 }
 
@@ -31,8 +31,9 @@ pub fn print(app: &Rc<App>, pdf: &Rc<PdfTab>) {
     app.busy_with(
         format!("Printing {name}…"),
         format!("print {name}"),
-        async move {
+        move |job| async move {
             let file = print_copy(&pdf).await?;
+            job.settle();
             let dialog = gtk::PrintDialog::builder()
                 .title(title.as_str())
                 .modal(true)

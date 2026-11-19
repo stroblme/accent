@@ -42,7 +42,10 @@ pub(super) fn export(app: &Rc<App>, rel: &str, dir: &Path) {
         }
         let print = dir.join("print.pdf");
         let _ = std::fs::remove_file(&print);
-        let op = operation(&tab.file(), Default::default(), "print");
+        let slices = crate::work::Slices::new();
+        let op = operation(&tab.file(), Default::default(), "print", &slices, |_, _| {})
+            .await
+            .expect("the pages drawn");
         op.set_export_filename(&print);
         // From an idle, as Print… runs it: the export runs a main loop of its own.
         let ran = gio::GioFuture::new(&op, |op, _, done| {
@@ -86,8 +89,15 @@ const TALL: &str = r#"<mxfile><diagram name="Tall" id="tall"><mxGraphModel><root
 /// pixels: the red of the first three pixels across the half-way row, which the 1 wide line covers
 /// the middle one of, and whether the 0 wide line is drawn.
 pub(super) fn render(app: &Rc<App>) {
+    let app = app.clone();
+    glib::spawn_future_local(async move { render_tall(&app).await });
+}
+
+async fn render_tall(app: &Rc<App>) {
     let file = accent_drawio::File::from_bytes(TALL.as_bytes()).expect("the tall page");
-    let png = crate::diagram::export::rendered(&file, 0).expect("a PNG");
+    let png = crate::diagram::export::rendered(&file, 0)
+        .await
+        .expect("a PNG");
     let texture = gdk::Texture::from_bytes(&glib::Bytes::from_owned(png)).expect("decodes");
     let mut downloader = gdk::TextureDownloader::new(&texture);
     downloader.set_format(gdk::MemoryFormat::R8g8b8a8);

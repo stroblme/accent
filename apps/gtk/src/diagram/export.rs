@@ -1,5 +1,7 @@
 //! Export and print the current model, including unsaved edits, through [`render`]
 //! in file colours. PDF and print include all pages; PNG and SVG use the active page.
+//! Both are drawn in slices of the main loop, stopped by the Stop beside their line, the line
+//! counting a PDF's and a printout's pages.
 //! `accent --render-diagram` draws a page the same way for `accent-cli mcp`.
 
 use std::ffi::OsString;
@@ -12,9 +14,10 @@ use gtk::prelude::*;
 use gtk::{gio, glib};
 
 use super::DiagramTab;
-use super::render::{self, Area, Drawn, Out, Pictures};
+use super::render::{self, Area, Pictures};
 use crate::App;
 use crate::export::Export;
+use crate::work::Slices;
 
 /// The name Export as … offers for `tab`, `None` for what a diagram is not exported as.
 pub fn offered_name(tab: &DiagramTab, to: Export) -> Option<String> {
@@ -43,7 +46,7 @@ pub fn export_to(app: &Rc<App>, tab: &Rc<DiagramTab>, to: Export, dest: PathBuf)
     app.busy_with(
         format!("Exporting {name}…"),
         format!("export {name}"),
-        async move {
+        move |job| async move {
             if let Some(files) = &files {
                 files.fetch(&file).await;
             }
@@ -51,10 +54,12 @@ pub fn export_to(app: &Rc<App>, tab: &Rc<DiagramTab>, to: Export, dest: PathBuf)
                 web,
                 files: files.as_ref(),
             };
+            let slices = job.slices();
+            let told = |done, total| job.pages(done, total);
             let bytes = match to {
-                Export::Pdf => render::pdf(&file, pictures),
-                Export::Png => render::png(&file, page, pictures, None),
-                Export::Svg => render::svg(&file, page, Area::Drawing, pictures),
+                Export::Pdf => render::pdf(&file, pictures, &slices, told).await,
+                Export::Png => render::png(&file, page, pictures, None, &slices).await,
+                Export::Svg => render::svg(&file, page, Area::Drawing, pictures, &slices).await,
                 Export::Html => return Ok(None),
             }?;
             let write = move || accent_core::fs::write_bytes(&dest, &bytes, None);
@@ -97,13 +102,22 @@ fn render_stdin(page: Option<OsString>) -> Result<(), String> {
     std::io::stdin().read_to_end(&mut xml).map_err(say)?;
     let file = File::from_bytes(&xml).map_err(say)?;
     gtk::init().map_err(|e| format!("there is no display to draw on ({e})"))?;
-    let png = rendered(&file, page)?;
+    // No main loop runs yet: this one runs while the page is drawn and encoded.
+    let png = glib::MainContext::default().block_on(rendered(&file, page))?;
     std::io::stdout().write_all(&png).map_err(say)
 }
 
 /// Page `page` of `file` as `accent --render-diagram` draws it.
-pub(crate) fn rendered(file: &File, page: usize) -> Result<Vec<u8>, String> {
-    render::png(file, page, Pictures::default(), Some(RENDER_LONGEST))
+pub(crate) async fn rendered(file: &File, page: usize) -> Result<Vec<u8>, String> {
+    let slices = Slices::new();
+    render::png(
+        file,
+        page,
+        Pictures::default(),
+        Some(RENDER_LONGEST),
+        &slices,
+    )
+    .await
 }
 
 fn say(e: impl std::fmt::Display) -> String {
@@ -111,6 +125,7 @@ fn say(e: impl std::fmt::Display) -> String {
 }
 
 /// Print…: every page through GTK's print dialog, each fitted to a sheet of the paper chosen.
+/// The pages are drawn before the dialog opens, which then waits on the reader alone.
 pub fn print(app: &Rc<App>, tab: &Rc<DiagramTab>) {
     let name = crate::doc::file_name(&tab.key()).to_string();
     let (file, window) = (tab.file(), app.window.clone());
@@ -118,7 +133,7 @@ pub fn print(app: &Rc<App>, tab: &Rc<DiagramTab>) {
     app.busy_with(
         format!("Printing {name}…"),
         format!("print {name}"),
-        async move {
+        move |job| async move {
             if let Some(files) = &files {
                 files.fetch(&file).await;
             }
@@ -126,7 +141,9 @@ pub fn print(app: &Rc<App>, tab: &Rc<DiagramTab>) {
                 web,
                 files: files.as_ref(),
             };
-            let op = operation(&file, pictures, &name);
+            let told = |done, total| job.pages(done, total);
+            let op = operation(&file, pictures, &name, &job.slices(), told).await?;
+            job.settle();
             // From an idle, as a note's print: the dialog runs a main loop of its own, and glib
             // aborts on a future polled inside another's poll.
             let ran = gio::GioFuture::new(&op, move |op, _, done| {
@@ -141,14 +158,16 @@ pub fn print(app: &Rc<App>, tab: &Rc<DiagramTab>) {
     );
 }
 
-/// Print one sheet per page, aspect-preserving and centred within note margins.
-/// Match paper orientation to each page.
-pub fn operation(file: &File, pictures: Pictures, name: &str) -> gtk::PrintOperation {
-    let mut pages: Vec<Drawn> = Vec::new();
-    for i in 0..file.pages.len() {
-        pages.extend(render::draw(file, i, Area::Sheet, pictures, Out::Pdf));
-    }
-    let pages = Rc::new(pages);
+/// Print one sheet per page, aspect-preserving and centred within note margins, the pages drawn
+/// in `slices` and `told` as [`render::sheets`] is. Match paper orientation to each page.
+pub async fn operation(
+    file: &File,
+    pictures: Pictures<'_>,
+    name: &str,
+    slices: &Slices,
+    told: impl Fn(usize, usize),
+) -> Result<gtk::PrintOperation, String> {
+    let pages = Rc::new(render::sheets(file, pictures, slices, told).await?);
     let op = gtk::PrintOperation::new();
     op.set_job_name(name);
     op.set_n_pages(pages.len() as i32);
@@ -180,5 +199,5 @@ pub fn operation(file: &File, pictures: Pictures, name: &str) -> gtk::PrintOpera
             tracing::warn!("diagram page {i} not printed: {e}");
         }
     });
-    op
+    Ok(op)
 }

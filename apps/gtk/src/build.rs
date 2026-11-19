@@ -222,11 +222,13 @@ pub fn build_window(
     // replaced, so its bar spans the document column rather than sitting in the status bar
     // beside the text (DESIGN.md, Loading). The text stays in the status bar either way. Only a
     // remote vault puts the widget in the layout: a local one is connected from the moment it
-    // opens, so there is nothing to draw and no height to reserve.
+    // opens, so it reserves no height, and lays the bar a print or an export shows over the top
+    // of the tabs instead.
     let connect = connect::Bar::new();
     let editor_column = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    if vault.as_ref().is_some_and(|v| v.is_remote()) {
-        editor_column.append(connect.widget());
+    match vault.as_ref().is_some_and(|v| v.is_remote()) {
+        true => editor_column.append(connect.widget()),
+        false => toasts.widget().add_overlay(connect.widget()),
     }
     editor_column.append(toasts.widget());
 

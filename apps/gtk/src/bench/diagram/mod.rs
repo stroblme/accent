@@ -7,7 +7,7 @@ mod drag;
 mod input;
 mod layers;
 mod output;
-mod pictures;
+pub(super) mod pictures;
 mod props;
 mod round;
 mod select;

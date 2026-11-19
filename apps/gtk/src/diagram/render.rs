@@ -2,6 +2,8 @@
 //! Use file colours and paper (`Tint::FILE`) independently of the screen theme.
 //! Keep fills, strokes, text, formulas and SVG pictures (`sharp`) as PDF/SVG vectors; other
 //! pictures remain images.
+//! Drawing goes through GTK, so it runs on the main loop in slices (`work::Slices`), a prim or a
+//! part of the picture at a time; a PNG is encoded on a worker.
 
 use accent_drawio::{Color, File, Prim, Rect};
 use gtk::prelude::*;
@@ -10,6 +12,7 @@ use gtk::{cairo, gsk};
 use super::files::Files;
 use super::geometry::Frame;
 use super::paint::{self, Cache, Tint};
+use crate::work::Slices;
 
 /// Points per page unit: draw.io's unit is a CSS pixel, 1/96 in, and a PDF's point 1/72 in, so
 /// a Letter page of 850 × 1100 is a Letter sheet.
@@ -56,6 +59,41 @@ impl Drawn {
     /// The area onto `cr` at `scale` per page unit, its top-left at the origin, on its paper,
     /// with nothing of the picture past it.
     pub fn paint(&self, cr: &cairo::Context, scale: f64) -> Result<(), cairo::Error> {
+        self.under(cr, scale)?;
+        if let Some(node) = &self.node {
+            node.draw(cr);
+        }
+        cr.restore()
+    }
+
+    /// [`paint`](Self::paint) in `slices`: a container's children one after another, as it draws
+    /// them itself.
+    async fn paint_in(
+        &self,
+        cr: &cairo::Context,
+        scale: f64,
+        slices: &Slices,
+    ) -> Result<(), String> {
+        self.under(cr, scale).map_err(say)?;
+        let nodes = match self.node.as_ref() {
+            Some(node) => match node.downcast_ref::<gsk::ContainerNode>() {
+                Some(container) => (0..container.n_children())
+                    .map(|i| container.child(i))
+                    .collect(),
+                None => vec![node.clone()],
+            },
+            None => Vec::new(),
+        };
+        for node in nodes {
+            node.draw(cr);
+            slices.pause().await?;
+        }
+        cr.restore().map_err(say)
+    }
+
+    /// `cr` saved and made ready for the picture: its paper filled, clipped to the area, and at
+    /// the picture's [`DETAIL`].
+    fn under(&self, cr: &cairo::Context, scale: f64) -> Result<(), cairo::Error> {
         let (a, p) = (self.area, self.paper);
         cr.save()?;
         cr.scale(scale, scale);
@@ -65,11 +103,8 @@ impl Drawn {
         cr.rectangle(a.x, a.y, a.w, a.h);
         cr.fill_preserve()?;
         cr.clip();
-        if let Some(node) = &self.node {
-            cr.scale(1.0 / DETAIL, 1.0 / DETAIL);
-            node.draw(cr);
-        }
-        cr.restore()
+        cr.scale(1.0 / DETAIL, 1.0 / DETAIL);
+        Ok(())
     }
 }
 
@@ -82,9 +117,16 @@ pub struct Pictures<'a> {
     pub files: Option<&'a Files>,
 }
 
-/// Page `i` of `file` with `pictures`, to go `out`. `None` for no such page.
-pub fn draw(file: &File, i: usize, area: Area, pictures: Pictures, out: Out) -> Option<Drawn> {
-    let page = file.pages.get(i)?;
+/// Page `i` of `file` with `pictures`, to go `out`, drawn in `slices`.
+pub async fn draw(
+    file: &File,
+    i: usize,
+    area: Area,
+    pictures: Pictures<'_>,
+    out: Out,
+    slices: &Slices,
+) -> Result<Drawn, String> {
+    let page = file.pages.get(i).ok_or("there is no such page")?;
     let scene = accent_drawio::scene_with(page, &super::shown(i, file.pages.len()));
     // Pango lays labels out through a widget; their sizes are absolute, so any one does.
     let widget = gtk::DrawingArea::new();
@@ -107,6 +149,7 @@ pub fn draw(file: &File, i: usize, area: Area, pictures: Pictures, out: Out) -> 
     for (j, prim) in scene.prims.iter().enumerate() {
         let widget = widget.upcast_ref();
         paint::prim(&snapshot, widget, j, prim, &frame, &cache, Tint::FILE);
+        slices.pause().await?;
     }
     let node = snapshot.to_node();
     let (w, h) = page.size();
@@ -123,7 +166,7 @@ pub fn draw(file: &File, i: usize, area: Area, pictures: Pictures, out: Out) -> 
         (_, _, Some(d)) => d,
         (_, _, None) => Rect::new(0.0, 0.0, w, h),
     };
-    Some(Drawn {
+    Ok(Drawn {
         node,
         area,
         paper: scene.background.unwrap_or(Color::WHITE),
@@ -151,59 +194,102 @@ fn painted(prims: &[Prim], cache: &Cache) -> Option<Rect> {
     boxes.flatten().reduce(|a, b| a.union(&b))
 }
 
-/// Every page of `file` as a PDF, a PDF page the size of each sheet.
-pub fn pdf(file: &File, pictures: Pictures) -> Result<Vec<u8>, String> {
+/// Every page of `file` cut to its sheet, as a PDF and Print… take them, drawn in `slices`,
+/// `told` how many are done of how many as each begins.
+pub async fn sheets(
+    file: &File,
+    pictures: Pictures<'_>,
+    slices: &Slices,
+    told: impl Fn(usize, usize),
+) -> Result<Vec<Drawn>, String> {
+    let total = file.pages.len();
+    let mut pages = Vec::with_capacity(total);
+    for i in 0..total {
+        told(i, total);
+        pages.push(draw(file, i, Area::Sheet, pictures, Out::Pdf, slices).await?);
+    }
+    Ok(pages)
+}
+
+/// Every page of `file` as a PDF, a PDF page the size of each sheet, drawn in `slices` and
+/// `told` as [`sheets`] is.
+pub async fn pdf(
+    file: &File,
+    pictures: Pictures<'_>,
+    slices: &Slices,
+    told: impl Fn(usize, usize),
+) -> Result<Vec<u8>, String> {
     let surface = cairo::PdfSurface::for_stream(1.0, 1.0, Vec::<u8>::new()).map_err(say)?;
-    for i in 0..file.pages.len() {
-        let Some(drawn) = draw(file, i, Area::Sheet, pictures, Out::Pdf) else {
-            continue;
-        };
+    let total = file.pages.len();
+    for i in 0..total {
+        told(i, total);
+        let drawn = draw(file, i, Area::Sheet, pictures, Out::Pdf, slices).await?;
         let (w, h) = (drawn.area.w * PDF_POINT, drawn.area.h * PDF_POINT);
         surface.set_size(w, h).map_err(say)?;
         let cr = cairo::Context::new(&surface).map_err(say)?;
-        drawn.paint(&cr, PDF_POINT).map_err(say)?;
+        drawn.paint_in(&cr, PDF_POINT, slices).await?;
+        // Writing the page out is one step that cannot be cut, so it has a slice to itself.
+        slices.yield_now().await?;
         cr.show_page().map_err(say)?;
     }
+    slices.yield_now().await?;
     bytes_of(surface.finish_output_stream())
 }
 
-/// Page `i` of `file` as an SVG of `area`, a page unit to a pixel.
-pub fn svg(file: &File, i: usize, area: Area, pictures: Pictures) -> Result<Vec<u8>, String> {
-    let drawn = draw(file, i, area, pictures, Out::Svg).ok_or("there is no such page")?;
+/// Page `i` of `file` as an SVG of `area`, a page unit to a pixel, drawn in `slices`.
+pub async fn svg(
+    file: &File,
+    i: usize,
+    area: Area,
+    pictures: Pictures<'_>,
+    slices: &Slices,
+) -> Result<Vec<u8>, String> {
+    let drawn = draw(file, i, area, pictures, Out::Svg, slices).await?;
     let mut surface =
         cairo::SvgSurface::for_stream(drawn.area.w, drawn.area.h, Vec::<u8>::new()).map_err(say)?;
     surface.set_document_unit(cairo::SvgUnit::Px);
     let cr = cairo::Context::new(&surface).map_err(say)?;
-    drawn.paint(&cr, 1.0).map_err(say)?;
+    drawn.paint_in(&cr, 1.0, slices).await?;
     drop(cr);
+    // The file is written out at the finish, one step that cannot be cut.
+    slices.yield_now().await?;
     bytes_of(surface.finish_output_stream())
 }
 
 /// Page `i` of `file`, its drawing, as a PNG at [`PNG_SCALE`] pixels per page unit, or fewer
-/// where its longer side would be more than `longest` pixels.
-pub fn png(
+/// where its longer side would be more than `longest` pixels, drawn in `slices` and encoded on a
+/// worker.
+pub async fn png(
     file: &File,
     i: usize,
-    pictures: Pictures,
+    pictures: Pictures<'_>,
     longest: Option<f64>,
+    slices: &Slices,
 ) -> Result<Vec<u8>, String> {
-    let at = |pixels| draw(file, i, Area::Drawing, pictures, Out::Png(pixels));
-    let mut drawn = at(PNG_SCALE).ok_or("there is no such page")?;
+    let at = |pixels| draw(file, i, Area::Drawing, pictures, Out::Png(pixels), slices);
+    let mut drawn = at(PNG_SCALE).await?;
     let scale = png_scale((drawn.area.w, drawn.area.h), longest);
     // Its area is known once drawn, and a page shrunk to fit is drawn again at the pixels it goes
     // out at, which its lines are put on whole ones of.
     if scale < PNG_SCALE {
-        drawn = at(scale).ok_or("there is no such page")?;
+        drawn = at(scale).await?;
     }
     let (w, h) = (drawn.area.w * scale, drawn.area.h * scale);
     let surface =
         cairo::ImageSurface::create(cairo::Format::ARgb32, w as i32, h as i32).map_err(say)?;
     let cr = cairo::Context::new(&surface).map_err(say)?;
-    drawn.paint(&cr, scale).map_err(say)?;
+    drawn.paint_in(&cr, scale, slices).await?;
     drop(cr);
-    let mut bytes = Vec::new();
-    surface.write_to_png(&mut bytes).map_err(say)?;
-    Ok(bytes)
+    // The pixels alone cross to the worker, which cairo-rs allows of a surface no one else holds.
+    let pixels = surface.take_data().map_err(say)?;
+    let encode = move || {
+        let mut bytes = Vec::new();
+        pixels.into_inner().write_to_png(&mut bytes).map_err(say)?;
+        Ok(bytes)
+    };
+    crate::work::off_thread("png", encode)
+        .await
+        .unwrap_or_else(|| Err("the worker stopped".to_string()))
 }
 
 /// Pixels per page unit for a PNG of an `area` big drawing: [`PNG_SCALE`], or what keeps its
