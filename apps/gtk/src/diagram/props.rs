@@ -440,10 +440,19 @@ fn part<T: IsA<gtk::Widget>>(root: &impl IsA<gtk::Widget>) -> Option<T> {
 /// in it, which [`spin`] keeps empty until a number is stepped to or typed.
 fn show(row: &adw::SpinRow, read: Read<f64>) {
     set_mixed(row, false);
-    row.set_value(read.value);
+    put(row, read.value);
     if read.mixed {
         set_mixed(row, true);
         row.set_text("");
+    }
+}
+
+/// Give a spin row `value` through its spin button, which writes the number into the field even
+/// where it holds that value already, where `AdwSpinRow::set_value` would leave the field empty.
+fn put(row: &adw::SpinRow, value: f64) {
+    match part::<gtk::SpinButton>(row) {
+        Some(spin) => spin.set_value(value),
+        None => row.set_value(value),
     }
 }
 
@@ -611,7 +620,7 @@ fn spin(title: &str, range: (f64, f64, f64)) -> adw::SpinRow {
     row.connect_value_notify(|row| {
         if mixed(row) {
             set_mixed(row, false);
-            row.set_value(row.value());
+            put(row, row.value());
         }
     });
     row

@@ -242,6 +242,30 @@ pub(super) fn props(app: &Rc<App>, rel: &str) {
                 page() == untouched
             );
         }
+        // a alone shows its size again, the number the field held while mixed.
+        tab.select(vec!["a".to_string()]);
+        let alone = size().map(|r| r.text().to_string());
+        println!("bench diagram props mixed alone field={alone:?}");
+        tab.select(both.clone());
+        // A step from mixed, Font Size's + clicked, starts from the first cell's size and
+        // reaches both, the field showing the number at once.
+        let up = size().and_then(|row| find_widget(row.upcast_ref(), &|w| w.has_css_class("up")));
+        if let Some(at) = up.and_then(|up| middle_on_screen(&app, &up)) {
+            super::super::git::xtest(&format!("move {at}; down; up")).await;
+            // Read before the step lands, a burst settling after 300 ms.
+            glib::timeout_future(Duration::from_millis(100)).await;
+            let field = size().map(|r| r.text().to_string());
+            glib::timeout_future(Duration::from_millis(500)).await;
+            println!(
+                "bench diagram props mixed stepped field={field:?} fontSize={:?}",
+                keys("fontSize")
+            );
+            tab.undo();
+            println!(
+                "bench diagram props mixed stepped undone={}",
+                page() == untouched
+            );
+        }
         tab.key_target().grab_focus();
         if let Some(rounded) = check_of("Rounded") {
             rounded.activate();
