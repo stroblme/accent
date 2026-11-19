@@ -133,7 +133,7 @@ impl PdfView {
                             return;
                         }
                         gesture.set_state(gtk::EventSequenceState::Claimed);
-                        obj.select_between(x, y, x + dx, y + dy);
+                        obj.drag_select((x, y), (x + dx, y + dy), hand_of(gesture));
                     }
                     mode if mode.draws() => {
                         // The page is whichever one the stroke began on: a hand that runs
@@ -189,6 +189,7 @@ impl PdfView {
             #[weak]
             obj,
             move |drag, dx, dy| {
+                obj.loupe(None);
                 let from = obj.imp().drag_from.replace(None);
                 let held = obj.imp().held.replace(false);
                 let mode = obj.imp().drag_mode.get();
@@ -268,7 +269,10 @@ impl PdfView {
         drag.connect_cancel(glib::clone!(
             #[weak]
             obj,
-            move |_, _| obj.imp().drag_from.set(None)
+            move |_, _| {
+                obj.imp().drag_from.set(None);
+                obj.loupe(None);
+            }
         ));
         obj.add_controller(drag);
 
@@ -742,10 +746,32 @@ impl PdfView {
         }
     }
 
+    /// A selection's drag from `from` reached `to`: the text between them is selected, and under
+    /// a finger or a pen, which cover what they select, the loupe shows it above the hand.
+    fn drag_select(&self, from: (f64, f64), to: (f64, f64), hand: Hand) {
+        self.select_between(from.0, from.1, to.0, to.1);
+        if hand != Hand::Mouse {
+            self.loupe(Some(to));
+        }
+    }
+
+    /// A selection's drag by `hand`, as the gesture makes one once it is a selection. Only
+    /// `ACCENT_BENCH_PDF=loupe` drives it, no finger reaching a headless window.
+    #[cfg(feature = "bench")]
+    pub fn bench_drag_select(&self, from: (f64, f64), to: (f64, f64), hand: Hand) {
+        self.drag_select(from, to, hand);
+    }
+
+    /// The hand let go of a selection's drag. Only `ACCENT_BENCH_PDF=loupe` asks.
+    #[cfg(feature = "bench")]
+    pub fn bench_lift(&self) {
+        self.loupe(None);
+    }
+
     /// Map off-paper points to page coordinates for selection drags through margins and gaps.
     /// Coordinates may be negative or exceed page height; nearest-glyph lookup anchors them
     /// without clamping.
-    fn nearest_page_point(&self, x: f64, y: f64) -> Option<(usize, (f32, f32))> {
+    pub(crate) fn nearest_page_point(&self, x: f64, y: f64) -> Option<(usize, (f32, f32))> {
         let (cx, cy) = self.content_at(x, y);
         let layout = self.imp().layout.borrow();
         let page = page_at(&layout, f64::from(cy));

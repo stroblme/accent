@@ -47,6 +47,7 @@ mod paste;
 mod pdf;
 mod pdf_draw;
 mod pdf_hover;
+mod pdf_loupe;
 mod pdf_outline;
 mod pdf_picture;
 mod pdf_remote;
@@ -271,6 +272,10 @@ use user_commands::bench_commands;
 ///   `pinch:<rel_path>` (a pinch after an Outline row's jump, after a scroll, and while the
 ///   scrolled window coasts back off the top from an XTEST wheel, keeps the page under the
 ///   fingers; generated `Attachments/pages.pdf`),
+///   `loupe` (a finger's selection drag, from where its long press hands it over, along a line,
+///   on a heading at the view's top and at its left edge, a pen's and a mouse's, and a real mouse
+///   drag through XTEST, each with the loupe's place and what it enlarges, held two seconds for a
+///   screenshot at `bench loupe hold`; writes and removes `loupe-drill.pdf`),
 ///   `scroll:<rel_path>` (wheel input and continuous PDF frame pacing, then Alt+wheel paging, `n`
 ///   at the end and Ctrl+wheel zoom),
 ///   `broken:<rel_path or absolute path>` (truncation/recovery; scratch file),
@@ -749,6 +754,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rel) = rel.strip_prefix("pinch:") {
                 return pdf_zoom::pinch(&app, rel);
+            }
+            if rel == "loupe" {
+                return pdf_loupe::run(&app);
             }
             if let Some(rel) = rel.strip_prefix("scroll:") {
                 return pdf_scroll::run(&app, rel);

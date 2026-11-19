@@ -246,7 +246,7 @@ fn ends(
 ///
 /// A hit inside a glyph's own box wins outright; otherwise the closest box by the distance from
 /// the point to it, so a drag through the margin still catches the line it is level with.
-fn nearest(glyphs: &[pdf::Glyph], (x, y): (f32, f32)) -> Option<usize> {
+pub(super) fn nearest(glyphs: &[pdf::Glyph], (x, y): (f32, f32)) -> Option<usize> {
     let mut best: Option<(f32, usize)> = None;
     for (i, glyph) in glyphs.iter().enumerate() {
         let r = glyph.rect;

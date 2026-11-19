@@ -850,6 +850,18 @@ impl PdfView {
         *self.imp().on_select.borrow_mut() = Some(Box::new(f));
     }
 
+    /// Called with where a finger or a pen selecting text is in the view as it moves, and with
+    /// `None` once it lets go: what the loupe follows.
+    pub fn connect_loupe(&self, f: impl Fn(Option<(f64, f64)>) + 'static) {
+        *self.imp().on_loupe.borrow_mut() = Some(Box::new(f));
+    }
+
+    fn loupe(&self, hand: Option<(f64, f64)>) {
+        if let Some(f) = self.imp().on_loupe.borrow().as_ref() {
+            f(hand);
+        }
+    }
+
     /// The layout as one line: what `ACCENT_BENCH_PDF` prints, and its only reader. Whether the
     /// page being read is wholly on screen is what Fit Height has to mean, so that is the last
     /// field rather than something the numbers have to be read for.
@@ -945,6 +957,7 @@ mod imp {
     type Zoomed = Box<dyn Fn()>;
     type OnReply = Box<dyn Fn(&super::PdfView, Reply)>;
     type OnSelect = Box<dyn Fn(&super::PdfView, super::Span)>;
+    type Loupe = Box<dyn Fn(Option<(f64, f64)>)>;
     type Lowres = Box<dyn Fn(u32)>;
     type Stroke = Box<dyn Fn(usize, Vec<(f32, f32)>)>;
     /// A page and the id of a stroke on it the eraser passed over, what a partial eraser left of
@@ -1078,6 +1091,7 @@ mod imp {
         pub on_wants: RefCell<Option<Wants>>,
         pub on_reply: RefCell<Option<OnReply>>,
         pub on_select: RefCell<Option<OnSelect>>,
+        pub on_loupe: RefCell<Option<Loupe>>,
         pub on_pressed: RefCell<Option<Coords>>,
         pub on_clicked: RefCell<Option<Click>>,
         pub on_ink: RefCell<Option<Stroke>>,
@@ -1158,6 +1172,7 @@ mod imp {
                 on_wants: RefCell::new(None),
                 on_reply: RefCell::new(None),
                 on_select: RefCell::new(None),
+                on_loupe: RefCell::new(None),
                 on_pressed: RefCell::new(None),
                 on_clicked: RefCell::new(None),
                 on_ink: RefCell::new(None),

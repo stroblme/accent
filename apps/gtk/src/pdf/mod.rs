@@ -4,7 +4,7 @@
 //! cached tiles without calling pdfium; `geometry` lays them out and `cache` budgets them.
 //! `tab` owns reading state, with `input`, `reply` and `disk` handling input, results and files.
 //! `tools` and `ring` provide drawing geometry and options, `typed` the Text tool's editor;
-//! `comment` shows annotations.
+//! `comment` shows annotations, and `loupe` enlarges the line a finger or a pen selects on.
 //! `drop` and the thumbnail strip (`crate::organize`) edit pages, and `drop` and `clipboard` put
 //! pictures from outside on them, read by `pictures`; `elsewhere` reads the pages of other PDFs
 //! a link preview shows; `export` writes print/export copies,
@@ -21,6 +21,7 @@ mod elsewhere;
 pub mod export;
 pub mod geometry;
 mod input;
+mod loupe;
 mod pictures;
 pub mod preview;
 pub mod protocol;

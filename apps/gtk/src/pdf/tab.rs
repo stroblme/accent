@@ -75,8 +75,8 @@ pub struct PdfTab {
     pub(super) status: adw::StatusPage,
     pub(super) view: PdfView,
     pub(super) thumbs: PdfView,
-    /// Plain parent for the link preview. Popovers do not re-present from widgets with custom
-    /// `size_allocate`, such as `PdfView` (DESIGN.md, States).
+    /// Plain parent for the link preview and the loupe. Popovers do not re-present from widgets
+    /// with custom `size_allocate`, such as `PdfView` (DESIGN.md, States).
     pub(super) host: gtk::Box,
     /// The drawing tools, floating over the page while they are out and nothing is presented.
     pub(super) ring: Rc<ring::PdfRing>,
@@ -197,6 +197,8 @@ pub struct PdfTab {
     pub(super) info: RefCell<pdf::Info>,
     /// The link preview on screen, if the pointer is on a link with Ctrl held.
     pub(super) preview: RefCell<Option<super::preview::Preview>>,
+    /// The loupe over a finger or a pen selecting text, while it selects.
+    pub(super) loupe: RefCell<Option<super::loupe::Loupe>>,
     /// A drag that arrived before the glyphs of every page it covers did, to answer when the
     /// last of them lands.
     pub(super) pending_select: Cell<Option<Span>>,
@@ -362,6 +364,7 @@ pub fn open(
         outline: RefCell::new(Vec::new()),
         info: RefCell::default(),
         preview: RefCell::new(None),
+        loupe: RefCell::new(None),
         query: Cell::new(0),
         searched: RefCell::default(),
         matches: RefCell::new(Vec::new()),
@@ -450,6 +453,7 @@ pub fn open(
     tab.wire_wheel();
     tab.watch_clipboard();
     tab.wire_preview();
+    tab.wire_loupe();
     tab.wire_comments();
     tab.wire_menu();
 

@@ -18,9 +18,9 @@ const TALL: f32 = 0.375;
 /// What a link preview keeps clear of its pane's edges, a PDF's or a diagram's, in logical pixels.
 const MARGIN: i32 = 12;
 
-/// The radius a link preview's picture is rounded by: Adwaita's popover corner (15 px) less the
-/// popover's padding (8 px), so the picture's corners run alongside the popover's.
-const CORNER: f32 = 7.0;
+/// The radius a link preview's picture is rounded by, and the loupe's: Adwaita's popover corner
+/// (15 px) less the popover's padding (8 px), so the picture's corners run alongside the popover's.
+pub(super) const CORNER: f32 = 7.0;
 
 /// The part of a page a link preview shows: drawn at `scale` logical pixels to a point, `size`
 /// logical pixels large, and starting `offset` of them down the page.

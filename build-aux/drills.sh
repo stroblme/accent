@@ -190,6 +190,27 @@ drill_ring_panes() {
 		'bench ring panes restored ring-a.pdf*=true ring-b.pdf=true ring.drawio=true'
 }
 
+# A finger's selection drag shows the loupe above the line under it, kept to that line however the
+# finger wobbles and on the screen at the view's top and its left edge, a pen's too and a mouse's
+# not, through the view's own path and through XTEST (DESIGN.md, PDF).
+drill_pdf_loupe() {
+	test -e "$pdfium" || { echo "SKIPPED the PDF loupe drill: no libpdfium"; return 0; }
+	launch 90 ACCENT_BENCH_PDF=loupe >"$dir/loupe"
+	for want in \
+		'read shown=true ' \
+		'touch step=5 shown=true .* above=true .* on_screen=true selected="The loupe' \
+		'lifted none ' \
+		'heading shown=true .* above=false .* on_screen=true ' \
+		'edge shown=true .* on_screen=true ' \
+		'pen shown=true ' \
+		'mouse none ' \
+		'xtest_mouse none selected="The loupe'; do
+		grep -q "^bench loupe $want" "$dir/loupe" || { cat "$dir/loupe"; return 1; }
+	done
+	lines=$(sed -n 's/^bench loupe touch .* source=([^,]*,\([^,]*\),.*/\1/p' "$dir/loupe" | sort -u | wc -l)
+	test "$lines" -eq 1 || { cat "$dir/loupe"; return 1; }
+}
+
 # Its shells are real, so under a scratch HOME, running `true`, `false`, `pwd` and `sleep`.
 drill_commands() {
 	export HOME="$dir/home" SHELL=/bin/sh
