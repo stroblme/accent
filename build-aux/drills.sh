@@ -204,7 +204,8 @@ drill_pdf_loupe() {
 		'edge shown=true .* on_screen=true ' \
 		'pen shown=true ' \
 		'mouse none ' \
-		'xtest_mouse none selected="The loupe'; do
+		'xtest_mouse none selected="The loupe' \
+		'xtest_mouse changed=true'; do
 		grep -q "^bench loupe $want" "$dir/loupe" || { cat "$dir/loupe"; return 1; }
 	done
 	lines=$(sed -n 's/^bench loupe touch .* source=([^,]*,\([^,]*\),.*/\1/p' "$dir/loupe" | sort -u | wc -l)

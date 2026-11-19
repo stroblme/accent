@@ -107,7 +107,7 @@ impl PdfTab {
         let Some(line) = self.line_under(x, y) else {
             return loupe.popover.popdown();
         };
-        let (middle, size, at) = fitted(x, line);
+        let (middle, size, at) = fitted(x, line, self.view.width());
         paint(&loupe.picture, &loupe.source, middle, size);
         let corner = graphene::Point::new(at.x() as f32, at.y() as f32);
         let Some(corner) = self.view.compute_point(&self.host, &corner) else {
@@ -152,7 +152,7 @@ impl PdfTab {
         let Some(line) = self.line_under(x, y) else {
             return format!("shown={shown} hand=({x:.0},{y:.0}) line=none");
         };
-        let ((mx, my), (w, h), at) = fitted(x, line);
+        let ((mx, my), (w, h), at) = fitted(x, line, self.view.width());
         let (sw, sh) = (w / MAGNIFICATION, h / MAGNIFICATION);
         // The line's top in the window's surface, which a popup is placed against.
         let top = self.view.root().and_then(|root| {
@@ -180,17 +180,18 @@ impl PdfTab {
     }
 }
 
-/// What GTK's text view makes of a hand at `x` across the reading view over `line`, a box in it
-/// (`gtk_text_view_show_magnifier`): the point of the view at the loupe's middle, at the hand's x
-/// and the line's middle; the loupe's size, the line twice as tall and a third wider than that,
-/// but never narrower than [`NARROWEST`]; and the rectangle its popover points at from above, the
-/// line from a quarter of the way down.
-fn fitted(x: f64, line: gdk::Rectangle) -> ((f32, f32), (f32, f32), gdk::Rectangle) {
+/// What GTK's text view makes of a hand at `x` across the reading view, `width` wide, over `line`,
+/// a box in it (`gtk_text_view_show_magnifier`): the point of the view at the loupe's middle, at
+/// the hand's x and the line's middle; the loupe's size, the line twice as tall and a third wider
+/// than that, but never narrower than [`NARROWEST`]; and the rectangle its popover points at from
+/// above, the line from a quarter of the way down, kept across the view.
+fn fitted(x: f64, line: gdk::Rectangle, width: i32) -> ((f32, f32), (f32, f32), gdk::Rectangle) {
     let tall = (line.height() as f32 * MAGNIFICATION).round();
     let size = ((tall * 4.0 / 3.0).round().max(NARROWEST), tall);
     let middle = (x as f32, line.y() as f32 + line.height() as f32 / 2.0);
     let quarter = line.height() / 4;
-    let at = gdk::Rectangle::new(x as i32, line.y() + quarter, 1, line.height() - quarter);
+    let across = (x as i32).clamp(0, width.max(0));
+    let at = gdk::Rectangle::new(across, line.y() + quarter, 1, line.height() - quarter);
     (middle, size, at)
 }
 
@@ -228,11 +229,14 @@ mod tests {
     /// middle; a heading's is a third wider than it is tall.
     #[test]
     fn a_loupe_is_the_line_twice_over() {
-        let (middle, size, at) = fitted(30.0, Rectangle::new(10, 100, 50, 16));
+        let (middle, size, at) = fitted(30.0, Rectangle::new(10, 100, 50, 16), 400);
         assert_eq!(middle, (30.0, 108.0));
         assert_eq!(size, (NARROWEST, 32.0));
         assert_eq!(at, Rectangle::new(30, 104, 1, 12));
-        let (_, size, _) = fitted(30.0, Rectangle::new(10, 100, 200, 60));
+        let (_, size, _) = fitted(30.0, Rectangle::new(10, 100, 200, 60), 400);
         assert_eq!(size, (160.0, 120.0));
+        // A hand dragged past the view's side points the popover at that side.
+        let (middle, _, at) = fitted(-20.0, Rectangle::new(0, 100, 50, 16), 400);
+        assert_eq!((middle.0, at.x()), (-20.0, 0));
     }
 }

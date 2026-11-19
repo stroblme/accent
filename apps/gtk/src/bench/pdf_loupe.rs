@@ -37,10 +37,18 @@ pub(super) fn run(app: &Rc<App>) {
         pdf.set_zoom(pdfview::PdfZoom::Scale(1.0));
         pdf.scroll_to(pdfview::Anchor::default());
         super::pdf::settled(&pdf, "loupe").await;
+        let selected = || pdf.selection_in(view.upcast_ref()).unwrap_or_default();
         let say = |what: &str| {
-            let text = pdf.selection_in(view.upcast_ref()).unwrap_or_default();
-            let loupe = pdf.loupe_report();
+            let (loupe, text) = (pdf.loupe_report(), selected());
             println!("bench loupe {what} {loupe} selected={text:?}");
+        };
+        // Until the report says `what` of a popup laid out: a popup's surface is 1 by 1 before.
+        let shows = |what: &'static str| {
+            let tab = &pdf;
+            until("loupe", what, 3_000, move || {
+                let report = tab.loupe_report();
+                report.contains(what) && !report.contains(", 1, 1))")
+            })
         };
         let line = |baseline: f64, size: f64| {
             let r = accent_core::pdf::Rect::from_corners(
@@ -63,7 +71,7 @@ pub(super) fn run(app: &Rc<App>) {
             return quit(&app, &path);
         }
         // Up once the glyphs are in, the finger not having moved since.
-        glib::timeout_future(Duration::from_millis(300)).await;
+        shows("shown=true").await;
         say("read");
         for (step, wobble) in [0.0, 3.0, -3.0, 2.0, -2.0, 0.0].into_iter().enumerate() {
             let to = (x0 + 30.0 * (step + 1) as f64, y0 + wobble);
@@ -85,11 +93,13 @@ pub(super) fn run(app: &Rc<App>) {
         // The heading at the top of the view: no room above it on the screen.
         let (hx, hy) = line(HEADING.0, HEADING.1);
         view.bench_drag_select((hx + 2.0, hy), (hx + 60.0, hy), finger);
-        glib::timeout_future(Duration::from_millis(300)).await;
+        shows("above=false").await;
         say("heading");
         view.bench_lift();
 
-        // The body line's start at the view's left edge, zoomed in.
+        // The body line's start at the view's left edge, which is the screen's with the sidebar
+        // put away, zoomed in.
+        app.sidebar_column.set_visible(false);
         pdf.set_zoom(pdfview::PdfZoom::Scale(3.0));
         pdf.scroll_to(pdfview::Anchor {
             page: 0,
@@ -99,9 +109,10 @@ pub(super) fn run(app: &Rc<App>) {
         super::pdf::settled(&pdf, "loupe_zoomed").await;
         let (_, y) = line(BODY.0, BODY.1);
         view.bench_drag_select((40.0, y), (4.0, y), finger);
-        glib::timeout_future(Duration::from_millis(300)).await;
+        shows("on_screen=true").await;
         say("edge");
         view.bench_lift();
+        app.sidebar_column.set_visible(true);
         pdf.set_zoom(pdfview::PdfZoom::Scale(1.0));
         pdf.scroll_to(pdfview::Anchor::default());
         super::pdf::settled(&pdf, "loupe_back").await;
@@ -111,7 +122,9 @@ pub(super) fn run(app: &Rc<App>) {
         let pen = pdfview::tools::Hand::Pen { eraser: false };
         for (name, hand) in [("pen", pen), ("mouse", pdfview::tools::Hand::Mouse)] {
             view.bench_drag_select((x0 + 2.0, y0), (x0 + 90.0, y0), hand);
-            glib::timeout_future(Duration::from_millis(300)).await;
+            if name == "pen" {
+                shows("shown=true").await;
+            }
             say(name);
             view.bench_lift();
         }
@@ -124,9 +137,16 @@ pub(super) fn run(app: &Rc<App>) {
             at(x0 + 40.0),
             at(x0 + 120.0)
         );
+        let before = selected();
         super::git::xtest_now(&steps).await;
-        glib::timeout_future(Duration::from_millis(300)).await;
+        // The press lets the last selection go before the drag makes its own.
+        let changed = until("loupe", "xtest", 3_000, || {
+            let now = selected();
+            !now.is_empty() && now != before
+        });
+        let changed = changed.await;
         say("xtest_mouse");
+        println!("bench loupe xtest_mouse changed={}", changed.is_some());
         super::git::xtest_now("up").await;
         quit(&app, &path);
     });
