@@ -238,7 +238,7 @@ impl<'a> Document<'a> {
     }
 
     /// Where an outline item or a link leads, by its `/Dest` or its GoTo action.
-    fn goes(&self, item: &Dict) -> Result<Option<Dest>> {
+    pub(crate) fn goes(&self, item: &Dict) -> Result<Option<Dest>> {
         match self.dest_array(item)? {
             Some(dest) => self.dest(&dest),
             None => Ok(None),
@@ -411,7 +411,7 @@ impl<'a> Document<'a> {
     }
 
     /// A URI action's URI, a relative one after the catalog's `/URI /Base`.
-    fn uri(&self, annot: &Dict) -> Result<Option<String>> {
+    pub(crate) fn uri(&self, annot: &Dict) -> Result<Option<String>> {
         let action = self.dict(annot, b"A")?;
         if action.get(b"S").and_then(Object::as_name) != Some(b"URI") {
             return Ok(None);

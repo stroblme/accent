@@ -343,6 +343,15 @@ impl PdfTab {
                         | gtk::gdk::ModifierType::SUPER_MASK
                         | gtk::gdk::ModifierType::META_MASK,
                 );
+                // Tab and Shift+Tab go through the form's fields, and the field the keyboard is on
+                // takes Space, Return, a radio group's arrows and Escape.
+                let tabbed = matches!(key, gtk::gdk::Key::Tab | gtk::gdk::Key::ISO_Left_Tab);
+                if bare && tabbed && tab.tab_field(key == gtk::gdk::Key::Tab) {
+                    return glib::Propagation::Stop;
+                }
+                if bare && tab.field_key(key) {
+                    return glib::Propagation::Stop;
+                }
                 // While the Select tool holds something, `Delete` takes it off the page and the
                 // arrows move it a point, ten with Shift, each move a step for Undo.
                 if bare && tab.view.picked().is_some() {

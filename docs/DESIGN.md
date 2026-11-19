@@ -1392,6 +1392,26 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   The page's menu and the source tab's menu end the item in "(no SyncTeX data)", a menu item carrying no tooltip, and the palette's row says "This build has no SyncTeX data: build with -synctex=1" under its name, or "This build has no SyncTeX data: Typst does not write it yet" for Typst.
   A plain PDF shows neither.
 
+### PDF Forms
+
+- **A form's fields are filled in on the page** (user decisions 2026-11-19), as Firefox's pdf.js fills them, with `accent_pdf` reading the fields and every fill going into the session's update, so it is saved a second later and is one Undo step in the history the ink keeps.
+  pdfium draws each field from the appearance a fill writes, and a field a reader can fill in has a tint of the accent at 13 % over it, which presenting and printing leave out.
+  The pointer is the I-beam over a text field and the hand over a box, a list or a push button that does something, and a field's name for the reader (`/TU`) is its tooltip.
+- A click on a check box ticks or unticks it and a click on a radio button turns it on, and off again only where its group allows it.
+  A click on a text field opens the Text tool's editor over it, in the field's face, size and colour as the page shows them, and `Return` on one line, `Ctrl+Return`, a click elsewhere or the keyboard going elsewhere fills the field in, while `Escape` leaves it as it was.
+  The editor stays over the page until a tile shows the value, as a text typed onto the page does.
+  A click on a combo box or a list box opens its options under it, a click on one picking it, and a list box that picks several ticks them, picked as they stand when the list closes.
+  An editable combo box takes a text of its own in an entry above its options.
+- A fill writes what pdf.js writes on saving, the field's `/V`, `/AS` and `/I`, and an appearance of ours inside `/Tx BMC` with pdf.js's padding, a size of 0 fitted to the box, lines wrapped at spaces and a comb's characters a cell each.
+  It is set in the field's own font where that has a code for every character, else in Helvetica, which every reader has.
+  Where neither has one the value goes in as UTF-16 and the form says `NeedAppearances` (user decision 2), so pdfium and poppler draw the field without the characters their fonts lack ("Hi α" as "Hi" in accent, Evince and Okular), while Firefox shows it whole and the file holds it whole.
+  A form that says `NeedAppearances` already, as LibreOffice's forms do, is drawn by pdfium from `/V` in a layout of its own, so a fill there writes the value alone.
+- A password field takes nothing, its tooltip saying that Accent does not store passwords, and a signature field shows its appearance and nothing more (user decisions 9 and 11).
+- A push button carries out a Reset Form, a link to a page or a URI, and a named page turn, and the palette's Reset Form puts every field back to its default as one Undo step.
+- `Tab` goes through the fields in pdf.js's order, page by page and row by row from the left, opening a text field's editor and putting libadwaita's focus ring round any other field.
+- A form whose fields run scripts to check or calculate their values says once that those are not run (user decision 7).
+  A hybrid form's XFA datasets are written with each fill, as pdf.js writes them (user decision 8), and a form that is only XFA stays the page pdfium draws of it and says once that it cannot be filled.
+
 ### Image
 
 - A `GtkPicture` in a scroller, fitted to the window until zoomed, the file decoded off the main loop by GDK's own decoders, and a JPEG, a WebP or a TIFF turned the way its EXIF says (`accent_core::orientation`), which they ignore, or for a TIFF only mirror.
@@ -2245,6 +2265,9 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
   They are the tab's own keys, like Copy, so an entry with the keyboard, the find bar's included, keeps its own undo.
   Undo PDF Edit and Redo PDF Edit are also the header's two buttons and palette commands.
 - Find and Go to Line keep their chords; over a PDF they search the document and go to a page.
+- In a form `Tab` and `Shift+Tab` go from field to field, `Space` or `Return` presses the field the ring is on, the arrows move a radio group's pick and `Escape` takes the ring away (PDF Forms).
+  In a text field's editor `Return` fills in a field of one line and `Ctrl+Return` any field, as it finishes a text typed onto the page.
+  Reset Form is in the palette, unbound.
 
 ### Diagram
 

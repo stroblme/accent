@@ -246,6 +246,10 @@ fn render_loop(
                         }
                         let comments = doc.comments(page).unwrap_or_default();
                         send(view, Reply::Comments(page, comments));
+                        // Every page's fields too, which the keyboard goes through in order.
+                        if let Ok(fields) = doc.fields(page) {
+                            send(view, Reply::Fields(page, fields));
+                        }
                         page += 1;
                     }
                 }
@@ -262,6 +266,7 @@ fn render_loop(
                     if let Ok(outline) = doc.outline() {
                         send(view, Reply::Outline(outline, doc.info()));
                     }
+                    send(view, Reply::Form(doc.form().ok().flatten()));
                 }
                 Request::Search {
                     query,
@@ -475,6 +480,15 @@ fn render_loop(
                         }
                     }
                     Err(e) => tracing::warn!("filling field {}: {e:#}", field.num),
+                },
+                Request::Reset(reset) => match ink.reset(&mut doc, &reset) {
+                    Ok(areas) => {
+                        ink.dirty |= !areas.is_empty();
+                        for (page, area) in areas {
+                            send(view, Reply::PageChanged(page, area, None));
+                        }
+                    }
+                    Err(e) => tracing::warn!("resetting the form: {e:#}"),
                 },
                 Request::Pages(edits) => {
                     for (i, edit) in edits.into_iter().enumerate() {

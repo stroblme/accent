@@ -4,12 +4,14 @@
 
 use std::collections::HashSet;
 
-use crate::{Dict, Object, Ref, Result, text_string};
+use crate::{Dest, Dict, Object, Ref, Result, text_string};
 
 use crate::Document;
 
 /// How far up a field's parents are followed: no real form nests near it.
 const DEPTH: usize = 32;
+/// How many of the form's fields are looked at for scripts at most.
+const FIELDS: usize = 10_000;
 
 /// One widget annotation of a page and what the field it shows says.
 #[derive(Debug, Clone, PartialEq)]
@@ -53,6 +55,23 @@ pub struct Widget {
     pub background: Option<[f32; 3]>,
     pub border: Option<[f32; 3]>,
     pub border_width: f32,
+    /// What clicking it does, a push button's.
+    pub action: Option<Action>,
+}
+
+/// What clicking a push button does (ISO 32000-1 §12.6.4), of what accent carries out.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Action {
+    /// ResetForm (§12.7.5.3): the fields it names, by reference or by full name, or with
+    /// `exclude` every field but those; every field where it names none.
+    Reset {
+        fields: Vec<Object>,
+        exclude: bool,
+    },
+    Uri(String),
+    GoTo(Dest),
+    /// A named action (§12.6.4.11): `NextPage`, `PrevPage`, `FirstPage` or `LastPage`.
+    Named(Vec<u8>),
 }
 
 /// What the form as a whole says (`/AcroForm`).
@@ -60,25 +79,109 @@ pub struct Widget {
 pub struct Form {
     /// `/NeedAppearances`: readers draw the fields from their values.
     pub need_appearances: bool,
-    /// An `/XFA` form beside the fields.
+    /// Whether it holds any field.
+    pub fields: bool,
+    /// An `/XFA` form beside the fields, and the stream of its `datasets` packet, which holds
+    /// the fields' values again for an XFA reader.
     pub xfa: bool,
+    pub datasets: Option<Ref>,
+    /// A field computes, checks or formats its value by a script (`/AA` K, F, V or C), or the
+    /// form has a calculation order (`/CO`).
+    pub scripted: bool,
 }
 
 impl Document<'_> {
     /// The form, `None` for a document without one.
     pub fn form(&self) -> Result<Option<Form>> {
-        let root = self.root()?;
-        let Object::Dict(form) = self.resolve(root.get(b"AcroForm"))? else {
+        let Some((need_appearances, datasets)) = self.form_fill()? else {
+            return Ok(None);
+        };
+        let form = self.dict(&self.root()?, b"AcroForm")?;
+        let calculated =
+            matches!(self.resolve(form.get(b"CO"))?, Object::Array(co) if !co.is_empty());
+        let fields = match self.resolve(form.get(b"Fields"))? {
+            Object::Array(fields) => fields,
+            _ => Vec::new(),
+        };
+        Ok(Some(Form {
+            need_appearances,
+            fields: !fields.is_empty(),
+            xfa: form.get(b"XFA").is_some(),
+            datasets,
+            scripted: calculated || self.scripted(&fields)?,
+        }))
+    }
+
+    /// What a fill needs to know of the form, without [`Document::form`]'s walk of its fields:
+    /// whether it says `NeedAppearances`, and its XFA datasets' stream. `None` for no form.
+    pub fn form_fill(&self) -> Result<Option<(bool, Option<Ref>)>> {
+        let Object::Dict(form) = self.resolve(self.root()?.get(b"AcroForm"))? else {
             return Ok(None);
         };
         let need = matches!(
             self.resolve(form.get(b"NeedAppearances"))?,
             Object::Bool(true)
         );
-        Ok(Some(Form {
-            need_appearances: need,
-            xfa: form.get(b"XFA").is_some(),
-        }))
+        let mut datasets = None;
+        if let Object::Array(packets) = self.resolve(form.get(b"XFA"))? {
+            for [name, stream] in packets.as_chunks::<2>().0 {
+                if matches!(self.resolve(Some(name))?, Object::String(n) if n == b"datasets") {
+                    datasets = stream.reference();
+                }
+            }
+        }
+        Ok(Some((need, datasets)))
+    }
+
+    /// Whether a field under `fields`, or a widget of one, runs a script on a keystroke, to format
+    /// or check its value, or to calculate it (`/AA` K, F, V, C): what accent does not run.
+    fn scripted(&self, fields: &[Object]) -> Result<bool> {
+        let (mut stack, mut seen) = (fields.to_vec(), HashSet::new());
+        while let Some(node) = stack.pop() {
+            if seen.len() >= FIELDS {
+                break;
+            }
+            if node.reference().is_some_and(|r| !seen.insert(r)) {
+                continue;
+            }
+            let Object::Dict(field) = self.resolve(Some(&node))? else {
+                continue;
+            };
+            let aa = self.dict(&field, b"AA")?;
+            if [&b"K"[..], b"F", b"V", b"C"]
+                .iter()
+                .any(|k| aa.get(k).is_some())
+            {
+                return Ok(true);
+            }
+            if let Object::Array(kids) = self.resolve(field.get(b"Kids"))? {
+                stack.extend(kids);
+            }
+        }
+        Ok(false)
+    }
+
+    /// What clicking the widget `annot` does, of what accent carries out: `None` for a script.
+    fn action(&self, annot: &Dict) -> Result<Option<Action>> {
+        let a = self.dict(annot, b"A")?;
+        Ok(match a.get(b"S").and_then(Object::as_name) {
+            Some(b"ResetForm") => {
+                let fields = match self.resolve(a.get(b"Fields"))? {
+                    Object::Array(fields) => fields,
+                    _ => Vec::new(),
+                };
+                let flags = self.resolve(a.get(b"Flags"))?.as_int().unwrap_or(0);
+                Some(Action::Reset {
+                    fields,
+                    exclude: flags & 1 != 0,
+                })
+            }
+            Some(b"URI") => self.uri(annot)?.map(Action::Uri),
+            Some(b"Named") => {
+                (a.get(b"N").and_then(Object::as_name)).map(|n| Action::Named(n.to_vec()))
+            }
+            _ => self.goes(annot)?.map(Action::GoTo),
+        })
     }
 
     /// The widgets of page `page`, in its `/Annots` order. One the array holds by value rather
@@ -255,6 +358,7 @@ impl Document<'_> {
             background: self.colour(&mk, b"BG")?,
             border: self.colour(&mk, b"BC")?,
             border_width: border_width.unwrap_or(1.0),
+            action: self.action(annot)?,
         }))
     }
 }

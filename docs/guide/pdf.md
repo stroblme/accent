@@ -13,6 +13,16 @@ Following the link from the note returns to that passage.
 The highlight lives in the note, so sharing the PDF alone will not carry it.
 If you need marks in the PDF itself, choose **Export Highlights** from the page menu.
 
+## Fill in forms
+
+Click a field of a PDF form to fill it in, as you would in a browser.
+A check box ticks, a radio button picks its option, and a list opens its options under the field.
+A text field opens a box over itself, which `Return`, `Ctrl+Return` or a click elsewhere fills in, while `Esc` leaves the field unchanged.
+`Tab` moves from field to field, and `Space` presses the one with the focus ring.
+Accent saves the form a second after each change, and `Ctrl+Z` takes a change back.
+**Reset Form** in the palette puts every field back to its default.
+Accent does not run a form's scripts, so totals and checks they would compute stay as they are.
+
 ## Draw and arrange pages
 
 Select **Drawing** in the header to open the tool ring.

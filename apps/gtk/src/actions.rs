@@ -418,6 +418,7 @@ impl App {
             "pdf-next-page" => self.with_pdf(|pdf| pdf.next_page()),
             "pdf-previous-page" => self.with_pdf(|pdf| pdf.previous_page()),
             "pdf-export-highlights" => self.export_highlights(),
+            "pdf-reset-form" => self.with_pdf(|pdf| pdf.reset_form()),
             "pdf-go-to-source" => self.go_to_source(),
             "show-in-pdf" => self.show_in_pdf(),
             // Each diagram and each PDF keeps its own ring out or away.

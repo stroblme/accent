@@ -188,7 +188,8 @@ impl PdfTab {
     /// no form field over it, which takes the click instead.
     pub(super) fn click(self: &Rc<Self>, view: &PdfView, x: f64, y: f64) {
         self.clear_selection();
-        if self.over_field(view, (x, y), |_, f| field::fillable(f)) == Some(true) {
+        self.unfocus_field();
+        if self.over_field(view, (x, y), |_, f| field::takes_clicks(f)) == Some(true) {
             return;
         }
         let Some(target) = self.link_at(view, x, y) else {

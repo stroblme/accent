@@ -417,6 +417,13 @@ impl PdfView {
         self.queue_draw();
     }
 
+    /// The field the keyboard is on, which the page rings.
+    pub fn set_focus_field(&self, field: Option<(usize, accent_core::pdf::Rect)>) {
+        if self.imp().focus_field.replace(field) != field {
+            self.queue_draw();
+        }
+    }
+
     /// Which highlight is under this widget coordinate, if any.
     pub fn highlight_at(&self, x: f64, y: f64) -> Option<usize> {
         let (page, px, py) = self.page_point(x, y)?;
@@ -1017,8 +1024,9 @@ mod imp {
         /// Where the note links that highlight this document land, per page, each with the index
         /// of the link it came from so a click on one can open the note that holds it.
         pub highlights: RefCell<super::Highlights>,
-        /// The form fields a reader can fill in, per page.
+        /// The form fields a reader can fill in, per page, and the one the keyboard is on.
         pub fields: RefCell<HashMap<usize, Vec<accent_core::pdf::Rect>>>,
+        pub focus_field: Cell<Option<(usize, accent_core::pdf::Rect)>>,
         /// The selected glyphs' boxes, per page the selection covers.
         pub selection: RefCell<Vec<(usize, Vec<accent_core::pdf::Rect>)>>,
         /// Where a drag began, in widget coordinates, while one is in progress.
@@ -1156,6 +1164,7 @@ mod imp {
                 marks: RefCell::new(HashMap::new()),
                 highlights: RefCell::new(HashMap::new()),
                 fields: RefCell::default(),
+                focus_field: Cell::new(None),
                 selection: RefCell::new(Vec::new()),
                 drag_from: Cell::new(None),
                 mode: Cell::new(super::Mode::default()),

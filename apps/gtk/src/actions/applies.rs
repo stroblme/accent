@@ -82,15 +82,16 @@ pub struct Context {
 
 /// Actions another sync enables, on state of its own that changes with no tab change: SyncTeX's
 /// pair as a build is found (`App::sync_synctex`), Export Highlights as the index answers
-/// (`App::sync_export`), Invert Image Colours and Copy Image (`App::sync_image_invert`),
-/// a diagram's insert tools as its layers lock (`App::sync_diagram_tools`), the debug session's
-/// controls (`App::sync_debug`), the kernel's (`App::sync_kernel`) and Recolour Selection as
-/// Select's hold changes (`App::sync_recolour`). [`applies`] leaves them to those, which follow
-/// the tab in front themselves.
-pub const OWN_SYNC: [&str; 26] = [
+/// (`App::sync_export`), Reset Form as the form is read (`App::sync_form`), Invert Image Colours
+/// and Copy Image (`App::sync_image_invert`), a diagram's insert tools as its layers lock
+/// (`App::sync_diagram_tools`), the debug session's controls (`App::sync_debug`), the kernel's
+/// (`App::sync_kernel`) and Recolour Selection as Select's hold changes (`App::sync_recolour`).
+/// [`applies`] leaves them to those, which follow the tab in front themselves.
+pub const OWN_SYNC: [&str; 27] = [
     "win.pdf-go-to-source",
     "win.show-in-pdf",
     "win.pdf-export-highlights",
+    "win.pdf-reset-form",
     "win.pdf-recolour-1",
     "win.pdf-recolour-2",
     "win.pdf-recolour-3",

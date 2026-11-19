@@ -83,6 +83,17 @@ impl App {
                 app.sync_history();
             }
         ));
+        // What accent cannot do of a form is said once, as the form becomes known.
+        pdf.connect_form(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |pdf| {
+                if let Some(said) = pdf.form_notice() {
+                    app.toast(said);
+                }
+                app.sync_form();
+            }
+        ));
         pdf.connect_picked(glib::clone!(
             #[weak(rename_to = app)]
             self,
@@ -836,6 +847,7 @@ impl App {
         let diagram = self.active_diagram();
         self.sync_export();
         self.sync_recolour();
+        self.sync_form();
         // Only a PDF or a diagram can be drawn on, so the button goes with the tab.
         self.drawing_button
             .set_visible(self.active_pdf().is_some() || diagram.is_some());
@@ -951,6 +963,19 @@ impl App {
         if let Some(action) = self
             .window
             .lookup_action("pdf-export-highlights")
+            .and_downcast::<gio::SimpleAction>()
+        {
+            action.set_enabled(offered);
+        }
+    }
+
+    /// Reset Form is offered only over a PDF with a form, left out of the palette otherwise as
+    /// Export Highlights is.
+    pub fn sync_form(&self) {
+        let offered = self.active_pdf().is_some_and(|pdf| pdf.has_form());
+        if let Some(action) = self
+            .window
+            .lookup_action("pdf-reset-form")
             .and_downcast::<gio::SimpleAction>()
         {
             action.set_enabled(offered);

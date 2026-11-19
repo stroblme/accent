@@ -53,8 +53,12 @@ pub enum Reply {
         image: accent_core::pdf::RgbaImage,
     },
     Links(usize, Vec<accent_core::pdf::Link>),
-    /// One page's form fields, each widget with the field it shows, answered with its links.
+    /// One page's form fields, each widget with the field it shows, answered with its links and
+    /// its comments.
     Fields(usize, Vec<pdf::FormField>),
+    /// What the form as a whole says, `None` for a document without one: answered with the
+    /// bookmarks, on opening, a read and a page edit.
+    Form(Option<pdf::Form>),
     /// What other readers wrote on one page, answered with its links.
     Comments(usize, Vec<pdf::Comment>),
     /// One page's glyphs and their boxes, for selecting text on it.
@@ -293,6 +297,8 @@ pub enum Request {
         field: pdf::Ref,
         value: pdf::FieldValue,
     },
+    /// Put the fields a Reset Form names back to their defaults, as one step.
+    Reset(pdf::Reset),
     /// Put blank pages in, take pages out or move them, one edit after another, as one step.
     Pages(Vec<pdf::PageEdit>),
     /// Put the pages of the PDF at `source`, called `name`, in at page `at`, after the last

@@ -5,7 +5,10 @@
 //! and the pick undone, each against the file; then a text field typed into, its editor over the
 //! field at 100 % and 200 %, finished by a click away, left by Escape and undone, pictured as
 //! `form-typing.png`; then a combo box's option picked and a list box's ticked from the list a
-//! click opens, pictured as `form-choosing.png`, and the tick undone. Takes the file away again.
+//! click opens, pictured as `form-choosing.png`, and the tick undone; then Tab through every
+//! field in pdf.js's order, its ring pictured as `form-focus.png`, Space on the check box it
+//! reaches, and the form reset from the palette and by its push button, each undone. Takes the
+//! file away again.
 
 use super::pdf::{opened, written};
 use super::*;
@@ -233,6 +236,39 @@ pub(super) fn bench_pdf_form(app: &Rc<App>) {
         println!("bench form ticked_list {}", filed(&path));
         undo().await;
         println!("bench form list_undone {}", filed(&path));
+
+        // Into the page with nothing under the press, then Tab from the page's first field.
+        if let Some((x, y)) = away() {
+            super::git::xtest(&format!("move {x:.0} {y:.0}; down; up; sleep 0.3")).await;
+        }
+        let mut tabbed = Vec::new();
+        let tab_on = async |n: usize, tabbed: &mut Vec<String>| {
+            for _ in 0..n {
+                super::git::xtest("key Tab; sleep 0.2").await;
+                tabbed.push(pdf.focused_field().unwrap_or_else(|| "-".to_string()));
+            }
+        };
+        tab_on(4, &mut tabbed).await;
+        shot(&view, "form-focus.png");
+        super::git::xtest("key space").await;
+        save().await;
+        println!("bench form spaced {}", filed(&path));
+        tab_on(9, &mut tabbed).await;
+        println!("bench form tabbed {}", tabbed.join(" "));
+        let _ = WidgetExt::activate_action(&app.window, "win.pdf-reset-form", None);
+        save().await;
+        println!("bench form reset {}", filed(&path));
+        undo().await;
+        println!("bench form reset_undone {}", filed(&path));
+        if let Some(button) = named("reset") {
+            pdf.goto_page(0);
+            glib::timeout_future(Duration::from_millis(500)).await;
+            click(&button).await;
+        }
+        save().await;
+        println!("bench form pressed {}", filed(&path));
+        undo().await;
+        println!("bench form pressed_undone {}", filed(&path));
         quit(&app, &path);
     });
 }

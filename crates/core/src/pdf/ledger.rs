@@ -383,6 +383,21 @@ impl Ink {
         Ok(changed)
     }
 
+    /// Put the fields `reset` names back to their defaults, as one step: the pages it changed
+    /// and where.
+    pub fn reset(
+        &mut self,
+        doc: &mut PdfDoc,
+        reset: &pdf::Reset,
+    ) -> Result<Vec<(usize, pdf::Rect)>> {
+        let pdf::Filled { kept, areas } = doc.reset(reset)?;
+        let changed = areas.clone();
+        if !kept.is_empty() {
+            self.record(Step::Filled { kept, areas }, false);
+        }
+        Ok(changed)
+    }
+
     /// Put a page in, take one out or move one, as a step of its own, or `joined` to the one
     /// before, as several pages deleted or moved together are: Undo takes it back as it takes
     /// back a stroke. A delete keeps the page it takes out of the page tree, so its Undo puts

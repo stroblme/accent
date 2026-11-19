@@ -16,6 +16,14 @@ pub(super) fn form_pdf(edit: impl Fn(String) -> String) -> Vec<u8> {
     pdf_of(&objs)
 }
 
+/// A stream object of `content` and its dictionary `dict`.
+fn stream(dict: &str, content: &str) -> String {
+    format!(
+        "<<{dict}/Length {}>>stream\n{content}\nendstream",
+        content.len()
+    )
+}
+
 /// Whether page `page`, rendered at 2 px a point, has a pixel `like` says inside `r`.
 fn painted(doc: &PdfDoc, page: usize, r: Rect, like: impl Fn([u8; 4]) -> bool) -> bool {
     let image = doc.render_page(page, 2.0, Theme::Plain).unwrap();
@@ -664,4 +672,114 @@ fn choice_fields_pick_their_options() {
     ink.walk(&mut doc, false);
     assert_eq!(picks(&doc, "fruit").0, ["Apple", "Cherry"]);
     assert_eq!(picks(&doc, "country").0, one("fr"));
+}
+
+/// A Reset Form puts every field back to its `/DV`, else empty, off or nothing picked, as one
+/// step for Undo; a push button's reads as one, and the form says when it runs scripts.
+#[test]
+fn a_reset_puts_the_fields_back_as_one_step() {
+    let with_default = |o: String| o.replace("/V(Ada)", "/V(Ada)/DV(Default)");
+    let Some((_dir, mut doc)) = open_pdf(&form_pdf(with_default)) else {
+        return;
+    };
+    let mut ink = Ink::default();
+    let fields = doc.fields(0).unwrap();
+    let reset = field(&fields, "reset");
+    assert_eq!(reset.action, Some(FieldAction::Reset(Reset::all())));
+    let agree = field(&fields, "agree").clone();
+    ink.fill(
+        &mut doc,
+        agree.field,
+        &FieldValue::On(Some(b"Yes".to_vec())),
+    )
+    .unwrap();
+    let pages: Vec<usize> = (ink.reset(&mut doc, &Reset::all()).unwrap().iter())
+        .map(|(page, _)| *page)
+        .collect();
+    assert_eq!(pages, [0, 1]);
+    assert_eq!(said(&doc, 0, "name").0, "Default");
+    assert_eq!(on(&doc, 0, "agree"), [false]);
+    assert_eq!(
+        (on(&doc, 0, "size"), on(&doc, 1, "size")),
+        (vec![false, false], vec![false])
+    );
+    assert_eq!(picks(&doc, "fruit").0, Vec::<String>::new());
+    assert_eq!(
+        said(&doc, 0, "amount").0,
+        "",
+        "read-only fields too, as readers reset them"
+    );
+    ink.walk(&mut doc, false);
+    assert_eq!(said(&doc, 0, "name").0, "Ada");
+    assert_eq!(on(&doc, 0, "agree"), [true]);
+    assert_eq!(on(&doc, 0, "size"), [false, true]);
+    assert_eq!(picks(&doc, "fruit").0, ["Apple", "Cherry"]);
+    let form = doc.form().unwrap().unwrap();
+    assert!(form.fields && !form.scripted && !form.xfa);
+    let scripted = |o: String| o.replace("/T(amount)", "/T(amount)/AA<</C 99 0 R>>");
+    let (_dir, doc) = open_pdf(&form_pdf(scripted)).unwrap();
+    assert!(doc.form().unwrap().unwrap().scripted);
+}
+
+/// A hybrid form's XFA datasets say what its fields say: a fill writes the field's data element
+/// beside its `/V`, and Undo puts the packet back.
+#[test]
+fn a_hybrid_form_keeps_its_xfa_data_with_its_fields() {
+    let datasets = "<xfa:datasets xmlns:xfa=\"http://www.xfa.org/schema/xfa-data/1.0/\">\
+        <xfa:data><form1><Name>Old</Name><Agree>Off</Agree></form1></xfa:data></xfa:datasets>";
+    let bytes = pdf_of(&[
+        "<</Type/Catalog/Pages 2 0 R/AcroForm<</Fields[4 0 R 5 0 R]/XFA[(datasets) 6 0 R]\
+         /DA(/Helv 0 Tf 0 g)/DR<</Font<</Helv 7 0 R>>>>>>>>"
+            .to_string(),
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 100]/Annots[4 0 R 5 0 R]>>".to_string(),
+        "<</Type/Annot/Subtype/Widget/FT/Tx/T(form1[0].Name[0])/F 4/P 3 0 R/Rect[10 60 190 90]>>"
+            .to_string(),
+        "<</Type/Annot/Subtype/Widget/FT/Btn/T(form1[0].Agree[0])/F 4/P 3 0 R/Rect[10 10 30 30]\
+         /V/Off/AS/Off/AP<</N<</Yes 8 0 R/Off 8 0 R>>>>>>"
+            .to_string(),
+        stream("", datasets),
+        "<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>".to_string(),
+        stream("/Type/XObject/Subtype/Form/BBox[0 0 20 20]", ""),
+    ]);
+    let Some((_dir, mut doc)) = open_pdf(&bytes) else {
+        return;
+    };
+    let read = |doc: &PdfDoc| {
+        let Object::Stream(s) = doc
+            .cos
+            .get(accent_pdf::Ref {
+                num: 6,
+                generation: 0,
+            })
+            .unwrap()
+        else {
+            panic!()
+        };
+        String::from_utf8(doc.cos.pdf.decode(&s).unwrap()).unwrap()
+    };
+    let form = doc.form().unwrap().unwrap();
+    assert!(form.xfa && form.datasets.is_some());
+    let mut ink = Ink::default();
+    let fields = doc.fields(0).unwrap();
+    let (name, agree) = (
+        field(&fields, "form1[0].Name[0]"),
+        field(&fields, "form1[0].Agree[0]"),
+    );
+    ink.fill(&mut doc, name.field, &FieldValue::Text("New".into()))
+        .unwrap();
+    ink.fill(
+        &mut doc,
+        agree.field,
+        &FieldValue::On(Some(b"Yes".to_vec())),
+    )
+    .unwrap();
+    assert!(
+        read(&doc).contains("<Name>New</Name><Agree>Yes</Agree>"),
+        "{}",
+        read(&doc)
+    );
+    ink.walk(&mut doc, false);
+    ink.walk(&mut doc, false);
+    assert_eq!(read(&doc), datasets);
 }

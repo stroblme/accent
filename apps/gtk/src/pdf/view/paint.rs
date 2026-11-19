@@ -316,6 +316,12 @@ impl imp::PdfView {
                 snapshot.append_color(&colour, &layout.rect_of(rect, field));
             }
         }
+        // The field the keyboard is on, ringed as libadwaita rings a focused widget.
+        if let Some((_, field)) = self.focus_field.get().filter(|(at, _)| *at == index) {
+            let ring = gsk::RoundedRect::from_rect(layout.rect_of(rect, &field.grow(1.0)), 2.0);
+            let colour = theme::at(accent, theme::FOCUS_ALPHA);
+            snapshot.append_border(&ring, &[2.0; 4], &[colour; 4]);
+        }
         // Under the selection and the search marks: a highlight is what the page says, the
         // other two are what the reader is doing to it right now.
         if let Some(page_highlights) = self.highlights.borrow().get(&index) {

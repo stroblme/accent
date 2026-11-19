@@ -5,6 +5,7 @@ use accent_pdf::{Dict, Object, Ref, SimpleFont, Widget, form, text_string};
 
 use super::appearance::{self, Setting};
 use super::cos::{Objects, dict, helvetica as helvetica_dict, name, reals, text};
+use super::xfa;
 use super::{PdfDoc, Rect};
 use crate::{Error, Result};
 
@@ -38,6 +39,54 @@ pub struct FormField {
     pub kind: FieldKind,
     pub read_only: bool,
     pub hidden: bool,
+    /// What clicking it does, a push button's.
+    pub action: Option<FieldAction>,
+}
+
+/// What clicking a push button does, of what accent carries out: its scripts it does not run.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FieldAction {
+    Reset(Reset),
+    Uri(String),
+    /// A page of this document, and the y to scroll to, in top-left points of that page.
+    Page {
+        page: usize,
+        top: Option<f32>,
+    },
+    /// A named action: `NextPage`, `PrevPage`, `FirstPage` or `LastPage`.
+    Named(String),
+}
+
+/// Which fields a Reset Form puts back (ISO 32000-1 §12.7.5.3): those it names, by reference or by
+/// full name, with their descendants, or with `exclude` every field but those; every field where
+/// it names none.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Reset {
+    fields: Vec<Object>,
+    exclude: bool,
+}
+
+impl Reset {
+    /// Every field of the form: the palette's Reset Form.
+    pub fn all() -> Reset {
+        Reset::default()
+    }
+
+    /// Whether it puts back the field `field`, of the full name `name`, under the fields `above`.
+    fn takes(&self, field: Ref, above: &[Ref], name: &str) -> bool {
+        if self.fields.is_empty() {
+            return true;
+        }
+        let named = (self.fields.iter()).any(|f| match f {
+            Object::Ref(r) => *r == field || above.contains(r),
+            Object::String(s) => {
+                let s = text_string(s);
+                name == s || name.starts_with(&format!("{s}."))
+            }
+            _ => false,
+        });
+        named != self.exclude
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -164,7 +213,16 @@ impl PdfDoc {
         let at = self.cos.page(page)?;
         let widgets = self.reading(|doc| doc.fields(at))?;
         let (_, height) = self.page_size(page)?;
-        Ok(widgets.into_iter().map(|w| field_of(w, height)).collect())
+        let height_of = |page| self.page_size(page).map_or(height, |(_, h)| h);
+        Ok(widgets
+            .into_iter()
+            .map(|w| field_of(w, height, height_of))
+            .collect())
+    }
+
+    /// What the form as a whole says, `None` for a document without one.
+    pub fn form(&self) -> Result<Option<accent_pdf::Form>> {
+        self.reading(|doc| doc.form())
     }
 
     /// The terminal field `field` filled with `value`, as pdf.js saves a fill: a check box's or a
@@ -172,6 +230,51 @@ impl PdfDoc {
     /// state where the widget draws it, `/Off` where it does not. The document is opened again
     /// once.
     pub fn fill(&mut self, field: Ref, value: &FieldValue) -> Result<Filled> {
+        let filled = self.fill_one(field, value)?;
+        self.reopen()?;
+        Ok(filled)
+    }
+
+    /// The fields `reset` names put back to their default values (`/DV`), else emptied or
+    /// turned off, as one fill: a push button's Reset Form, or the palette's. The document is
+    /// opened again once.
+    pub fn reset(&mut self, reset: &Reset) -> Result<Filled> {
+        let mut kept: Vec<(Ref, Object)> = Vec::new();
+        let mut areas: Vec<(usize, Rect)> = Vec::new();
+        for (field, above, name) in self.cos.terminal_fields()? {
+            if !reset.takes(field, &above, &name) {
+                continue;
+            }
+            let Some(&first) = self.cos.widgets_of(field)?.first() else {
+                continue;
+            };
+            let Some(value) = self
+                .reading(|doc| doc.widget_at(first))?
+                .and_then(default_of)
+            else {
+                continue;
+            };
+            let filled = self.fill_one(field, &value)?;
+            // Each object as it was before the first fill wrote it, which is what Undo puts back.
+            for (at, was) in filled.kept {
+                if !kept.iter().any(|(k, _)| *k == at) {
+                    kept.push((at, was));
+                }
+            }
+            for (page, area) in filled.areas {
+                match areas.iter_mut().find(|(p, _)| *p == page) {
+                    Some((_, all)) => *all = all.union(area),
+                    None => areas.push((page, area)),
+                }
+            }
+        }
+        self.reopen()?;
+        Ok(Filled { kept, areas })
+    }
+
+    /// [`PdfDoc::fill`] without opening the document again, a hybrid form's XFA datasets
+    /// written with it (user decision 8).
+    fn fill_one(&mut self, field: Ref, value: &FieldValue) -> Result<Filled> {
         let widgets = self.cos.widgets_of(field)?;
         let kept = match value {
             FieldValue::On(on) => self.cos.put_state(field, &widgets, on.as_deref())?,
@@ -184,8 +287,30 @@ impl PdfDoc {
                 self.cos.put_choice(field, &read, picked, need)?
             }
         };
+        let mut kept = kept;
+        let datasets = self.reading(|doc| doc.form_fill())?.and_then(|(_, d)| d);
+        let read = match widgets.first() {
+            Some(&first) => self.reading(|doc| doc.widget_at(first))?,
+            None => None,
+        };
+        if let (Some(datasets), Some(w)) = (datasets, read) {
+            let picks;
+            let xfa = match value {
+                FieldValue::Text(text) => xfa::Value::One(text),
+                FieldValue::On(on) => {
+                    picks = on.as_deref().map(text_string).unwrap_or_default();
+                    xfa::Value::One(&picks)
+                }
+                FieldValue::Choice(picked) if w.flags & MULTI_SELECT != 0 => {
+                    xfa::Value::Many(picked)
+                }
+                FieldValue::Choice(picked) => {
+                    xfa::Value::One(picked.first().map_or("", String::as_str))
+                }
+            };
+            kept.extend(self.cos.put_xfa(datasets, &w.name, xfa)?);
+        }
         let areas = self.areas_of(&widgets)?;
-        self.reopen()?;
         Ok(Filled { kept, areas })
     }
 
@@ -195,8 +320,8 @@ impl PdfDoc {
         for &at in widgets {
             read.extend(self.reading(|doc| doc.widget_at(at))?);
         }
-        let form = self.reading(|doc| doc.form())?;
-        Ok((read, form.is_some_and(|form| form.need_appearances)))
+        let form = self.reading(|doc| doc.form_fill())?;
+        Ok((read, form.is_some_and(|(need, _)| need)))
     }
 
     /// The objects `kept` holds put back as they are there, each taking in its place what it
@@ -236,6 +361,86 @@ impl PdfDoc {
 }
 
 impl Objects {
+    /// Every terminal field of the form, the fields that hold values, depth first: each with the
+    /// fields above it and its full name.
+    fn terminal_fields(&self) -> Result<Vec<(Ref, Vec<Ref>, String)>> {
+        let Some(form) = self.acro_form()?.1 else {
+            return Ok(Vec::new());
+        };
+        let fields = match form.get(b"Fields") {
+            Some(f) => self.resolve(f)?,
+            None => Object::Null,
+        };
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut stack: Vec<(Ref, Vec<Ref>, String)> = (fields.as_array().unwrap_or_default())
+            .iter()
+            .rev()
+            .filter_map(Object::reference)
+            .map(|r| (r, Vec::new(), String::new()))
+            .collect();
+        while let Some((at, above, prefix)) = stack.pop() {
+            if !seen.insert(at) || seen.len() > 100_000 {
+                continue;
+            }
+            let dict = self.dict(at)?;
+            let own = match dict.get(b"T").map(|t| self.resolve(t)).transpose()? {
+                Some(Object::String(t)) => text_string(&t),
+                _ => String::new(),
+            };
+            let name = match (prefix.is_empty(), own.is_empty()) {
+                (_, true) => prefix.clone(),
+                (true, false) => own,
+                (false, false) => format!("{prefix}.{own}"),
+            };
+            let kids = match dict.get(b"Kids") {
+                Some(k) => self.resolve(k)?,
+                None => Object::Null,
+            };
+            let kids: Vec<Ref> = (kids.as_array().unwrap_or_default().iter())
+                .filter_map(Object::reference)
+                .collect();
+            // Kids that are fields have names; a terminal field's kids are its widgets.
+            let fields: Vec<Ref> = (kids.iter().copied())
+                .filter(|&k| self.dict(k).is_ok_and(|d| d.get(b"T").is_some()))
+                .collect();
+            if fields.is_empty() {
+                out.push((at, above, name));
+                continue;
+            }
+            let mut under = above.clone();
+            under.push(at);
+            for kid in fields.into_iter().rev() {
+                stack.push((kid, under.clone(), name.clone()));
+            }
+        }
+        Ok(out)
+    }
+
+    /// The XFA datasets stream `at` made to hold the value of the field named `name`, as pdf.js
+    /// writes it, unfiltered: what it was before, nothing where no element of it is the field's.
+    fn put_xfa(&mut self, at: Ref, name: &str, value: xfa::Value) -> Result<Vec<(Ref, Object)>> {
+        let was = self.get(at)?;
+        let Object::Stream(stream) = &was else {
+            return Ok(Vec::new());
+        };
+        let data = self.pdf.decode(stream)?;
+        let Some(xml) = std::str::from_utf8(&data).ok() else {
+            return Ok(Vec::new());
+        };
+        let Some(written) = xfa::with_value(xml, name, value) else {
+            return Ok(Vec::new());
+        };
+        let mut dict = stream.dict.clone();
+        for key in [&b"Filter"[..], b"DecodeParms", b"DL"] {
+            dict.remove(key);
+        }
+        let raw = written.into_bytes();
+        self.update
+            .set(at, Object::Stream(accent_pdf::Stream { dict, raw }));
+        Ok(vec![(at, was)])
+    }
+
     /// The widgets of the terminal field `field`: its `/Kids`, or itself, a field merged with its
     /// only widget.
     pub(super) fn widgets_of(&self, field: Ref) -> Result<Vec<Ref>> {
@@ -571,8 +776,30 @@ impl Edits {
     }
 }
 
-/// What `w` is to a reader, on a page `height` points tall.
-fn field_of(w: Widget, height: f32) -> FormField {
+/// The value a Reset Form puts `w`'s field back to: its `/DV`, else empty, off or nothing
+/// picked; `None` for a push button or a signature, which hold none.
+fn default_of(w: Widget) -> Option<FieldValue> {
+    let string = |o: &Object| match o {
+        Object::String(s) => Some(text_string(s)),
+        _ => None,
+    };
+    Some(match &w.kind[..] {
+        b"Tx" => FieldValue::Text(string(&w.default).unwrap_or_default()),
+        b"Btn" if w.flags & PUSH_BUTTON != 0 => return None,
+        b"Btn" => {
+            let on = w.default.as_name().filter(|n| *n != b"Off");
+            FieldValue::On(on.map(<[u8]>::to_vec))
+        }
+        b"Ch" => FieldValue::Choice(match &w.default {
+            Object::Array(values) => values.iter().filter_map(string).collect(),
+            other => string(other).into_iter().collect(),
+        }),
+        _ => return None,
+    })
+}
+
+/// What `w` is to a reader, on a page `height` points tall, `height_of` giving another page's.
+fn field_of(w: Widget, height: f32, height_of: impl Fn(usize) -> f32) -> FormField {
     let [left, bottom, right, top] = w.rect;
     let flag = |bit: u32| w.flags & bit != 0;
     let string = |o: &Object| match o {
@@ -649,6 +876,19 @@ fn field_of(w: Widget, height: f32) -> FormField {
         kind,
         read_only: flag(READ_ONLY),
         hidden: w.hidden,
+        action: w.action.map(|action| match action {
+            accent_pdf::Action::Reset { fields, exclude } => {
+                FieldAction::Reset(Reset { fields, exclude })
+            }
+            accent_pdf::Action::Uri(uri) => FieldAction::Uri(uri),
+            accent_pdf::Action::GoTo(dest) => FieldAction::Page {
+                page: dest.page,
+                top: dest.top.map(|y| height_of(dest.page) - y),
+            },
+            accent_pdf::Action::Named(n) => {
+                FieldAction::Named(String::from_utf8_lossy(&n).into_owned())
+            }
+        }),
     }
 }
 

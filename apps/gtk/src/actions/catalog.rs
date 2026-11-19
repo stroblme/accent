@@ -269,6 +269,8 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.pdf-redo", "Redo PDF Edit", &[]),
     ("win.pdf-copy-link", "Copy Link to Selection", &[]),
     ("win.pdf-export-highlights", "Export Highlights to PDF", &[]),
+    // A form's fields back to their defaults, as its own Reset button would (DESIGN.md, PDF Forms).
+    ("win.pdf-reset-form", "Reset Form", &[]),
     // SyncTeX, both ways between a LaTeX build's PDF and its sources (`synctex.rs`); Ctrl+click
     // on a page is Go to Source too, as in every LaTeX viewer.
     ("win.pdf-go-to-source", "Go to Source", &[]),

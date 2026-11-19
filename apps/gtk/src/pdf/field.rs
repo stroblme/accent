@@ -1,11 +1,13 @@
 //! Form fields on the page (DESIGN.md, PDF Forms): the widgets the render thread reads with a
 //! page's links, tinted in the accent where a reader can fill them in, the pointer and the
-//! tooltip over them, a click that ticks a box, and the editor a text field is typed into.
+//! tooltip over them, a click that ticks a box or presses a button, the editor a text field is
+//! typed into and the list a choice field picks from, and Tab through them all in pdf.js's order.
 
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use accent_core::pdf::{self, FieldKind, FieldValue, FormField, Theme};
+use accent_core::pdf::{self, FieldAction, FieldKind, FieldValue, FormField, Theme};
 use adw::prelude::*;
 use gtk::glib;
 
@@ -38,12 +40,18 @@ impl Kept for FieldEditor {
 
 /// What a password field says over it: accent writes none into a file (user decision 9).
 pub(super) const NO_PASSWORDS: &str = "Accent does not store passwords";
+/// What a form whose fields run scripts says once, and an XFA form without fields of its own:
+/// accent runs no JavaScript (user decision 7) and reads no XFA (decision 8).
+const SCRIPTS: &str = "This form's scripts, which check and calculate its fields, are not run";
+const XFA: &str = "This is an XFA form, which Accent shows but cannot fill";
 
 impl PdfTab {
-    /// A page's fields landed.
+    /// A page's fields landed: the tint follows them where they changed.
     pub(super) fn fields_landed(&self, page: usize, fields: Vec<FormField>) {
-        self.fields.borrow_mut().insert(page, fields);
-        self.tint_fields();
+        let was = self.fields.borrow_mut().insert(page, fields.clone());
+        if was.unwrap_or_default() != fields {
+            self.tint_fields();
+        }
     }
 
     /// Tint every field a reader can fill in, on every page whose fields are known, and none while
@@ -97,12 +105,21 @@ impl PdfTab {
         let Some((page, field)) = self.over_field(view, (x, y), |page, f| (page, f.clone())) else {
             return false;
         };
-        if !fillable(&field) {
+        if !takes_clicks(&field) {
             return false;
         }
+        self.press_field(page, &field);
+        true
+    }
+
+    /// `field` of `page` clicked, or pressed with Space or Return while the keyboard is on it:
+    /// a check box toggled, a radio button turned on, or off again where its group lets it, the
+    /// editor opened over a text field, the list under a choice field, a push button's action
+    /// carried out.
+    fn press_field(self: &Rc<Self>, page: usize, field: &FormField) {
         match &field.kind {
             FieldKind::Check { on, checked } => {
-                self.fill_state(&field, (!checked).then(|| on.clone()))
+                self.fill_state(field, (!checked).then(|| on.clone()))
             }
             FieldKind::Radio {
                 on,
@@ -110,14 +127,198 @@ impl PdfTab {
                 no_toggle_off,
             } => match (checked, no_toggle_off) {
                 (true, true) => {}
-                (true, false) => self.fill_state(&field, None),
-                (false, _) => self.fill_state(&field, Some(on.clone())),
+                (true, false) => self.fill_state(field, None),
+                (false, _) => self.fill_state(field, Some(on.clone())),
             },
-            FieldKind::Text { .. } => self.edit_field(page, &field),
-            FieldKind::Choice { .. } => self.choose(page, &field),
-            _ => {}
+            FieldKind::Text { .. } => self.edit_field(page, field),
+            FieldKind::Choice { .. } => self.choose(page, field),
+            FieldKind::Button => self.press_button(field),
+            FieldKind::Signature => {}
+        }
+    }
+
+    /// What a push button does: a Reset Form put back as one step, a link to a page of this
+    /// document or a URI followed, a named page turn; a script it carries is not run.
+    fn press_button(self: &Rc<Self>, field: &FormField) {
+        match &field.action {
+            Some(FieldAction::Reset(reset)) => {
+                self.finish_field();
+                self.ask(Request::Reset(reset.clone()));
+            }
+            Some(FieldAction::Uri(uri)) => {
+                if let Some(f) = self.on_uri.get() {
+                    f(uri);
+                }
+            }
+            Some(FieldAction::Page { page, top }) => {
+                self.jumping();
+                self.view.goto_page(*page, *top);
+            }
+            Some(FieldAction::Named(name)) => match name.as_str() {
+                "NextPage" => self.next_page(),
+                "PrevPage" => self.previous_page(),
+                "FirstPage" => self.goto_page(0),
+                "LastPage" => self.goto_page(self.page_count().saturating_sub(1)),
+                _ => {}
+            },
+            None => {}
+        }
+    }
+
+    /// Put every field of the form back to its default, as one step: the palette's Reset Form.
+    pub fn reset_form(self: &Rc<Self>) {
+        self.finish_field();
+        self.ask(Request::Reset(pdf::Reset::all()));
+    }
+
+    /// Whether the document has a form with fields: what Reset Form is offered over.
+    pub fn has_form(&self) -> bool {
+        self.form.borrow().as_ref().is_some_and(|form| form.fields)
+    }
+
+    /// What accent cannot do of the form, said once a document: run its scripts, or fill an XFA
+    /// form that has no fields of its own. `None` once said, or for a form it does all of.
+    pub fn form_notice(&self) -> Option<&'static str> {
+        let form = self.form.borrow();
+        let said = match form.as_ref()? {
+            form if form.xfa && !form.fields => XFA,
+            form if form.scripted => SCRIPTS,
+            _ => return None,
+        };
+        (!self.told_form.replace(true)).then_some(said)
+    }
+
+    /// Called when what the form says as a whole is known.
+    pub fn connect_form(&self, f: impl Fn(&Rc<PdfTab>) + 'static) {
+        self.on_form.set(Rc::new(f));
+    }
+
+    /// Move the keyboard to the next field, or with `forward` false the one before, in pdf.js's
+    /// order across the pages (a text field's editor opening, another kind showing the focus
+    /// ring), brought into view: from the field it is on, else from the page being read. `false`
+    /// past the last or the first, where the keyboard leaves the page as it would without fields.
+    pub(super) fn tab_field(self: &Rc<Self>, forward: bool) -> bool {
+        let order = self.tab_order();
+        let page = self.current_page();
+        let at =
+            (self.focused.get()).and_then(|(_, w)| order.iter().position(|(_, f)| f.widget == w));
+        let next = match (at, forward) {
+            (Some(i), true) => Some(i + 1),
+            (Some(i), false) => i.checked_sub(1),
+            (None, true) => order.iter().position(|(p, _)| *p >= page),
+            (None, false) => order.iter().rposition(|(p, _)| *p <= page),
+        };
+        match next.and_then(|i| order.get(i)) {
+            Some((page, field)) => {
+                self.focus_field(*page, field);
+                true
+            }
+            None => {
+                self.finish_field();
+                self.unfocus_field();
+                false
+            }
+        }
+    }
+
+    /// The keyboard on `field` of `page`, brought into view: its editor open for a text field, the
+    /// focus ring round another.
+    fn focus_field(self: &Rc<Self>, page: usize, field: &FormField) {
+        self.focused.set(Some((page, field.widget)));
+        self.view.reveal(page, field.rect);
+        match field.kind {
+            FieldKind::Text { .. } => {
+                self.view.set_focus_field(None);
+                self.edit_field(page, field);
+            }
+            _ => {
+                self.finish_field();
+                self.view.set_focus_field(Some((page, field.rect)));
+            }
+        }
+    }
+
+    /// The keyboard off the fields, its ring gone.
+    pub(super) fn unfocus_field(&self) {
+        self.focused.set(None);
+        self.view.set_focus_field(None);
+    }
+
+    /// A key on the page while the keyboard is on a field other than a text field: Space or
+    /// Return presses it, an arrow on a radio button turns its neighbour in the group on, and
+    /// Escape takes the keyboard off it. Whether the key was the field's.
+    pub(super) fn field_key(self: &Rc<Self>, key: gtk::gdk::Key) -> bool {
+        use gtk::gdk::Key;
+        let Some((page, widget)) = self.focused.get() else {
+            return false;
+        };
+        let order = self.tab_order();
+        let Some(at) = order.iter().position(|(_, f)| f.widget == widget) else {
+            self.unfocus_field();
+            return false;
+        };
+        let (_, field) = order[at].clone();
+        match key {
+            Key::Escape => self.unfocus_field(),
+            Key::space | Key::Return | Key::KP_Enter => self.press_field(page, &field),
+            Key::Left | Key::Up | Key::Right | Key::Down
+                if matches!(field.kind, FieldKind::Radio { .. }) =>
+            {
+                let group: Vec<&(usize, FormField)> = order
+                    .iter()
+                    .filter(|(_, f)| f.field == field.field)
+                    .collect();
+                let here = group
+                    .iter()
+                    .position(|(_, f)| f.widget == widget)
+                    .unwrap_or(0);
+                let next = match key {
+                    Key::Left | Key::Up => here.checked_sub(1).unwrap_or(group.len() - 1),
+                    _ => (here + 1) % group.len(),
+                };
+                let (page, next) = group[next].clone();
+                self.focus_field(page, &next);
+                if let FieldKind::Radio {
+                    on, checked: false, ..
+                } = &next.kind
+                {
+                    self.fill_state(&next, Some(on.clone()));
+                }
+            }
+            _ => return false,
         }
         true
+    }
+
+    /// The fields the keyboard goes through, in pdf.js's order: page by page, and on a page row
+    /// by row, a field starting a row below another when its middle is under that one's bottom and
+    /// that one's middle above its top, then across a row by the fields' middles.
+    fn tab_order(&self) -> Vec<(usize, FormField)> {
+        let fields = self.fields.borrow();
+        let mut pages: Vec<usize> = fields.keys().copied().collect();
+        pages.sort_unstable();
+        let mut out = Vec::new();
+        for page in pages {
+            let mut on: Vec<&FormField> =
+                fields[&page].iter().filter(|f| takes_clicks(f)).collect();
+            on.sort_by(|a, b| a.rect.top.total_cmp(&b.rect.top));
+            let mut rows: Vec<Vec<&FormField>> = Vec::new();
+            for f in on {
+                match rows.last_mut() {
+                    Some(row) if !above(row[0], f) => row.push(f),
+                    _ => rows.push(vec![f]),
+                }
+            }
+            for mut row in rows {
+                row.sort_by(|a, b| {
+                    middle_x(a)
+                        .partial_cmp(&middle_x(b))
+                        .unwrap_or(Ordering::Equal)
+                });
+                out.extend(row.into_iter().map(|f| (page, f.clone())));
+            }
+        }
+        out
     }
 
     /// Open the list a choice field picks from under its widget, its picks marked: a click on an
@@ -288,6 +489,7 @@ impl PdfTab {
             return;
         };
         self.finish_field();
+        self.focused.set(Some((page, field.widget)));
         let theme = self.view.theme();
         let paper = match theme {
             Theme::Recolour { paper, .. } => paper,
@@ -339,24 +541,31 @@ impl PdfTab {
             self,
             move || tab.cancel_field()
         );
-        if !multiline {
-            let keys = gtk::EventControllerKey::new();
-            keys.set_propagation_phase(gtk::PropagationPhase::Capture);
-            keys.connect_key_pressed(glib::clone!(
-                #[weak(rename_to = tab)]
-                self,
-                #[upgrade_or]
-                glib::Propagation::Proceed,
-                move |_, key, _, _| match key {
-                    gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter => {
-                        tab.finish_field();
-                        glib::Propagation::Stop
-                    }
-                    _ => glib::Propagation::Proceed,
+        // Return fills a field of one line in, Tab and Shift+Tab move on to the next field or
+        // the one before, and past the last or the first fill it in and leave the page.
+        let keys = gtk::EventControllerKey::new();
+        keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let multiline = *multiline;
+        keys.connect_key_pressed(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            #[upgrade_or]
+            glib::Propagation::Proceed,
+            move |_, key, _, _| match key {
+                gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter if !multiline => {
+                    tab.finish_field();
+                    glib::Propagation::Stop
                 }
-            ));
-            editor.view().add_controller(keys);
-        }
+                gtk::gdk::Key::Tab | gtk::gdk::Key::ISO_Left_Tab => {
+                    if !tab.tab_field(key == gtk::gdk::Key::Tab) {
+                        tab.view.grab_focus();
+                    }
+                    glib::Propagation::Stop
+                }
+                _ => glib::Propagation::Proceed,
+            }
+        ));
+        editor.view().add_controller(keys);
         // After the press that opened it is done with: the page takes the keyboard on a press.
         glib::idle_add_local_once(move || wire_finish(&editor, cancel, later));
     }
@@ -497,6 +706,23 @@ impl PdfTab {
     }
 }
 
+/// Whether `field` takes a click: one a reader fills in, or a push button that does something.
+pub(super) fn takes_clicks(field: &FormField) -> bool {
+    let button = matches!(field.kind, FieldKind::Button) && field.action.is_some();
+    fillable(field) || (button && !field.hidden && !field.read_only)
+}
+
+/// Whether `b` starts a row below `a`'s on the page: its middle under `a`'s bottom, and `a`'s
+/// middle above its top.
+fn above(a: &FormField, b: &FormField) -> bool {
+    let middle = |f: &FormField| (f.rect.top + f.rect.bottom) / 2.0;
+    middle(a) <= b.rect.top && middle(b) >= a.rect.bottom
+}
+
+fn middle_x(f: &FormField) -> f32 {
+    (f.rect.left + f.rect.right) / 2.0
+}
+
 /// Whether a reader fills `field` in here: shown, not read-only, and holding a value of a kind
 /// accent writes, which a push button, a password (user decision 9) and a signature (decision 11)
 /// are not.
@@ -512,7 +738,7 @@ pub(super) fn fillable(field: &FormField) -> bool {
 /// The pointer over `field`: the I-beam over text to type, the hand over a box or a list a click
 /// fills in, the arrow over one that takes nothing.
 pub(super) fn cursor_of(field: &FormField) -> &'static str {
-    match (&field.kind, fillable(field)) {
+    match (&field.kind, takes_clicks(field)) {
         (_, false) => "default",
         (FieldKind::Text { .. }, true) => "text",
         (_, true) => "pointer",
@@ -549,6 +775,14 @@ impl PdfTab {
         let editor = self.filling.borrow().clone()?;
         let (at, _, px) = editor.at();
         Some((at, px, editor.has_focus()))
+    }
+
+    /// The name of the field the keyboard is on.
+    pub fn focused_field(&self) -> Option<String> {
+        let (page, widget) = self.focused.get()?;
+        let fields = self.fields.borrow();
+        let field = fields.get(&page)?.iter().find(|f| f.widget == widget)?;
+        Some(field.name.clone())
     }
 
     /// The list a choice field picks from, while it is open.

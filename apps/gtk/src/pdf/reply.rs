@@ -22,6 +22,7 @@ impl PdfTab {
         self.links.borrow_mut().clear();
         self.fields.borrow_mut().clear();
         self.tint_fields();
+        self.unfocus_field();
         self.glyphs.borrow_mut().clear();
         self.clear_selection();
     }
@@ -33,6 +34,10 @@ impl PdfTab {
                 self.links.borrow_mut().insert(page, links);
             }
             Reply::Fields(page, fields) => self.fields_landed(page, fields),
+            Reply::Form(form) => {
+                *self.form.borrow_mut() = form;
+                self.on_form.emit(self);
+            }
             Reply::Comments(page, comments) => {
                 let was = self.comments.borrow_mut().insert(page, comments.clone());
                 // The Outline pane lists them: refilled only when a page's comments change, not

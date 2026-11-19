@@ -243,14 +243,15 @@ drill_pdf_loupe() {
 
 # The fixture form's fields as the tab reads them, the pointer and the tooltip over each, its check
 # box and radio buttons clicked and undone, a text field typed into at 100 % and 200 %, left by
-# Escape and undone, and a combo box's and a list box's options picked from their lists, against
-# the file (DESIGN.md, PDF Forms).
+# Escape and undone, a combo box's and a list box's options picked from their lists, Tab through
+# every field and Space on one, and the form reset from the palette and by its button, each
+# undone, against the file (DESIGN.md, PDF Forms).
 drill_pdf_form() {
 	test -e "$pdfium" || { echo "SKIPPED the PDF form drill: no libpdfium"; return 0; }
 	launch 90 ACCENT_BENCH_PDF=form >"$dir/form"
 	has "$dir/form" \
 		'bench form fields page=0 count=13 name:text address:multiline person.email:text agree:check size:radio size:radio code:comb amount:text(read-only) country:combo fruit:list secret:password reset:button sign:signature' \
-		'bench form cursor name=text address=text person.email=text agree=pointer size=pointer size=pointer code=text amount=default country=pointer fruit=pointer secret=default reset=default sign=default' \
+		'bench form cursor name=text address=text person.email=text agree=pointer size=pointer size=pointer code=text amount=default country=pointer fruit=pointer secret=default reset=pointer sign=default' \
 		'bench form tips name="Your name" secret="Accent does not store passwords"' \
 		'bench form ticked name="Ada" agree=true size=false size=true amount="12.50" country=[fr] fruit=[Apple,Cherry]' \
 		'bench form picked name="Ada" agree=true size=true size=false amount="12.50" country=[fr] fruit=[Apple,Cherry]' \
@@ -263,7 +264,13 @@ drill_pdf_form() {
 		'bench form choosing open=true rows=3' \
 		'bench form chose open=false name="Ada" agree=true size=false size=true amount="12.50" country=[it] fruit=[Apple,Cherry]' \
 		'bench form ticked_list name="Ada" agree=true size=false size=true amount="12.50" country=[it] fruit=[Apple,Banana,Cherry]' \
-		'bench form list_undone name="Ada" agree=true size=false size=true amount="12.50" country=[it] fruit=[Apple,Cherry]'
+		'bench form list_undone name="Ada" agree=true size=false size=true amount="12.50" country=[it] fruit=[Apple,Cherry]' \
+		'bench form spaced name="Ada" agree=false size=false size=true amount="12.50" country=[it] fruit=[Apple,Cherry]' \
+		'bench form tabbed name person.email address agree size size code country fruit reset address size -' \
+		'bench form reset agree=false size=false size=false country=[] fruit=[]' \
+		'bench form reset_undone name="Ada" agree=false size=false size=true amount="12.50" country=[it] fruit=[Apple,Cherry]' \
+		'bench form pressed agree=false size=false size=false country=[] fruit=[]' \
+		'bench form pressed_undone name="Ada" agree=false size=false size=true amount="12.50" country=[it] fruit=[Apple,Cherry]'
 }
 
 # Its shells are real, so under a scratch HOME, running `true`, `false`, `pwd` and `sleep`.

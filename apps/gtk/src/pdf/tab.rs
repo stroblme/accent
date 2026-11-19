@@ -126,8 +126,13 @@ pub struct PdfTab {
     /// The zoom to restore when presentation mode ends.
     pub(super) presenting: Cell<Option<PdfZoom>>,
     pub(super) links: RefCell<std::collections::HashMap<usize, Vec<pdf::Link>>>,
-    /// Each page's form fields, asked for with its links.
+    /// Each page's form fields, asked for with its links, and what the form says as a whole.
     pub(super) fields: RefCell<HashMap<usize, Vec<pdf::FormField>>>,
+    pub(super) form: RefCell<Option<pdf::Form>>,
+    /// Whether the reader has been told what accent cannot do of the form.
+    pub(super) told_form: Cell<bool>,
+    /// The field the keyboard is on, by its page and its widget, which Tab moves through.
+    pub(super) focused: Cell<Option<(usize, pdf::Ref)>>,
     /// The pages an erase, a move, an Undo or an export changed this turn of the main loop, or in
     /// the eraser drag under way, whose links, comments and strokes are asked for once it is
     /// over. See [`PdfTab::reread`].
@@ -247,6 +252,8 @@ pub struct PdfTab {
     pub(super) on_repaged: RepageHook,
     pub(super) on_imported: ImportHook,
     pub(super) on_pictured: PictureHook,
+    /// Fired when what the form says as a whole is known, on opening, a read and a page edit.
+    pub(super) on_form: TabHook,
     /// The monitor on a loose file, which nothing else watches (`App::watch_loose`).
     pub monitor: RefCell<Option<gio::FileMonitor>>,
 }
@@ -341,6 +348,9 @@ pub fn open(
         pending_select: Cell::new(None),
         links: RefCell::new(std::collections::HashMap::new()),
         fields: RefCell::default(),
+        form: RefCell::default(),
+        told_form: Cell::new(false),
+        focused: Cell::new(None),
         stale: RefCell::default(),
         comments: RefCell::default(),
         tip: RefCell::default(),
@@ -399,6 +409,7 @@ pub fn open(
         on_repaged: Hook::default(),
         on_imported: Hook::default(),
         on_pictured: Hook::default(),
+        on_form: Hook::default(),
         monitor: RefCell::default(),
     });
 
