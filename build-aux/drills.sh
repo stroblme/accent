@@ -270,7 +270,8 @@ drill_pdf_form() {
 		'bench form reset agree=false size=false size=false country=[] fruit=[]' \
 		'bench form reset_undone name="Ada" agree=false size=false size=true amount="12.50" country=[it] fruit=[Apple,Cherry]' \
 		'bench form pressed agree=false size=false size=false country=[] fruit=[]' \
-		'bench form pressed_undone name="Ada" agree=false size=false size=true amount="12.50" country=[it] fruit=[Apple,Cherry]'
+		'bench form pressed_undone name="Ada" agree=false size=false size=true amount="12.50" country=[it] fruit=[Apple,Cherry]' \
+		'bench form returned closed'
 }
 
 # Its shells are real, so under a scratch HOME, running `true`, `false`, `pwd` and `sleep`.

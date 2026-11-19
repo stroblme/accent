@@ -288,7 +288,10 @@ use user_commands::bench_commands;
 ///   and back by a finger and by an XTEST mouse; lines over a 30,000-point plot and a drag down
 ///   them a step a frame; writes and removes `loupe-drill.pdf`),
 ///   `form` (the fixture form's fields as the tab reads them, the pointer and the tooltip over
-///   each through XTEST; writes and removes `form-drill.pdf`),
+///   each, a check box and a radio button clicked, a text field typed into at 100 % and 200 %, a
+///   combo box's and a list box's options picked, Tab through every field, Space, Reset Form and
+///   its push button, each against the file and undone, through XTEST, the page pictured under
+///   `ACCENT_BENCH_SHOTS=<dir>`; writes and removes `form-drill.pdf`),
 ///   `scroll:<rel_path>` (wheel input and continuous PDF frame pacing, then Alt+wheel paging, `n`
 ///   at the end and Ctrl+wheel zoom),
 ///   `broken:<rel_path or absolute path>` (truncation/recovery; scratch file),

@@ -7,8 +7,8 @@
 //! `form-typing.png`; then a combo box's option picked and a list box's ticked from the list a
 //! click opens, pictured as `form-choosing.png`, and the tick undone; then Tab through every
 //! field in pdf.js's order, its ring pictured as `form-focus.png`, Space on the check box it
-//! reaches, and the form reset from the palette and by its push button, each undone. Takes the
-//! file away again.
+//! reaches, the form reset from the palette and by its push button, each undone, and Space after
+//! Return in a text field, which pages. Takes the file away again.
 
 use super::pdf::{opened, written};
 use super::*;
@@ -269,6 +269,10 @@ pub(super) fn bench_pdf_form(app: &Rc<App>) {
         println!("bench form pressed {}", filed(&path));
         undo().await;
         println!("bench form pressed_undone {}", filed(&path));
+        // Return closes a text field's editor, and Space after it pages: the field takes no more.
+        click(&name).await;
+        super::git::xtest("key Return; sleep 0.3; key space; sleep 0.3").await;
+        println!("bench form returned {}", editing());
         quit(&app, &path);
     });
 }

@@ -198,6 +198,9 @@ impl PdfTab {
     /// ring), brought into view: from the field it is on, else from the page being read. `false`
     /// past the last or the first, where the keyboard leaves the page as it would without fields.
     pub(super) fn tab_field(self: &Rc<Self>, forward: bool) -> bool {
+        if !self.fields_take_keys() {
+            return false;
+        }
         let order = self.tab_order();
         let page = self.current_page();
         let at =
@@ -249,7 +252,7 @@ impl PdfTab {
     /// Escape takes the keyboard off it. Whether the key was the field's.
     pub(super) fn field_key(self: &Rc<Self>, key: gtk::gdk::Key) -> bool {
         use gtk::gdk::Key;
-        let Some((page, widget)) = self.focused.get() else {
+        let Some((page, widget)) = self.focused.get().filter(|_| self.fields_take_keys()) else {
             return false;
         };
         let order = self.tab_order();
@@ -258,6 +261,11 @@ impl PdfTab {
             return false;
         };
         let (_, field) = order[at].clone();
+        // A text field the keyboard was on is typed into in its editor: once that has closed,
+        // the page's keys are the page's again, and Tab goes on from the field.
+        if matches!(field.kind, FieldKind::Text { .. }) && key != Key::Escape {
+            return false;
+        }
         match key {
             Key::Escape => self.unfocus_field(),
             Key::space | Key::Return | Key::KP_Enter => self.press_field(page, &field),
@@ -288,6 +296,12 @@ impl PdfTab {
             _ => return false,
         }
         true
+    }
+
+    /// Whether the keyboard goes to the fields: with no tool in hand, which the page belongs to
+    /// otherwise, and not while the document is presented.
+    fn fields_take_keys(&self) -> bool {
+        self.view.mode() == Mode::Read && self.presenting.get().is_none()
     }
 
     /// The fields the keyboard goes through, in pdf.js's order: page by page, and on a page row
