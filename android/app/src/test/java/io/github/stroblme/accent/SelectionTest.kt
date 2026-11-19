@@ -1,5 +1,6 @@
 package io.github.stroblme.accent
 
+import androidx.compose.ui.geometry.Offset
 import io.github.stroblme.accent.ffi.Glyph
 import io.github.stroblme.accent.ffi.Point
 import io.github.stroblme.accent.ffi.Rect
@@ -9,10 +10,14 @@ import io.github.stroblme.accent.ui.grownTo
 import io.github.stroblme.accent.ui.loupeAt
 import io.github.stroblme.accent.ui.nearest
 import io.github.stroblme.accent.ui.pieces
+import io.github.stroblme.accent.ui.slid
+import io.github.stroblme.accent.ui.slides
 import io.github.stroblme.accent.ui.text
 import io.github.stroblme.accent.ui.wordAt
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /** PDF text selection over core glyphs; handles and menus need device coverage. */
@@ -76,6 +81,26 @@ class SelectionTest {
         assertEquals(Point(5f, 5f), loupeAt(glyphs, 4, 6f, 2f))
         assertNull(loupeAt(glyphs, 4, 8f, 2f))
         assertEquals(Point(10f, 25f), loupeAt(glyphs, 5, 9f, 2f))
+    }
+
+    @Test
+    fun `the loupe slides onto another line and keeps to the finger along one`() {
+        val (line, next) = (Offset(10f, 5f) to Offset(10f, 25f))
+        assertFalse(slides(Offset.Unspecified, line))
+        assertFalse(slides(line, Offset(40f, 5f)))
+        assertTrue(slides(line, next))
+        assertFalse(slides(next, Offset.Unspecified))
+        // Half way down, the finger moving on along the new line meanwhile: no new slide, and the
+        // loupe heads for where the end is now.
+        assertFalse(slides(next, Offset(30f, 25f)))
+        assertEquals(Offset(20f, 15f), slid(line, Offset(30f, 25f), 0.5f))
+        // Another line half way there slides on from where the loupe is, not from where it began.
+        val now = slid(line, next, 0.5f)
+        assertEquals(Offset(10f, 15f), now)
+        assertEquals(Offset(10f, 30f), slid(now, Offset(10f, 45f), 0.5f))
+        // Nothing to slide from, or nothing to show, is no slide at all.
+        assertEquals(next, slid(Offset.Unspecified, next, 0.5f))
+        assertEquals(Offset.Unspecified, slid(line, Offset.Unspecified, 0.5f))
     }
 
     @Test

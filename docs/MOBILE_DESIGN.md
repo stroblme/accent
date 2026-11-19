@@ -83,6 +83,7 @@ Follow these rules where they differ from Material 3, using a flat layout and ty
   The platform's floating toolbar offers Copy and Copy link.
   While a finger drags either end, the platform's text loupe shows that end's line above it, 100 by 48 dp at 1.25 times and rounded to the theme's 28 dp pill step as the device's dialogs are.
   It keeps to the middle of the line and within its ends as a text view's does, and goes once the finger lifts or runs more than half its width past the line.
+  Onto another line it slides over 100 ms at an even pace, following the finger along the new line meanwhile, as the platform's text magnifier does (`Editor.MagnifierMotionAnimator`).
 - Copy link puts the desktop's own link on the clipboard, `[[paper.pdf#page=N&selection=a,b,c,d|the quoted text]]`, one per page the selection covers, and pasting it into a note is what makes a highlight.
   A PDF opened from another app is named by the file name its provider gives, as the desktop names a file from outside a vault.
 - A tap while text is selected lets the selection go and does nothing else.

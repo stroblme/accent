@@ -1,5 +1,8 @@
 package io.github.stroblme.accent.ui
 
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.isSpecified
+import androidx.compose.ui.geometry.lerp
 import io.github.stroblme.accent.ffi.Glyph
 import io.github.stroblme.accent.ffi.Point
 import io.github.stroblme.accent.ffi.Rect
@@ -143,6 +146,20 @@ internal fun loupeAt(glyphs: List<Glyph>, at: Int, x: Float, reach: Float): Poin
     if (abs(x - kept) > reach) return null
     return Point(kept, (box.top + box.bottom) / 2)
 }
+
+/**
+ * Whether the loupe, last asked to be at [was], slides to [to] rather than going straight there:
+ * onto another line, as the platform's text magnifier does (`Editor.MagnifierMotionAnimator`),
+ * but not as it comes up or along a line, where it keeps to the finger.
+ */
+internal fun slides(was: Offset, to: Offset) = was.isSpecified && to.isSpecified && was.y != to.y
+
+/**
+ * Where a loupe sliding from [from] onto [to] is once it has gone [done] of the way: on the
+ * straight line toward where the end is now, so it follows the finger along the new line meanwhile.
+ */
+internal fun slid(from: Offset, to: Offset, done: Float): Offset =
+    if (from.isSpecified && to.isSpecified) lerp(from, to, done) else to
 
 /** Select the alphanumeric word around glyph [at], or that glyph alone. */
 internal fun wordAt(glyphs: List<Glyph>, at: Int): IntRange {

@@ -12,9 +12,12 @@ import android.view.Menu
 import android.view.MenuItem
 import android.view.View
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.AnimationState
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateDecay
 import androidx.compose.animation.core.exponentialDecay
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -37,6 +40,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.isSpecified
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.ClipOp
 import androidx.compose.ui.graphics.Color
@@ -443,6 +447,23 @@ private fun Pages(
     var dragging by remember(doc) { mutableStateOf(false) }
     /** Where the loupe magnifies in the pages' box while a finger drags an end, else nothing. */
     var loupe by remember(doc) { mutableStateOf(Offset.Unspecified) }
+    /** Where the loupe last began sliding onto a line the end moved to, and how far it has got. */
+    var slideFrom by remember(doc) { mutableStateOf(Offset.Unspecified) }
+    val sliding = remember(doc) { Animatable(1f) }
+    LaunchedEffect(sliding) {
+        var was = Offset.Unspecified
+        snapshotFlow { loupe }.collect { to ->
+            if (slides(was, to)) {
+                // From wherever it is, half way through another slide included.
+                slideFrom = slid(slideFrom, was, sliding.value)
+                sliding.snapTo(0f)
+                launch { sliding.animateTo(1f, tween(LOUPE_SLIDE_MS, easing = LinearEasing)) }
+            } else if (!to.isSpecified) {
+                sliding.snapTo(1f)
+            }
+            was = to
+        }
+    }
     /** Where the pages' box is in the window, which is where the menu is placed from. */
     var origin by remember { mutableStateOf(Offset.Zero) }
     val haptics = LocalHapticFeedback.current
@@ -750,7 +771,11 @@ private fun Pages(
                 .onSizeChanged { viewport = it }
                 .onGloballyPositioned { origin = it.positionInRoot() }
                 // The platform's text loupe over an end a finger drags, as a text view shows one.
-                .magnifier(sourceCenter = { loupe }, size = LOUPE, cornerRadius = LOUPE_CORNER)
+                .magnifier(
+                    sourceCenter = { slid(slideFrom, loupe, sliding.value) },
+                    size = LOUPE,
+                    cornerRadius = LOUPE_CORNER,
+                )
                 .onTap(chrome, claimed = ::claimed)
                 .pointerInput(doc, viewport) {
                     val decay = exponentialDecay<Float>()
@@ -1341,6 +1366,9 @@ private val HANDLE_REACH = 24.dp
  */
 private val LOUPE = DpSize(100.dp, 48.dp)
 private val LOUPE_CORNER = 28.dp
+
+/** How long the loupe takes to slide onto another line: the platform text magnifier's. */
+private const val LOUPE_SLIDE_MS = 100
 
 /**
  * Show the system selection toolbar around [around], updating its position on scroll.
