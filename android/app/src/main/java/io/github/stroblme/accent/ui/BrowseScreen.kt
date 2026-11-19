@@ -692,7 +692,7 @@ private fun LazyListScope.rows(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         fontWeight = if (row.kind == FileKind.DIR) FontWeight.Medium else null,
-                        // Dimmed as the desktop's tree dims them, search reaching neither.
+                        // Dimmed as the desktop's tree dims them, search reaching none of them.
                         color = if (mark == RowMark.None) Color.Unspecified else muted,
                     )
                 },
@@ -742,11 +742,14 @@ internal enum class RowMark {
     Dangling,
     /** A second path to a file another row holds, which opens that file. */
     Alias,
+    /** A row the index does not hold, such as a file in a folder git ignores, dimmed alone. */
+    Unindexed,
 }
 
 internal fun markOf(row: FileRow): RowMark = when {
     row.dangling -> RowMark.Dangling
     row.alias -> RowMark.Alias
+    row.id == 0L -> RowMark.Unindexed
     else -> RowMark.None
 }
 

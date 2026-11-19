@@ -36,6 +36,7 @@ Follow these rules where they differ from Material 3, using a flat layout and ty
   The created orders are left out because the core reads no creation time on Android, where they would sort as the modified ones do.
 - A link to nothing is listed dimmed under Material's `link_off` in place of its file's mark, and a tap on it says in the `Snackbar` that the file it links to is missing, as a click on the desktop does (DESIGN.md, Sidebar).
   An alias, a second path to a file the index holds once, is dimmed with Material's `link` after its name and opens by its own path as any file does.
+  A row the index does not hold, such as a file in a folder git ignores, is dimmed alone, as the desktop's tree dims it.
 - Every list here is the index's, so while the vault is still being read the start screen's bar runs under the title, without words (user decision 2026-11-03); a stopped walk drops the bar for a muted line saying what is not listed yet.
   Search and Files ask again as the walk reads more files, so a file it reaches turns up without the query being typed again, and a query that matched nothing says "Nothing found yet" until it ends.
   A query unanswered after 200 ms puts the bar up as well.
