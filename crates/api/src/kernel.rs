@@ -122,7 +122,12 @@ impl Kernels {
             let root = kernels.root.clone();
             let launch = {
                 let notebook = notebook.clone();
-                tokio::task::spawn_blocking(move || launch(&root, &notebook, kernel, &python))
+                tokio::task::spawn_blocking(move || {
+                    // And the host's login `PATH` the Flatpak gives a kernel, asked here the first
+                    // time rather than on the runtime ([`crate::flatpak::on_host`]).
+                    crate::flatpak::login_path();
+                    launch(&root, &notebook, kernel, &python)
+                })
             };
             session::start(kernels, id, notebook, launch.await??).await
         })

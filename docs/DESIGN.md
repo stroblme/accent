@@ -1606,7 +1606,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Clear Outputs and Clear All Outputs are edits, which Undo walks back.
 - A kernel that ends on its own says so ("The kernel ended: <why>", its last words), and a link that drops ends it in the window; the cells it ran or held keep what they had.
 - A marimo notebook is not run — its cells are a reactive program marimo runs itself — nor a notebook outside a vault, nor a presented one: the run commands say why.
-- In the Flatpak a local vault's kernel is the host's, through `flatpak-spawn --host --watch-bus`, as a shell is; its sockets are in `$XDG_RUNTIME_DIR/app/<id>`, the one folder the sandbox and the host share, and a venv's `python`, a link into the host's `/usr`, is found by its link.
+- In the Flatpak a local vault's kernel is the host's, through `flatpak-spawn --host --watch-bus` with the user's login `PATH` as a language server's (Language servers), as a shell is; its sockets are in `$XDG_RUNTIME_DIR/app/<id>`, the one folder the sandbox and the host share, and a venv's `python`, a link into the host's `/usr`, is found by its link.
 - A file that does not read as a notebook opens as text, its banner saying why; Open as Text on a notebook's tab menu shows its file as text.
 
 ### Comparison
@@ -1784,6 +1784,9 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Its outline holds the headings with their labels, `#let`s and loop variables inside, each heading spanning its title alone, so accent runs each to the next heading beside it, as the sticky title reads a section, and leaves out the `<anonymous>` row it gives a show rule's function.
 - In the Flatpak a local vault's servers are the host's, as its kernels and shells are (user pick 2026-11-18), since the sandbox ships none.
   Each starts through `flatpak-spawn --host --watch-bus` in its session's root, a path the host shares under `--filesystem=host`, and is looked for on the host with one `command -v` off the main thread, never cached, so a server installed later is found at the next open.
+  The start and the lookup both go by the user's own `PATH` (user decision 2026-11-19), which the login shell the user database names sets as a terminal tab's does (`-l -i`), so `~/.cargo/bin`, `~/.local/bin` and nvm's `bin` count where the session's environment lacks them.
+  The host is asked for it once a run, off the main thread, and where the shell says nothing usable within 5 s the session's `PATH` stands.
+  The program then starts through `env`, since flatpak-session-helper looks a program up on its own `PATH` and not on the one it is handed.
   Only what the Flatpak ships under `/app` stays inside the sandbox, which is the bundled ghost text alone.
   A host server is told no `processId`, because ours is the sandbox's and names another process on the host, which pyright's watch would take for our exit.
   Its session's `exit` ends it, and a dropped session's or a crashed accent's ends with the SIGINT flatpak-session-helper sends its group once `flatpak-spawn` is gone, so only a server that ignores SIGINT outlives a crash.

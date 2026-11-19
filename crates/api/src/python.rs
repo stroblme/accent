@@ -147,7 +147,8 @@ fn lacks_ipykernel_within(root: &Path, command: &[String], timeout: Duration) ->
 pub(crate) fn executable(root: &Path, command: &[String]) -> Option<String> {
     match command {
         [python] if Path::new(python).is_absolute() => return Some(python.clone()),
-        [python] if !python.contains('/') => {
+        // A name is looked for here, but in the Flatpak on the host's `PATH`, below.
+        [python] if !python.contains('/') && crate::flatpak::sandbox().is_none() => {
             return std::env::var_os("PATH")
                 .and_then(|paths| {
                     std::env::split_paths(&paths)
@@ -176,20 +177,14 @@ fn python_command(root: &Path, command: &[String]) -> Option<Command> {
     } else {
         python.clone()
     };
-    let sandbox =
-        std::env::var("FLATPAK_ID").ok().is_some() && Path::new("/.flatpak-info").exists();
-    let mut check = if sandbox {
-        let mut cmd = Command::new("flatpak-spawn");
-        cmd.args([
-            "--host",
-            &format!("--directory={}", root.display()),
-            &python,
-        ]);
-        cmd
-    } else {
-        Command::new(&python)
+    // In the Flatpak the host's Python, found on the user's `PATH` as a kernel's is.
+    let argv = [vec![python], args.to_vec()].concat();
+    let argv = match crate::flatpak::sandbox() {
+        Some(_) => crate::flatpak::on_host(argv, root, &[]),
+        None => argv,
     };
-    check.args(args).current_dir(root);
+    let mut check = Command::new(&argv[0]);
+    check.args(&argv[1..]).current_dir(root);
     Some(check)
 }
 
