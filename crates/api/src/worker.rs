@@ -472,8 +472,10 @@ impl Worker {
                 Msg::Moved { from, to } => {
                     self.follow(&from, &to);
                     batched.moved.insert(to.clone());
-                    self.posted(from, true, &mut batched);
+                    // The new path first, so a hard link the old one's row leaves behind is
+                    // taken in as the alias of the row the file has there (`retake`).
                     self.posted(to, true, &mut batched);
+                    self.posted(from, true, &mut batched);
                 }
                 Msg::Saved {
                     rel,

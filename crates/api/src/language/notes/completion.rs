@@ -162,6 +162,13 @@ impl Notes {
             ),
             false => (index.file_paths(false)?, Vec::new(), Vec::new()),
         };
+        // The second paths to the files offered, by which a link names its file too.
+        let linked: Vec<(String, String)> = {
+            let held: HashSet<&str> = paths.iter().map(String::as_str).collect();
+            (index.aliases()?.into_iter())
+                .filter(|(row, _)| held.contains(row.as_str()))
+                .collect()
+        };
         // `[[` names a note in an ignored folder too, behind the files the index holds, and a
         // link to one is no note to write.
         let start = paths.len();
@@ -179,12 +186,17 @@ impl Notes {
         // Behind the files, so one that is there leads a note only linked to at the same rank:
         // the ranking is stable.
         paths.extend(missing.iter().cloned());
+        let aliased = paths.len()..paths.len() + linked.len();
+        let (rows, linked): (Vec<String>, Vec<String>) = linked.into_iter().unzip();
+        paths.extend(linked);
         // The aliases last, ranked by their own names, and told apart by where they sit.
         let named = paths.len();
         paths.extend(aliases.iter().map(|(alias, _)| alias.clone()));
         let corpus = Arc::new(Corpus {
             paths,
             ignored,
+            aliased,
+            rows,
             named,
             missing,
             aliases,
@@ -249,6 +261,8 @@ impl Notes {
                 let Corpus {
                     paths,
                     ignored,
+                    aliased,
+                    rows,
                     named,
                     missing,
                     aliases,
@@ -256,7 +270,38 @@ impl Notes {
                 let recent = self.recent(&index, rel, !prefix.is_empty())?;
                 let (ranked, more) = ranked_paths(paths, &recent, prefix, rel);
                 let mut items = Vec::with_capacity(ranked.len());
+                // How a link spells `hit` to reach `file`: by its bare name while that reaches
+                // the file, else by its path.
+                let spelled = |hit: &str, file: &str| -> Result<String> {
+                    let (name, path) = link_names(hit);
+                    Ok(match self.find(&index, &name)?.as_deref() == Some(file) {
+                        true => name,
+                        false => path,
+                    })
+                };
                 for i in ranked {
+                    // A second path to a file writes a link by its own name, the name typed,
+                    // which reaches the file; one the file's own link spells adds no row.
+                    if aliased.contains(&i) {
+                        let (hit, file) = (&paths[i], &rows[i - aliased.start]);
+                        if file == rel {
+                            continue;
+                        }
+                        let target = spelled(hit, file)?;
+                        if target == spelled(file, file)? {
+                            continue;
+                        }
+                        items.push(Completion {
+                            insert: format!("[[{target}]]"),
+                            detail: Some(file.clone()),
+                            filter: Some(format!("[[{hit}")),
+                            label: link_names(hit).0,
+                            kind: Kind::File,
+                            replace,
+                            ..empty_item()
+                        });
+                        continue;
+                    }
                     // The link names the file, as any other row writes it, and reads as the
                     // alias: an alias is a name to find a note by, never a link target.
                     if let Some((alias, note)) = i.checked_sub(*named).map(|j| &aliases[j]) {

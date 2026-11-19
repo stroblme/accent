@@ -303,19 +303,23 @@ impl Index {
         }
         written?;
 
-        if dirty {
-            // Aliases are a handful of rows; rewriting them beats diffing them.
+        // Aliases are a handful of rows; rewriting them beats diffing them, though a walk that
+        // changed nothing else compares first, so a link made or gone while the vault was closed
+        // is taken in without a write at every walk.
+        let found: HashSet<(String, String)> = (scan.aliases.iter())
+            .map(|a| (a.rel_path.clone(), a.target_rel_path.clone()))
+            .collect();
+        let held = || -> Result<HashSet<(String, String)>> {
+            Ok((self.aliases()?.into_iter())
+                .filter(|(_, alias)| dir.is_empty() || (*alias >= lo && *alias < hi))
+                .map(|(row, alias)| (alias, row))
+                .collect())
+        };
+        if dirty || held()? != found {
             let tx = self.write_tx()?;
-            tx.execute(
-                "DELETE FROM aliases WHERE ?1 = '' OR (rel_path >= ?2 AND rel_path < ?3)",
-                params![dir, lo, hi],
-            )?;
-            for a in &scan.aliases {
-                tx.prepare_cached(
-                    "INSERT OR REPLACE INTO aliases(rel_path, file_id)
-                     SELECT ?1, id FROM files WHERE rel_path = ?2",
-                )?
-                .execute(params![a.rel_path, a.target_rel_path])?;
+            drop_aliases(&tx, dir, true)?;
+            for (rel, row) in &found {
+                add_alias(&tx, rel, row)?;
             }
             tx.commit()?;
         }
@@ -561,8 +565,7 @@ impl Index {
         let tx = self.write_tx()?;
         upsert(&tx, meta, content, &mut ReconcileStats::default())?;
         // A path that was a second one to another file is this one's row now.
-        tx.prepare_cached("DELETE FROM aliases WHERE rel_path = ?1")?
-            .execute([rel])?;
+        drop_aliases(&tx, rel, false)?;
         write_bodies(&tx)?;
         // The file's own links were just written unresolved, and a new note can be what a link
         // written long before it existed was waiting for — or a shorter path for one that
@@ -584,12 +587,6 @@ impl Index {
     /// ([`delete_file_rows`]), so there is nothing for a batch caller to defer.
     pub fn remove_file_batched(&mut self, rel: &str) -> Result<usize> {
         let (lo, hi) = path::subtree_range(rel);
-        // A second path to a file goes with its name, the file keeping its row.
-        self.conn
-            .prepare_cached(
-                "DELETE FROM aliases WHERE rel_path = ?1 OR (rel_path >= ?2 AND rel_path < ?3)",
-            )?
-            .execute(params![rel, lo, hi])?;
         let ids: Vec<i64> = {
             let mut st = self.conn.prepare_cached(
                 "SELECT id FROM files WHERE rel_path = ?1 OR (rel_path >= ?2 AND rel_path < ?3)",
@@ -597,11 +594,10 @@ impl Index {
             let rows = st.query_map(params![rel, lo, hi], |r| r.get(0))?;
             rows.collect::<rusqlite::Result<_>>()?
         };
-        if ids.is_empty() {
-            return Ok(0);
-        }
 
         let tx = self.write_tx()?;
+        // A second path to a file goes with its name, the file keeping its row.
+        drop_aliases(&tx, rel, true)?;
         for id in &ids {
             delete_file_rows(&tx, *id)?;
         }
@@ -619,13 +615,7 @@ impl Index {
             .prepare_cached("SELECT id FROM files WHERE rel_path = ?1")?
             .query_row([rel], |r| r.get(0))
             .optional()?;
-        let added = tx
-            .prepare_cached(
-                "INSERT OR REPLACE INTO aliases(rel_path, file_id)
-                 SELECT ?1, id FROM files WHERE rel_path = ?2 AND rel_path <> ?1",
-            )?
-            .execute(params![rel, row])?;
-        if added == 0 {
+        if !add_alias(&tx, rel, row)? {
             return Ok(false);
         }
         if let Some(id) = own {
@@ -953,9 +943,10 @@ fn upsert(
     }
 
     // The names a link reaches this file by. A directory is not a link target. Rewritten rather
-    // than kept because a row can change kind under the same path.
-    tx.prepare_cached("DELETE FROM file_keys WHERE file_id = ?1")?
-        .execute([id])?;
+    // than kept because a row can change kind under the same path. A second path's names are its
+    // own ([`add_alias`]) and stay through a save, though not past the file turning folder.
+    tx.prepare_cached("DELETE FROM file_keys WHERE file_id = ?1 AND (alias IS NULL OR ?2)")?
+        .execute(params![id, f.kind == FileKind::Dir])?;
     if f.kind != FileKind::Dir {
         for key in markdown::path_keys(&f.rel_path) {
             tx.prepare_cached("INSERT INTO file_keys(file_id, key) VALUES(?1, ?2)")?
@@ -1097,6 +1088,63 @@ fn clear_derived(tx: &rusqlite::Transaction<'_>, id: i64) -> Result<()> {
         .execute([id])?;
     tx.prepare_cached("INSERT OR REPLACE INTO temp.bodies(file_id) VALUES(?1)")?
         .execute([id])?;
+    Ok(())
+}
+
+/// Make `rel` a second path to the file the row at `row` holds, as the walk records one, with the
+/// names a link reaches the file by there ([`markdown::path_keys`]), and resolve the links those
+/// names answer again. False, and nothing written, where `row` is no row.
+fn add_alias(tx: &rusqlite::Transaction<'_>, rel: &str, row: &str) -> Result<bool> {
+    let id: Option<i64> = tx
+        .prepare_cached("SELECT id FROM files WHERE rel_path = ?1 AND rel_path <> ?2")?
+        .query_row([row, rel], |r| r.get(0))
+        .optional()?;
+    let Some(id) = id else {
+        return Ok(false);
+    };
+    // It may have been a second path to another file.
+    drop_aliases(tx, rel, false)?;
+    tx.prepare_cached("INSERT INTO aliases(rel_path, file_id) VALUES(?1, ?2)")?
+        .execute(params![rel, id])?;
+    let keys = markdown::path_keys(rel);
+    for key in &keys {
+        tx.prepare_cached("INSERT INTO file_keys(file_id, key, alias) VALUES(?1, ?2, ?3)")?
+            .execute(params![id, key, rel])?;
+    }
+    resolve_keys(tx, &keys)?;
+    Ok(true)
+}
+
+/// Take the second path `rel` out of the index and, with `under`, every one below it too, all of
+/// them for `""`, with the names a link reached their files by there ([`add_alias`]). The links
+/// those names answered resolve again: to the file's own path, another file, or nothing.
+fn drop_aliases(tx: &rusqlite::Transaction<'_>, rel: &str, under: bool) -> Result<()> {
+    let (lo, hi) = path::subtree_range(rel);
+    tx.prepare_cached(
+        "DELETE FROM aliases
+          WHERE rel_path = ?1 OR (?2 AND (?1 = '' OR (rel_path >= ?3 AND rel_path < ?4)))",
+    )?
+    .execute(params![rel, under, lo, hi])?;
+    let keys: Vec<String> = tx
+        .prepare_cached(
+            "DELETE FROM file_keys
+              WHERE alias IS NOT NULL
+                AND (alias = ?1 OR (?2 AND (?1 = '' OR (alias >= ?3 AND alias < ?4))))
+              RETURNING key",
+        )?
+        .query_map(params![rel, under, lo, hi], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    resolve_keys(tx, &keys)
+}
+
+/// Resolve every link one of `keys` names again ([`BEST_FILE`]).
+fn resolve_keys(tx: &rusqlite::Transaction<'_>, keys: &[String]) -> Result<()> {
+    for key in keys {
+        tx.prepare_cached(&format!(
+            "UPDATE links SET resolved_file = {BEST_FILE} WHERE key = ?1"
+        ))?
+        .execute([key])?;
+    }
     Ok(())
 }
 

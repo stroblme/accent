@@ -417,6 +417,48 @@ fn a_link_into_the_vault_is_listed_beside_its_file_under_one_row() {
     }
     assert_eq!(files(""), [("pre.md".to_string(), false, true)]);
     assert_eq!(f.vault.file_paths(false).unwrap(), ["real/pre.md"]);
+    // Go to File finds the file by the second path's name too.
+    assert_eq!(
+        f.vault.note_aliases().unwrap(),
+        [("pre.md".to_string(), "real/pre.md".to_string())]
+    );
+}
+
+/// A link written to a second path's name follows that path, not the file's: the file renamed
+/// leaves it as written, leading on through a hard link and nowhere through a link into the
+/// vault, which the rename leaves leading nowhere, and the second path renamed takes it along.
+#[test]
+fn a_link_written_to_an_alias_follows_the_alias() {
+    let root = tempfile::tempdir().unwrap();
+    for dir in ["real", "z"] {
+        std::fs::create_dir(root.path().join(dir)).unwrap();
+    }
+    let path = |rel: &str| root.path().join(rel);
+    std::fs::write(path("real/pre.md"), "pre\n").unwrap();
+    std::os::unix::fs::symlink("real/pre.md", path("short.md")).unwrap();
+    std::fs::hard_link(path("real/pre.md"), path("z/hard.md")).unwrap();
+    std::fs::write(path("d.md"), "[[short]] [[hard]] [[pre]]\n").unwrap();
+    let f = Fixture::open_dir(root, VaultConfig::default());
+    let rename = |from: &str, to: &str| {
+        let moves = [(from.to_string(), to.to_string())];
+        f.vault
+            .rename(&f.vault.plan_moves(&moves).unwrap(), true)
+            .unwrap();
+        f.vault.settle_index();
+    };
+    let text = || std::fs::read_to_string(f.root.path().join("d.md")).unwrap();
+    let leads = |name: &str| f.vault.resolve_link(name).unwrap();
+    assert_eq!(leads("short").as_deref(), Some("real/pre.md"));
+    assert_eq!(leads("hard").as_deref(), Some("real/pre.md"));
+
+    rename("real/pre.md", "real/post.md");
+    assert_eq!(text(), "[[short]] [[hard]] [[post]]\n");
+    assert_eq!(leads("hard").as_deref(), Some("real/post.md"));
+    assert_eq!(leads("short"), None);
+
+    rename("z/hard.md", "z/firm.md");
+    assert_eq!(text(), "[[short]] [[firm]] [[post]]\n");
+    assert_eq!(leads("firm").as_deref(), Some("real/post.md"));
 }
 
 /// News of a second path to a file makes it the alias of the file's row, never a row of its own,

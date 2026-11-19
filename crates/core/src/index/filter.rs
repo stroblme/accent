@@ -9,9 +9,10 @@ use crate::query::{self, Filter, On};
 use rusqlite::types::Value;
 
 /// The file one link key names, by [`super::links`]'s rule (`BEST_FILE`): the shortest path that
-/// answers to it, the older row breaking a tie. `{}` is the key's parameter.
+/// answers to it, the file's own or a second path to it, the older row breaking a tie. `{}` is
+/// the key's parameter.
 const BEST_ID: &str = "SELECT k.file_id FROM file_keys k JOIN files b ON b.id = k.file_id
-     WHERE k.key = {} ORDER BY length(b.rel_path), b.id LIMIT 1";
+     WHERE k.key = {} ORDER BY length(COALESCE(k.alias, b.rel_path)), b.id LIMIT 1";
 
 /// The links that quote a PDF's highlight (`Index::pdf_links`).
 const HIGHLIGHT: &str = "anchor LIKE 'page=%selection=%'";

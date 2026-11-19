@@ -40,7 +40,8 @@ pub enum Item {
     Missing(String),
     /// An ignored note outside the index, marked as such but still openable.
     Ignored(String),
-    /// A note found by one of its frontmatter aliases: the alias that matched, and the note.
+    /// A file found by another name, a note's frontmatter alias or a second path to the file:
+    /// the name that matched, and the file.
     Alias { name: String, rel: String },
     /// A `GAction` on the window, with the label and accelerator to show.
     Command {
@@ -107,7 +108,8 @@ pub struct Sources {
 }
 
 /// Shared ranking corpus: files before `real`, then missing linked notes; ignored
-/// notes marked by [`with_ignored`], and `(alias, note)` pairs ranked by alias.
+/// notes marked by [`with_ignored`], and `(name, file)` pairs ranked by name: frontmatter
+/// aliases and second paths to files.
 #[derive(Clone, Default, PartialEq)]
 pub struct Files {
     pub paths: Rc<Vec<String>>,
@@ -486,8 +488,8 @@ fn row_factory(
                             .build(),
                     );
                 }
-                // The alias that matched, then the note it names, whole: the alias says nothing of
-                // where the note is.
+                // The name that matched, then the file it names, whole: the name says nothing of
+                // where the file is.
                 Item::Alias { name: alias, rel } => {
                     icon.set_icon_name(Some(crate::doc::icon_for(rel)));
                     name.set_text(alias);

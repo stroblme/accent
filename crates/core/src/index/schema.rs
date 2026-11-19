@@ -1,7 +1,7 @@
 //! The tables, and the knobs that shape how they are filled.
 
 /// Bump on any schema change: `Index::open_or_rebuild` then deletes the cache and starts a new one.
-pub(super) const SCHEMA_VERSION: i64 = 20;
+pub(super) const SCHEMA_VERSION: i64 = 21;
 
 /// Maximum indexed body size for non-markdown files. Stricter than [`crate::fs::MAX_TEXT`]
 /// because indexing repeatedly consumes database space and FTS query work, whereas opening a
@@ -48,7 +48,9 @@ CREATE TABLE aliases(rel_path TEXT PRIMARY KEY, file_id INTEGER NOT NULL);
 CREATE TABLE opened(rel_path TEXT PRIMARY KEY, seq INTEGER NOT NULL);
 -- Every name a file answers a link by (`markdown::path_keys`, lower-cased), one row each, so
 -- resolving a link is an index lookup rather than a pass over every path. Directories have none.
-CREATE TABLE file_keys(file_id INTEGER NOT NULL, key TEXT NOT NULL);
+-- `alias` is the second path (an `aliases` row) a key names the file by, NULL for the row's own
+-- path: such a key goes with that path, and a link resolves by the length of the path answering.
+CREATE TABLE file_keys(file_id INTEGER NOT NULL, key TEXT NOT NULL, alias TEXT);
 CREATE TABLE links(
     src_file      INTEGER NOT NULL,
     target        TEXT NOT NULL,
@@ -173,6 +175,7 @@ END;
 CREATE INDEX idx_links_key      ON links(key);
 CREATE INDEX idx_file_keys_key  ON file_keys(key);
 CREATE INDEX idx_file_keys_file ON file_keys(file_id);
+CREATE INDEX idx_file_keys_alias ON file_keys(alias) WHERE alias IS NOT NULL;
 CREATE INDEX idx_links_resolved ON links(resolved_file);
 CREATE INDEX idx_links_src      ON links(src_file);
 CREATE INDEX idx_tags_name      ON tags(name);

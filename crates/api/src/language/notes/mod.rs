@@ -59,11 +59,15 @@ pub(crate) struct Notes {
 /// Each note's suggested tags, as the index held them at its [`Index::data_version`].
 type Suggested = (i64, HashMap<String, Arc<Vec<String>>>);
 
-/// Completion paths: the first `named` entries are files, followed by ignored
-/// notes (`ignored`), missing linked notes (`missing`), then alias names.
+/// Completion paths: files, followed by ignored notes (`ignored`), missing linked
+/// notes (`missing`), second paths to files (`aliased`), then from `named` on the
+/// frontmatter alias names.
 struct Corpus {
     paths: Vec<String>,
     ignored: std::ops::Range<usize>,
+    /// Each second path's file is the one `rows` holds at its place.
+    aliased: std::ops::Range<usize>,
+    rows: Vec<String>,
     named: usize,
     missing: Vec<String>,
     aliases: Vec<(String, String)>,

@@ -357,9 +357,14 @@ impl Local {
         Ok(ignored.resolve(target).map(str::to_string))
     }
 
-    /// `(alias, note)` for every frontmatter alias in the vault.
+    /// `(name, file)` for every other name Go to File finds a file by: each frontmatter alias of a
+    /// note, and each second path to a file (`Index::aliases`), which links name it by too.
     pub fn note_aliases(&self) -> Result<Vec<(String, String)>> {
-        Ok(self.index().note_aliases()?)
+        let index = self.index();
+        let mut names = index.note_aliases()?;
+        let aliases = index.aliases()?.into_iter();
+        names.extend(aliases.map(|(row, alias)| (alias, row)));
+        Ok(names)
     }
 
     /// `(original, conflict copy)` for every `*.sync-conflict-*` file whose original still exists.

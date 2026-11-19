@@ -201,8 +201,9 @@ impl Vault {
         Ok(self.inner.ignored_notes(fresh)?)
     }
 
-    /// Frontmatter aliases and their notes, for switcher lookup. Aliases do
-    /// not replace filenames as link targets.
+    /// The other names the switcher finds a file by: a note's frontmatter
+    /// aliases, which no link names, and each second path to a file, which
+    /// links name it by too.
     pub fn note_aliases(&self) -> Answer<Vec<NoteAlias>> {
         Ok(self
             .inner

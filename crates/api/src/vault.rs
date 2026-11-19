@@ -553,7 +553,8 @@ methods! {
     ignored_notes(fresh: val bool) -> Vec<String>;
     /// The file a link target names in the folders git ignores, when the index has none.
     resolve_ignored(target: ref str) -> Option<String>;
-    /// `(alias, note)` for every frontmatter alias: what Go to File also finds a note by.
+    /// `(name, file)` for every frontmatter alias and every second path to a file: what Go to
+    /// File also finds a file by.
     note_aliases() -> Vec<(String, String)>;
     conflicts() -> Vec<(String, String)>;
     conflicts_of(rel: ref str) -> Vec<String>;

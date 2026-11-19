@@ -154,12 +154,14 @@ impl Local {
     }
 
     /// Every file the moves take somewhere, old path to new: a folder's one by one, as the
-    /// index lists them.
+    /// index lists them, and every second path to a file among them, which links name too.
     fn moved_files(&self, moves: &[(String, String)]) -> Result<HashMap<String, String>> {
         let index = self.index();
+        let aliases: Vec<String> = index.aliases()?.into_iter().map(|(_, a)| a).collect();
         let mut out = HashMap::new();
         for (from, to) in moves {
-            for old in index.files_under(from)? {
+            let aliased = aliases.iter().filter(|a| is_under(a, from)).cloned();
+            for old in index.files_under(from)?.into_iter().chain(aliased) {
                 let new = format!("{to}{}", &old[from.len()..]);
                 out.insert(old, new);
             }
@@ -167,7 +169,8 @@ impl Local {
         Ok(out)
     }
 
-    /// What every link key in these notes resolves to.
+    /// The path that answers every link key in these notes, which a move rewrites the link to
+    /// follow: a link written to a second path's name follows that path, not its file.
     fn link_targets<'a>(
         &self,
         notes: impl IntoIterator<Item = &'a String>,
@@ -175,7 +178,8 @@ impl Local {
         let index = self.index();
         let mut out = HashMap::new();
         for rel in notes {
-            out.extend(index.resolved_links(rel)?);
+            let links = index.resolved_links(rel)?.into_iter();
+            out.extend(links.map(|(key, _, path)| (key, path)));
         }
         Ok(out)
     }
@@ -280,8 +284,10 @@ impl Local {
         edit: PageEdit,
         keep: &[(String, usize)],
     ) -> Result<markdown::Repaged> {
-        let mut targets: HashMap<String, String> =
-            self.index().resolved_links(note)?.into_iter().collect();
+        let mut targets: HashMap<String, String> = (self.index().resolved_links(note)?)
+            .into_iter()
+            .map(|(key, file, _)| (key, file))
+            .collect();
         let path = self.resolve_inside(note)?;
         let (text, etag) = fs::read_note(&path)?;
         // A reference definition or an HTML `href` is no link the index holds, and may spell a

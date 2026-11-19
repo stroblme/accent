@@ -743,6 +743,52 @@ fn a_wikilink_completes_an_alias_to_its_note() {
     );
 }
 
+/// A second path to a file, a link into the vault, is offered by its own name and writes a link
+/// by that name, which reaches the file; one named as the file is adds no row of its own.
+#[test]
+fn a_wikilink_completes_a_second_path_by_its_own_name() {
+    let vault = tempfile::tempdir().unwrap();
+    for dir in ["deep", "sub"] {
+        std::fs::create_dir(vault.path().join(dir)).unwrap();
+    }
+    std::fs::write(vault.path().join("deep/Real Name.md"), "# Real\n").unwrap();
+    let link = |target: &str, rel: &str| {
+        std::os::unix::fs::symlink(target, vault.path().join(rel)).unwrap();
+    };
+    link("../deep/Real Name.md", "sub/short.md");
+    link("deep/Real Name.md", "Real Name.md");
+    std::fs::write(vault.path().join("a.md"), "[[sho\n[[Real\n").unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let db = cache.path().join("i.db");
+    Index::open(&db)
+        .unwrap()
+        .reconcile(vault.path(), |_| {})
+        .unwrap();
+    let notes = Notes::open_at(
+        vault.path().to_path_buf(),
+        &db,
+        std::sync::mpsc::channel().0,
+        Arc::new(Ignored::new(vault.path().to_path_buf())),
+        Arc::default(),
+    )
+    .unwrap();
+    let rows = |line: u32, character: u32| -> Vec<(String, String, Option<String>)> {
+        let items = notes.completion("a.md", Pos { line, character });
+        (items.unwrap().items.into_iter())
+            .map(|i| (i.label, i.insert, i.detail))
+            .collect()
+    };
+    let row = |label: &str, insert: &str, detail: Option<&str>| {
+        (label.into(), insert.into(), detail.map(Into::into))
+    };
+
+    assert_eq!(
+        rows(0, 5),
+        [row("short", "[[short]]", Some("deep/Real Name.md"))]
+    );
+    assert_eq!(rows(1, 6), [row("Real Name", "[[Real Name]]", None)]);
+}
+
 /// The whole `[[paper.pdf#` path: the index resolves the name, `accent_pdf` reads the outline,
 /// as a host's `serve` reads it too, and what goes in is an anchor the reader can land by.
 #[test]

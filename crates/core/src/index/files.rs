@@ -242,7 +242,7 @@ impl Index {
     }
 
     /// `(alias, note rel_path)` for every frontmatter alias, by alias: the names Go to File and
-    /// `[[` completion also find a note by. A link still resolves by the file's name alone.
+    /// `[[` completion also find a note by. A link still resolves by the name of a path to it alone.
     pub fn note_aliases(&self) -> Result<Vec<(String, String)>> {
         let mut st = self.conn.prepare_cached(
             "SELECT a.name, f.rel_path FROM note_aliases a JOIN files f ON f.id = a.file_id

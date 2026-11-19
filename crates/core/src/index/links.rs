@@ -8,16 +8,22 @@ use crate::path::{self, FileType, file_type, linked_path};
 use rusqlite::{OptionalExtension, params};
 use std::collections::HashSet;
 
-/// Obsidian's rule as one subquery: of the files answering to a link's key, the shortest
-/// `rel_path` wins, and the older row breaks a tie. Correlated on `links.key`, so it is what an
-/// `UPDATE links SET resolved_file = …` assigns; `NULL` when nothing answers.
+/// Obsidian's rule as one subquery: of the files answering to a link's key, the one by the
+/// shortest path wins, its own or a second path to it (`file_keys.alias`), and the older row
+/// breaks a tie. Correlated on `links.key`, so it is what an `UPDATE links SET resolved_file = …`
+/// assigns; `NULL` when nothing answers.
 pub(super) const BEST_FILE: &str =
     "(SELECT k.file_id FROM file_keys k JOIN files f ON f.id = k.file_id
-      WHERE k.key = links.key ORDER BY length(f.rel_path), f.id LIMIT 1)";
+      WHERE k.key = links.key ORDER BY length(COALESCE(k.alias, f.rel_path)), f.id LIMIT 1)";
 
-/// [`BEST_FILE`] for one key handed in, answering with the path.
+/// [`BEST_FILE`] for one key handed in, answering with the file's path.
 const BEST_REL_PATH: &str = "SELECT f.rel_path FROM file_keys k JOIN files f ON f.id = k.file_id
-     WHERE k.key = ?1 ORDER BY length(f.rel_path), f.id LIMIT 1";
+     WHERE k.key = ?1 ORDER BY length(COALESCE(k.alias, f.rel_path)), f.id LIMIT 1";
+
+/// The row the path `?1` names: its own, or the one it is a second path to (`aliases`), so a tab
+/// on either reads the same links.
+const ROW: &str = "COALESCE((SELECT id FROM files WHERE rel_path = ?1),
+                            (SELECT file_id FROM aliases WHERE rel_path = ?1))";
 
 /// [`Index::resolve_links`] narrowed to what one indexed file can have changed: the links it
 /// holds, every link whose key it answers to — which is where a dangling link finds its new
@@ -68,14 +74,13 @@ impl Index {
     /// live in notes so the disposable index can rebuild them; no unrebuildable annotation table
     /// is needed.
     pub fn pdf_links(&self, rel_path: &str) -> Result<Vec<PdfLink>> {
-        let mut st = self.conn.prepare_cached(
+        let mut st = self.conn.prepare_cached(&format!(
             "SELECT s.rel_path, l.byte_start, l.anchor, l.alias
              FROM links l
              JOIN files s ON s.id = l.src_file
-             JOIN files t ON t.id = l.resolved_file
-             WHERE t.rel_path = ?1 AND l.anchor LIKE 'page=%selection=%'
-             ORDER BY s.rel_path, l.byte_start",
-        )?;
+             WHERE l.resolved_file = {ROW} AND l.anchor LIKE 'page=%selection=%'
+             ORDER BY s.rel_path, l.byte_start"
+        ))?;
         // The `LIKE` narrows the rows; the anchor is parsed in Rust, where the one parser lives.
         let rows = st.query_map([rel_path], |r| {
             Ok((
@@ -102,14 +107,13 @@ impl Index {
     }
 
     pub fn backlinks(&self, rel_path: &str) -> Result<Vec<Backlink>> {
-        let mut st = self.conn.prepare_cached(
+        let mut st = self.conn.prepare_cached(&format!(
             "SELECT s.rel_path, l.byte_start, l.byte_end
              FROM links l
              JOIN files s ON s.id = l.src_file
-             JOIN files t ON t.id = l.resolved_file
-             WHERE t.rel_path = ?1
-             ORDER BY s.rel_path, l.byte_start",
-        )?;
+             WHERE l.resolved_file = {ROW}
+             ORDER BY s.rel_path, l.byte_start"
+        ))?;
         let rows = st.query_map([rel_path], |r| {
             Ok(Backlink {
                 src_rel_path: r.get(0)?,
@@ -120,17 +124,24 @@ impl Index {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// `(key, file)` for every link in the note `src` that resolves: what each way the note
-    /// names a file meant, keyed the way [`markdown::rewrite_moved`] looks them up. Asked before
-    /// a move, while the index still describes the vault as it was.
-    pub fn resolved_links(&self, src: &str) -> Result<Vec<(String, String)>> {
+    /// `(key, file, path)` for every link in the note `src` that resolves: the file each way the
+    /// note names one meant, keyed the way [`markdown::rewrite_moved`] looks them up, and the path
+    /// that answers the key, the file's own where it does and else the second path to it that
+    /// does, so a move rewrites a link written to a second path's name as that path moves. Asked
+    /// before a move, while the index still describes the vault as it was.
+    pub fn resolved_links(&self, src: &str) -> Result<Vec<(String, String, String)>> {
         let mut st = self.conn.prepare_cached(
-            "SELECT l.key, t.rel_path FROM links l
+            "SELECT l.key, t.rel_path,
+                    COALESCE((SELECT k.alias FROM file_keys k
+                               WHERE k.file_id = t.id AND k.key = l.key
+                               ORDER BY k.alias IS NOT NULL, length(k.alias), k.alias LIMIT 1),
+                             t.rel_path)
+             FROM links l
              JOIN files s ON s.id = l.src_file
              JOIN files t ON t.id = l.resolved_file
              WHERE s.rel_path = ?1",
         )?;
-        let rows = st.query_map([src], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let rows = st.query_map([src], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -165,13 +176,12 @@ impl Index {
     /// Every link written in the note `src`, in the order it writes them, and the file each
     /// resolves to: a note's way out, as [`backlinks`](Self::backlinks) is its way in.
     pub fn links_from(&self, src: &str) -> Result<Vec<OutLink>> {
-        let mut st = self.conn.prepare_cached(
+        let mut st = self.conn.prepare_cached(&format!(
             "SELECT l.target, t.rel_path, l.kind, l.anchor, l.byte_start FROM links l
-             JOIN files s ON s.id = l.src_file
              LEFT JOIN files t ON t.id = l.resolved_file
-             WHERE s.rel_path = ?1
-             ORDER BY l.byte_start",
-        )?;
+             WHERE l.src_file = {ROW}
+             ORDER BY l.byte_start"
+        ))?;
         let rows = st.query_map([src], |r| {
             Ok(OutLink {
                 target: r.get(0)?,
@@ -462,5 +472,94 @@ mod tests {
             ix.missing_notes().unwrap(),
             ["Rev 1.2 notes.md", "sub/Later.md"]
         );
+    }
+
+    /// The notes linking to `rel`, as a tab on it lists them.
+    fn sources(ix: &crate::index::Index, rel: &str) -> Vec<String> {
+        let rows = ix.backlinks(rel).unwrap().into_iter();
+        rows.map(|b| b.src_rel_path).collect()
+    }
+
+    /// A second path to a file, a link into the vault, answers a link by its own name as the
+    /// file's path does, the shortest path answering winning as ever: `[[short]]` reaches
+    /// `sub/Beta.md` through `short.md` ahead of the deeper `x/short.md`. A save of the file keeps
+    /// the name, and the link going hands it to the namesake, whether the vault hears of it or
+    /// a walk finds it gone; a walk finding it again gives it back.
+    #[test]
+    fn an_alias_answers_a_link_by_its_own_name() {
+        let (vault, db) = fixture();
+        let root = vault.path();
+        std::os::unix::fs::symlink("sub/Beta.md", root.join("short.md")).unwrap();
+        fs::create_dir(root.join("x")).unwrap();
+        fs::write(root.join("x/short.md"), "# Other\n").unwrap();
+        fs::write(root.join("d.md"), "[[short]]\n").unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(root, |_| {}).unwrap();
+        assert_eq!(
+            ix.resolve_target("short").unwrap().as_deref(),
+            Some("sub/Beta.md")
+        );
+        assert_eq!(sources(&ix, "sub/Beta.md"), ["a.md", "d.md"]);
+        assert!(sources(&ix, "x/short.md").is_empty());
+
+        fs::write(root.join("sub/Beta.md"), "# Beta\nsaved\n").unwrap();
+        ix.update_file(root, "sub/Beta.md").unwrap();
+        assert_eq!(sources(&ix, "sub/Beta.md"), ["a.md", "d.md"], "a save");
+
+        fs::remove_file(root.join("short.md")).unwrap();
+        ix.remove_file_batched("short.md").unwrap();
+        assert_eq!(sources(&ix, "x/short.md"), ["d.md"], "heard of");
+
+        // While the vault is closed, the walk finding nothing else changed.
+        std::os::unix::fs::symlink("sub/Beta.md", root.join("short.md")).unwrap();
+        ix.reconcile(root, |_| {}).unwrap();
+        assert_eq!(sources(&ix, "sub/Beta.md"), ["a.md", "d.md"], "found");
+        fs::remove_file(root.join("short.md")).unwrap();
+        ix.reconcile(root, |_| {}).unwrap();
+        assert_eq!(sources(&ix, "x/short.md"), ["d.md"], "found gone");
+    }
+
+    /// News of a second path ([`Index::alias`](crate::index::Index::alias)) takes the links
+    /// waiting for its name, and a file of its own written there takes them from the file it
+    /// led to.
+    #[test]
+    fn news_of_an_alias_takes_the_links_its_name_answers() {
+        let (vault, db) = fixture();
+        let root = vault.path();
+        fs::write(root.join("d.md"), "[[short]]\n").unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(root, |_| {}).unwrap();
+        assert_eq!(ix.missing_notes().unwrap(), ["short.md"]);
+
+        std::os::unix::fs::symlink("sub/Beta.md", root.join("short.md")).unwrap();
+        assert!(ix.alias("short.md", "sub/Beta.md").unwrap());
+        assert!(ix.missing_notes().unwrap().is_empty());
+        assert_eq!(sources(&ix, "sub/Beta.md"), ["a.md", "d.md"]);
+
+        fs::remove_file(root.join("short.md")).unwrap();
+        fs::write(root.join("short.md"), "# Mine\n").unwrap();
+        ix.update_file(root, "short.md").unwrap();
+        assert_eq!(sources(&ix, "short.md"), ["d.md"]);
+        assert_eq!(sources(&ix, "sub/Beta.md"), ["a.md"]);
+    }
+
+    /// A tab on a second path to a file reads the file's row: the notes linking to it, the
+    /// links it writes and the highlights quoting it.
+    #[test]
+    fn an_alias_reads_the_links_of_its_file() {
+        let (vault, db) = fixture();
+        let root = vault.path();
+        std::os::unix::fs::symlink("a.md", root.join("alpha.md")).unwrap();
+        std::os::unix::fs::symlink("c.pdf", root.join("paper.pdf")).unwrap();
+        fs::write(
+            root.join("d.md"),
+            "[[a]] [[c.pdf#page=1&selection=0,0,0,5|Hi]]\n",
+        )
+        .unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(root, |_| {}).unwrap();
+        assert_eq!(sources(&ix, "alpha.md"), ["d.md"]);
+        assert_eq!(ix.links_from("alpha.md").unwrap().len(), 1);
+        assert_eq!(ix.pdf_links("paper.pdf").unwrap().len(), 1);
     }
 }

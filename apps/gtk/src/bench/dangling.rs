@@ -1,5 +1,6 @@
 //! The Files tree's links: one to nothing marked, an editor's lock never listed, and a link into
-//! the vault listed beside the file it names, the index holding that file once.
+//! the vault listed beside the file it names, the index holding that file once and finding it by
+//! the link's name too.
 
 use super::*;
 
@@ -8,7 +9,9 @@ use super::*;
 /// Then it makes an editor's lock `.#other.md` and a link to nothing `gone.md`, and prints both
 /// once `gone.md` is listed (`made`); then writes `real/x.md`, the file `link.md` names, and
 /// prints both rows once `link.md` is no longer marked, and whether the index holds the file once,
-/// under `real/x.md` (`target`). A row reads as its kind, `b` for a link to nothing, followed by
+/// under `real/x.md` (`target`). Last it follows `[[shortcut]]`, the name of a second link to
+/// `real/pre.md`, and prints the tab it opened (`alias`), then Go to File's rows for `shortcut`
+/// (`switcher_row`). A row reads as its kind, `b` for a link to nothing, followed by
 /// `i` where the index holds it and `+link` where the link is drawn after its name, or `-` for
 /// none. `drill_dangling` makes the links; this writes into the vault, a scratch one. With a
 /// folder in place of `1`, it pictures the window there after `open`, light and dark
@@ -117,6 +120,19 @@ pub(super) fn bench_dangling(app: &Rc<App>, arg: &str) {
             row("link.md"),
             row("real/x.md")
         );
+        app.open_target("shortcut");
+        let opened = || app.active_key().is_some();
+        until("dangling", "followed", 10_000, opened).await;
+        println!("bench dangling alias followed={:?}", app.active_key());
+        let _ = WidgetExt::activate_action(&app.window, "win.palette-files", None);
+        let dialog = app.window.visible_dialog();
+        let entry = dialog.and_then(|d| find_search_entry(d.upcast_ref()));
+        if let Some(entry) = entry {
+            entry.set_text("shortcut");
+        }
+        // For the palette's names, asked for as it opened, to land.
+        glib::timeout_future(Duration::from_millis(1500)).await;
+        bench_switcher_rows(&app);
         bench_quit(&app);
     });
 }

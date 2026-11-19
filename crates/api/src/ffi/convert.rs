@@ -219,7 +219,8 @@ pub struct TagCount {
     pub count: i64,
 }
 
-/// A name a note's front matter gives it (`aliases:`), and the note.
+/// Another name a file goes by, a note's front matter alias (`aliases:`) or a second path to the
+/// file, and the file.
 #[derive(uniffi::Record)]
 pub struct NoteAlias {
     pub name: String,
