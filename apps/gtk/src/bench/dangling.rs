@@ -10,8 +10,9 @@ use super::*;
 /// once `gone.md` is listed (`made`); then writes `real/x.md`, the file `link.md` names, and
 /// prints both rows once `link.md` is no longer marked, and whether the index holds the file once,
 /// under `real/x.md` (`target`). Last it follows `[[shortcut]]`, the name of a second link to
-/// `real/pre.md`, and prints the tab it opened (`alias`), then Go to File's rows for `shortcut`
-/// (`switcher_row`). A row reads as its kind, `b` for a link to nothing, followed by
+/// `real/pre.md`, and prints the tab it opened (`alias`), then opens `shortcut.md` by its own
+/// path, as the tree does, and prints Go to File's rows for `shortcut` that name it (`goto`). A
+/// tree row reads as its kind, `b` for a link to nothing, followed by
 /// `i` where the index holds it and `+link` where the link is drawn after its name, or `-` for
 /// none. `drill_dangling` makes the links; this writes into the vault, a scratch one. With a
 /// folder in place of `1`, it pictures the window there after `open`, light and dark
@@ -124,6 +125,9 @@ pub(super) fn bench_dangling(app: &Rc<App>, arg: &str) {
         let opened = || app.active_key().is_some();
         until("dangling", "followed", 10_000, opened).await;
         println!("bench dangling alias followed={:?}", app.active_key());
+        app.open_path("shortcut.md");
+        let opened = || app.active_key().as_deref() == Some("shortcut.md");
+        until("dangling", "opened", 10_000, opened).await;
         let _ = WidgetExt::activate_action(&app.window, "win.palette-files", None);
         let dialog = app.window.visible_dialog();
         let entry = dialog.and_then(|d| find_search_entry(d.upcast_ref()));
@@ -132,7 +136,25 @@ pub(super) fn bench_dangling(app: &Rc<App>, arg: &str) {
         }
         // For the palette's names, asked for as it opened, to land.
         glib::timeout_future(Duration::from_millis(1500)).await;
-        bench_switcher_rows(&app);
+        // A row naming `shortcut.md`, as `file <path>` or `alias <name> <file>`.
+        let naming = |item: glib::Object| -> Option<String> {
+            let boxed = item.downcast::<glib::BoxedAnyObject>().ok()?;
+            match &**boxed.borrow::<Rc<palette::Item>>() {
+                palette::Item::File(rel) if rel == "shortcut.md" => Some(format!("file {rel}")),
+                palette::Item::Alias { name, rel } if name == "shortcut.md" => {
+                    Some(format!("alias {name} {rel}"))
+                }
+                _ => None,
+            }
+        };
+        let list = (app.window.visible_dialog())
+            .and_then(|d| find_widget(d.upcast_ref(), &|w| w.is::<gtk::ListView>()))
+            .and_downcast::<gtk::ListView>();
+        let rows: Vec<String> = (list.and_then(|l| l.model()).iter())
+            .flat_map(|m| (0..m.n_items()).filter_map(|i| m.item(i)))
+            .filter_map(naming)
+            .collect();
+        println!("bench dangling goto {rows:?}");
         bench_quit(&app);
     });
 }

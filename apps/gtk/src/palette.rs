@@ -258,16 +258,19 @@ fn places(corpus: &[String], mru: &[String]) -> Vec<Option<usize>> {
 
 /// Rank indexed files, then unindexed files from `opened`, then remaining missing
 /// linked notes. Reuse the shared corpus when history adds nothing. Files outside
-/// the vault remain only on the initial browse page.
+/// the vault remain only on the initial browse page, and a second path to a file, which
+/// one of `aliases` names, is its alias row alone.
 fn with_history(
     files: &Rc<Vec<String>>,
     real: usize,
     opened: &[String],
+    aliases: &[(String, String)],
 ) -> (Rc<Vec<String>>, usize) {
     let opened: Vec<&str> = opened
         .iter()
         .map(String::as_str)
         .filter(|rel| !Path::new(rel).is_absolute())
+        .filter(|rel| !aliases.iter().any(|(name, _)| name == rel))
         .collect();
     let wanted: HashSet<&str> = opened.iter().copied().collect();
     let held: HashSet<&str> = files[..real]
@@ -806,7 +809,8 @@ pub fn present(
                     let files = files.borrow();
                     let mut typed = typed.borrow_mut();
                     let (paths, real, named, used) = &*typed.get_or_insert_with(|| {
-                        let (mut paths, real) = with_history(&files.paths, files.real, &mru);
+                        let history = with_history(&files.paths, files.real, &mru, &files.aliases);
+                        let (mut paths, real) = history;
                         // Behind the paths, so a file leads an alias at the same score.
                         let named = paths.len();
                         if !files.aliases.is_empty() {
@@ -1316,7 +1320,7 @@ mod tests {
         // Two files, then a note a link names that is not written yet.
         let files = Rc::new(strings(&["a.md", "b.pdf", "later.md"]));
         let opened = strings(&["build/main.pdf", "a.md", "/tmp/outside.txt", "later.md"]);
-        let (corpus, real) = with_history(&files, 2, &opened);
+        let (corpus, real) = with_history(&files, 2, &opened, &[]);
         // The build output and the note written since join the files, the note leaving the
         // missing ones; the file from outside the vault is no path in it.
         assert_eq!(
@@ -1325,9 +1329,14 @@ mod tests {
         );
         assert_eq!(real, 4);
         // Nothing new: the shared list itself, not a copy.
-        let (same, real) = with_history(&files, 2, &strings(&["b.pdf", "/tmp/outside.txt"]));
+        let held = strings(&["b.pdf", "/tmp/outside.txt"]);
+        let (same, real) = with_history(&files, 2, &held, &[]);
         assert!(Rc::ptr_eq(&same, &files));
         assert_eq!(real, 2);
+        // A second path to a file the window opened is the alias row Go to File has already.
+        let aliases = [("short.md".to_string(), "a.md".to_string())];
+        let (same, _) = with_history(&files, 2, &strings(&["short.md"]), &aliases);
+        assert!(Rc::ptr_eq(&same, &files));
     }
 
     fn command(action: &str, accels: &[&str]) -> Rc<Item> {

@@ -767,7 +767,8 @@ drill_sort() {
 # (one there from the start and one made while open), a dot-named link to a file outside listed,
 # and a link into the vault listed beside the file it names, dimmed with a link after its name,
 # the index holding the file once; then the marked one listed so once its file is written; last
-# a second link's name, which a link and Go to File find the file by.
+# a second link's name, which a link and Go to File find the file by, Go to File in one row
+# though the window opened the link by its own path too.
 drill_dangling() {
 	mkdir "$vault/real"
 	ln -s real/x.md "$vault/link.md"
@@ -783,7 +784,7 @@ drill_dangling() {
 		'bench dangling made gone.md=b .#other.md=-' \
 		'bench dangling target link.md=f+link real/x.md=fi once=true' \
 		'bench dangling alias followed=Some("real/pre.md")' \
-		'bench switcher_row alias shortcut.md real/pre.md'
+		'bench dangling goto ["alias shortcut.md real/pre.md"]'
 }
 
 if [ -n "${HEADLESS_DIR-}" ]; then

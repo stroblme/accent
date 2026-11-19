@@ -1044,7 +1044,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - It lists the notes in the folders git ignores too, after the indexed files at the same score and marked Ignored, as the tree dims them: the last walk of those folders, shown at once, and walked again in the background as the dialog opens (Architecture, Gitignored folders).
   A note a link finds in one is no Not created row.
 - It finds a note by its front matter's `aliases:` (or `alias:`), behind a file at the same score: the row reads the alias over the note's path, and picking it opens the note.
-  It finds a file by an alias's path (Sidebar) the same way, and picking that opens the file by its own path, as a link by the alias's name does.
+  It finds a file by an alias's path (Sidebar) the same way, and picking that opens the file by its own path, as a link by the alias's name does; an alias the window opened by its own path is that row alone, not a history row too.
 - A typed query also ranks the files this window opened that the index does not list (a file outside the vault, one the index has let go of); one whose file has gone leaves the history.
 - Its file list is kept warm in the background, not fetched when the dialog opens: a palette that is not instant is not a palette.
   The list is read again as it opens all the same, and one that lands while the dialog is up, that one or the reconcile's, is ranked again under the query typed, the highlight staying on its row if that is still there: a note saved since, with a new link or alias, is in it on that opening, and a vault opened a moment ago fills it as the index does.
