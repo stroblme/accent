@@ -373,8 +373,8 @@ pub enum KernelState {
 
 /// The kernel's strip, VS Code's notebook toolbar (user decision 2026-10-27): after a spinner
 /// while the kernel starts or runs cells, Run All, or Stop in its place meanwhile, then Restart
-/// Kernel and Clear All Outputs, flat icon buttons on the window's actions, and the debugger's
-/// Debug after them for a notebook whose cells can be debugged (user decision 2026-11-19). Shut
+/// Kernel and Clear All Outputs, flat icon buttons on the window's actions, and Debug Cell after
+/// them for a notebook whose cells can be debugged (user decision 2026-11-19). Shut
 /// Down Kernel is the palette's, and Stop's while the kernel starts, there being nothing to
 /// interrupt yet.
 struct KernelStrip {
@@ -397,7 +397,12 @@ impl KernelStrip {
         let interrupt = debug::strip_button(stop, "win.notebook-interrupt");
         let cancel = debug::strip_button(stop, "win.notebook-shut-down");
         let restart = debug::strip_button("view-refresh-symbolic", "win.notebook-restart");
-        let debug = debug::start_button("win.notebook-debug-cell");
+        // An icon, the debugger's bug in the accent colour as its Debug is: the word took the row
+        // past the sidebar's 280 px in the GNOME runtime's font (287 px, user decision 2026-11-19).
+        let debug = debug::strip_button("dap-console-symbolic", "win.notebook-debug-cell");
+        debug.remove_css_class("flat");
+        debug.add_css_class("suggested-action");
+        debug.set_margin_start(6);
         debug.set_visible(false);
         let root = debug::strip_of(&[
             run_all.clone().upcast(),

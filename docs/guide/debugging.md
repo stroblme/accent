@@ -35,4 +35,4 @@ Your program's own input and output stay in its terminal tab.
 
 To debug a notebook's cells, see [Notebooks](notebooks.md#debug-a-cell).
 On a [remote vault](remote.md), install `debugpy` on the host so the program runs there.
-The Flatpak cannot debug a local vault yet, though remote debugging works.
+The Flatpak cannot debug a Python file in a local vault yet, though remote debugging and notebook cells work.

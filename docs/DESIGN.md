@@ -497,7 +497,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Shut Down Kernel is otherwise the palette's.
   No words say what the kernel does: Not started, Starting…, Idle and Busy are the strip's description, for a screen reader, and a kernel that ended says why in its toast (Notebook).
   While a debug session runs the pane keeps the debugger's strip, and the kernel's commands stay in the palette.
-  A notebook whose cells can be debugged (Notebook) has the debugger's Debug at the end of the kernel's strip, which then runs Debug Cell, in the one row with the dropdown and the kernel's buttons, and Watch and Breakpoints under it, the debugger's own strip staying away until a session runs (user decision 2026-11-19).
+  A notebook whose cells can be debugged (Notebook) has Debug Cell at the end of the kernel's strip, in the one row with the dropdown and the kernel's buttons, and Watch and Breakpoints under it, the debugger's own strip staying away until a session runs (user decision 2026-11-19).
+  It is the debugger's bug in the accent colour, as its Debug is, because the word took the row to 287 px in the GNOME runtime's font, past the sidebar's 280 (measured 2026-11-19).
 - **Call Stack** lists the threads, counted, the one that stopped open on its calls, innermost first, and the innermost selected; another thread's calls are asked for as it is opened.
   A call is its function's name with its file and line dimmed beside it, the whole row dimmed for code outside the vault.
   One click on a call shows it (Debugger), as a result list's row opens; a dim "Running" stands in while the program runs.
@@ -1618,7 +1619,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - Interrupt Kernel sends the kernel's process group SIGINT, as Jupyter does, or an `interrupt_request` on its control channel for a kernelspec whose `interrupt_mode` is `message`, and ipykernel drops the runs waiting behind the one it stops; Restart Kernel ends it and starts another, the cells keeping their outputs and counts; Shut Down Kernel ends it, and the next run starts a new one.
   Stop, on the kernel's strip and a running cell's buttons, is Interrupt Kernel, which keeps what the kernel holds, and Shut Down Kernel while the kernel starts (user decision 2026-10-27): stopping only the runs waiting is not offered, as the kernel holds them once sent and Jupyter takes none back.
 - **Debugging** a Python notebook's code cell happens in the notebook's own kernel, as VS Code's Debug Cell does it (user decisions 2026-11-19).
-  Debug Cell, on the cell's More menu, the kernel strip's Debug and Start Debugging (`Ctrl+F5`) while the notebook is in front, runs the selected cell with the window's debugger attached to the kernel, which it starts first if need be, and lets go once the run is done, so the kernel and what it holds live on.
+  Debug Cell, on the cell's More menu and the kernel's strip, and Start Debugging (`Ctrl+F5`) while the notebook is in front, runs the selected cell with the window's debugger attached to the kernel, which it starts first if need be, and lets go once the run is done, so the kernel and what it holds live on.
   Every code cell of a notebook that can be debugged has a code tab's marks column, and its markdown cells' text moves by the column's width so the cells' text lines up.
   A click in the column, or Toggle Breakpoint at the cell's caret, puts a breakpoint on that line.
   The kernel names each cell's file by the code the cell last ran (ipykernel's `dumpCell`), so a breakpoint stops in a function a cell defined when another cell calls it, and a cell edited since it ran keeps its old code's stops until it runs again.
@@ -1882,6 +1883,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   They are painted again at each stop and for each call picked in Call Stack, and go as the program moves on; a line a diagnostic's message ends keeps it, two annotations on one line drawing over each other. No setting turns them off (2026-10-27): VS Code's default shows them.
 - A notebook's cells debugged (Notebook) have both, a hover over a code cell leading with the value while its cells are debugged and the paused cell's lines, from its first to the paused one, painted as a file's are.
 - **The Flatpak debugs a remote vault only**, whose adapter and program are its host's already, the program's tab running `ssh -t` from the sandbox. On a local vault both would have to be this machine's, debugpy's launcher calling back to the adapter over a loopback the sandbox does not share, so Start says "Cannot start debugging: the Flatpak cannot debug a local vault yet".
+  A notebook's cells are debugged on a local vault all the same, the kernel and its debugpy being the host's and the window reaching them over the kernel's sockets in the folder the sandbox shares (measured 2026-11-19).
 
 ### Context menus
 
@@ -2259,7 +2261,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 - Insert Markdown Cell Below, Delete Cell, Change Cell to Code, to Markdown and to Raw (an `.ipynb`'s) and Join with Next Cell are unbound; every cell command acts on the selected cell, Split Cell at the caret, and is in the palette and on the cell's buttons and More menu.
 - Run Cell is `Ctrl+Return`, Insert Line Below's chord, which a notebook in front answers, and Run Cell and Advance `Shift+Return`, the notebook's own key: Jupyter's and VS Code's (user decision 2026-10-20).
   Run All, Interrupt Kernel, Restart Kernel, Shut Down Kernel, Clear Outputs and Clear All Outputs are unbound and in the palette; Clear Outputs is on the cell's More menu beside Run Cell, Shut Down Kernel only in the palette but as the kernel strip's Stop while a kernel starts, and the rest on that strip, Interrupt Kernel as its Stop.
-  Debug Cell is unbound too, on the cell's More menu after Run Cell and the kernel strip's Debug, Start Debugging's `Ctrl+F5` doing it while the notebook is in front.
+  Debug Cell is unbound too, on the cell's More menu after Run Cell and on the kernel's strip, Start Debugging's `Ctrl+F5` doing it while the notebook is in front.
 
 ### History
 
