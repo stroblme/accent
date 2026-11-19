@@ -197,7 +197,8 @@ use user_commands::bench_commands;
 ///   fades/timing), `keys:<note>,<pdf>` (navigation), `find:<a>,<b>,<c>`
 ///   (active-pane/find focus), `present:<note>,<pdf>,<image>,<side>`
 ///   (presentation and restored layout), `laser` (presentation's laser
-///   pointer, XTEST; writes into a scratch vault), `toasts` (toast replacement/counts).
+///   pointer, XTEST; writes into a scratch vault), `paging` (the keys turning a presented
+///   diagram's and PDF's pages, XTEST; writes into a scratch vault), `toasts` (toast replacement/counts).
 /// - `ACCENT_BENCH_PATHS=1`: path-entry completion and sizing.
 /// - `ACCENT_BENCH_STYLE=<rel_path>`: styling latency, tag transfer and edits.
 ///   Modes: `typing:<rel>` (4–256 KB typing), `wrap:<rel>,<rel>…` (wrap indent,
@@ -1074,6 +1075,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if notes == "laser" {
                 return present::bench_laser(&app);
+            }
+            if notes == "paging" {
+                return present::bench_paging(&app);
             }
             if notes == "toasts" {
                 return toasts::bench_toasts(&app);

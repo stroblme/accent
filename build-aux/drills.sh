@@ -653,6 +653,28 @@ drill_laser() {
 		'bench laser code left on=false'
 }
 
+# The keys that turn a presented diagram's page and a presented PDF's, each previous-page key
+# mirroring its next-page one, on a deck of pages fitted shorter than half the view too, which a
+# turn has to go on from at the top (DESIGN.md, Views and Zoom).
+drill_paging() {
+	test -e "$pdfium" || { echo "SKIPPED the paging drill: no libpdfium"; return 0; }
+	launch 90 ACCENT_BENCH_CHROME=paging >"$dir/paging"
+	for kind in diagram pdf; do
+		has "$dir/paging" \
+			"bench paging $kind Right 2>3" "bench paging $kind Left 2>1" \
+			"bench paging $kind space 2>3" "bench paging $kind shift+space 2>1" \
+			"bench paging $kind n 2>3" "bench paging $kind p 2>1" \
+			"bench paging $kind End 2>3" "bench paging $kind Home 2>1"
+	done
+	has "$dir/paging" \
+		'bench paging diagram Page_Down 2>3' 'bench paging diagram Page_Up 2>1' \
+		'bench paging wide Right 3>4' 'bench paging wide Left 3>2' \
+		'bench paging wide space 3>4' 'bench paging wide shift+space 3>2' \
+		'bench paging wide n 3>4' 'bench paging wide p 3>2' \
+		'bench paging wide End 3>8' 'bench paging wide Home 3>1' \
+		'bench paging wide end 8 Left 7'
+}
+
 drill_sort() {
 	mkdir "$vault/Alpha" "$vault/beta"
 	for f in c a B beta/inner; do

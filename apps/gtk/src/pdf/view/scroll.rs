@@ -7,7 +7,8 @@ use gtk::subclass::prelude::*;
 
 use super::PdfView;
 use crate::pdf::geometry::{
-    Anchor, PdfZoom, anchor_at, clamp_layout, fit_scale, layout, offset_of, page_at, resume_at,
+    Anchor, GAP, Layout, PdfZoom, anchor_at, clamp_layout, fit_scale, layout, offset_of, page_at,
+    resume_at,
 };
 
 impl PdfView {
@@ -137,6 +138,33 @@ impl PdfView {
         page_at(&self.imp().layout.borrow(), middle)
     }
 
+    /// The page a turn goes on from: the one under the middle of the viewport, unless the first
+    /// page on screen is whole and starts at its top, at most a gap below it, which is where a
+    /// turn or `Home` leaves a page shorter than half the viewport (a wide slide fitted to a tall
+    /// window, or among pages fitted to a taller one) with the middle on the next page.
+    pub fn turning_page(&self) -> usize {
+        let (_, y) = self.scroll_offset();
+        let height = self.vadjustment().map_or(0.0, |a| a.page_size());
+        let layout = self.imp().layout.borrow();
+        let first = first_on_screen(&layout, y);
+        let whole = layout.pages.get(first).is_some_and(|rect| {
+            let below = f64::from(rect.y) - y;
+            (-1.0..=f64::from(GAP) + 1.0).contains(&below)
+                && f64::from(rect.y + rect.h) <= y + height + 1.0
+        });
+        match whole {
+            true => first,
+            false => page_at(&layout, y + height / 2.0),
+        }
+    }
+
+    /// The first page on screen, for a drill: the one a turn puts at the top.
+    #[cfg(feature = "bench")]
+    pub fn first_page_on_screen(&self) -> usize {
+        let (_, y) = self.scroll_offset();
+        first_on_screen(&self.imp().layout.borrow(), y)
+    }
+
     /// The pages at least partly on screen, first to last.
     pub fn visible_pages(&self) -> std::ops::RangeInclusive<usize> {
         let (_, y) = self.scroll_offset();
@@ -225,7 +253,15 @@ impl PdfView {
             self.imp().stale_tiles.borrow_mut().clear();
         }
         let layout = layout(&sizes, scale, w as f32);
-        let (width, height) = (f64::from(layout.width), f64::from(layout.height));
+        let (width, mut height) = (f64::from(layout.width), f64::from(layout.height));
+        // Fitted pages shorter than the viewport (wide ones, or ones beside a taller page, which
+        // the fit is to) leave room below the last one, so a turn puts it at the top as it puts
+        // every other page, and goes on from there.
+        if self.imp().zoom.get() == PdfZoom::FitPage
+            && let Some(last) = layout.pages.last()
+        {
+            height = height.max(f64::from(last.y) + f64::from(h));
+        }
         *self.imp().layout.borrow_mut() = layout;
         let viewport = (f64::from(w), f64::from(h));
         self.imp().scroll.configure((width, height), viewport);
@@ -236,4 +272,12 @@ impl PdfView {
         }
         self.queue_draw();
     }
+}
+
+/// The first page not wholly above content offset `y`.
+fn first_on_screen(layout: &Layout, y: f64) -> usize {
+    let first = layout
+        .pages
+        .partition_point(|rect| f64::from(rect.y + rect.h) <= y);
+    first.min(layout.pages.len().saturating_sub(1))
 }

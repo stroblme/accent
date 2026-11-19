@@ -630,16 +630,22 @@ impl PdfTab {
     }
 
     /// The next page's top, and nothing on the last page, where it would take the reader back up
-    /// to its top from further down it.
+    /// to its top from further down it. Both turns go on from one page (`PdfView::turning_page`).
     pub fn next_page(&self) {
-        let next = self.view.current_page() + 1;
+        let next = self.view.turning_page() + 1;
         if next < self.page_count() {
             self.show_page(next);
         }
     }
 
     pub fn previous_page(&self) {
-        self.show_page(self.view.current_page().saturating_sub(1));
+        self.show_page(self.view.turning_page().saturating_sub(1));
+    }
+
+    /// The page whose top is at the top of the reading view, where a turn puts it, for a drill.
+    #[cfg(feature = "bench")]
+    pub fn top_page(&self) -> usize {
+        self.view.first_page_on_screen()
     }
 
     /// Where the reader is, and how to put them back there. The pane's history is what holds

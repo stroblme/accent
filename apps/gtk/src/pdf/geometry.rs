@@ -6,7 +6,7 @@ use crate::zoom::{MAX_SCALE, MIN_SCALE, clamp_scale};
 use gtk::graphene;
 
 /// Between pages, and around the column. The 12 of DESIGN.md's spacing scale.
-const GAP: f32 = 12.0;
+pub(crate) const GAP: f32 = 12.0;
 
 /// Points to CSS pixels at zoom 1.0. A PDF point is 1/72 inch and a CSS pixel 1/96.
 pub(super) const PT_TO_PX: f32 = 96.0 / 72.0;

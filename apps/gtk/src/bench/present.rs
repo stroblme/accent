@@ -413,6 +413,114 @@ pub(super) fn bench_laser(app: &Rc<App>) {
     });
 }
 
+/// The keys that turn a presented page, by XTEST's names, each next-page one before the
+/// previous-page one that mirrors it (DESIGN.md, Views).
+const PAGING: [&str; 10] = [
+    "Right",
+    "Left",
+    "space",
+    "shift+space",
+    "Page_Down",
+    "Page_Up",
+    "n",
+    "p",
+    "End",
+    "Home",
+];
+
+/// Three pages, each a shape of its own.
+const PAGES: &str = r#"<mxfile host="accent">
+  <diagram name="One" id="paging-1"><mxGraphModel page="0"><root><mxCell id="0"/><mxCell id="1" parent="0"/><mxCell id="a" value="One" style="rounded=0;" parent="1" vertex="1"><mxGeometry x="0" y="0" width="400" height="300" as="geometry"/></mxCell></root></mxGraphModel></diagram>
+  <diagram name="Two" id="paging-2"><mxGraphModel page="0"><root><mxCell id="0"/><mxCell id="1" parent="0"/><mxCell id="b" value="Two" style="rounded=0;" parent="1" vertex="1"><mxGeometry x="0" y="0" width="400" height="300" as="geometry"/></mxCell></root></mxGraphModel></diagram>
+  <diagram name="Three" id="paging-3"><mxGraphModel page="0"><root><mxCell id="0"/><mxCell id="1" parent="0"/><mxCell id="c" value="Three" style="rounded=0;" parent="1" vertex="1"><mxGeometry x="0" y="0" width="400" height="300" as="geometry"/></mxCell></root></mxGraphModel></diagram>
+</mxfile>
+"#;
+
+/// `ACCENT_BENCH_CHROME=paging` writes `paging.drawio` ([`PAGES`]), a blank `paging.pdf` made three
+/// pages long and `wide.pdf`, eight pages much wider than tall, into a scratch vault, presents each
+/// and from a page in the middle presses each of [`PAGING`] by XTEST (a PDF's but Page Down and
+/// Page Up), printing the page shown
+/// before and after it (`bench paging <kind> <key> 2>3`). A wide page fitted to the view is
+/// shorter than half of it, so the middle of the view lies on the next page, where a turn has to
+/// go on from the page at the top. Last, `End` and `Left` on the wide deck (`wide end`).
+pub(super) fn bench_paging(app: &Rc<App>) {
+    scratch_only(app, "ACCENT_BENCH_CHROME=paging");
+    let root = app.root();
+    let blank = |size| accent_core::pdf::blank_pdf(size).unwrap_or_default();
+    std::fs::write(root.join("paging.drawio"), PAGES).expect("bench fixture");
+    std::fs::write(root.join("paging.pdf"), blank((595.0, 842.0))).expect("bench fixture");
+    std::fs::write(root.join("wide.pdf"), blank((842.0, 260.0))).expect("bench fixture");
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        // A file written a moment ago is only in the vault once the watcher has seen it.
+        glib::timeout_future(Duration::from_millis(1500)).await;
+        app.open_path("paging.drawio");
+        for (rel, length) in [("paging.pdf", 3), ("wide.pdf", 8)] {
+            app.open_path(rel);
+            let pages = || app.active_pdf().map(|pdf| pdf.page_count());
+            until("paging", rel, 20_000, || pages().filter(|n| *n > 0)).await;
+            for _ in 1..length {
+                if let Some(pdf) = app.active_pdf() {
+                    pdf.add_page(true);
+                }
+            }
+            until("paging", "pages", 10_000, || {
+                pages().filter(|n| *n == length)
+            })
+            .await;
+        }
+        super::git::xtest("move 600 400; focus").await;
+        until("paging", "focus", 10_000, || app.window.is_active()).await;
+        let cases = [
+            ("diagram", "paging.drawio", 1),
+            ("pdf", "paging.pdf", 1),
+            ("wide", "wide.pdf", 2),
+        ];
+        for (kind, rel, middle) in cases {
+            present(&app, rel).await;
+            for key in PAGING {
+                // A PDF's Page Down and Page Up scroll most of a screen, as GTK's do, and are no
+                // turn of its pages.
+                if kind != "diagram" && key.starts_with("Page_") {
+                    continue;
+                }
+                if let Some(tab) = app.active_diagram() {
+                    tab.show_page(middle);
+                }
+                if let Some(pdf) = app.active_pdf() {
+                    pdf.goto_page(middle);
+                }
+                glib::timeout_future(Duration::from_millis(400)).await;
+                let before = presented_page(&app);
+                super::git::xtest(&format!("key {key}")).await;
+                println!(
+                    "bench paging {kind} {key} {before}>{}",
+                    presented_page(&app)
+                );
+            }
+            if kind == "wide" {
+                super::git::xtest("key End").await;
+                let end = presented_page(&app);
+                super::git::xtest("key Left").await;
+                println!("bench paging wide end {end} Left {}", presented_page(&app));
+            }
+            app.set_presenting(false);
+            glib::timeout_future(Duration::from_millis(500)).await;
+        }
+        bench_quit(&app);
+    });
+}
+
+/// The page shown, counted from one: the presented diagram's, or the PDF page whose top is at the
+/// top of the view, where a turn puts it.
+fn presented_page(app: &App) -> usize {
+    match (app.active_diagram(), app.active_pdf()) {
+        (Some(tab), _) => tab.page_index() + 1,
+        (_, Some(pdf)) => pdf.top_page() + 1,
+        _ => 0,
+    }
+}
+
 /// Bring `rel`'s tab to the front with the keyboard in it, and present it.
 async fn present(app: &Rc<App>, rel: &str) {
     if let Some(doc) = app.doc_for(rel) {
