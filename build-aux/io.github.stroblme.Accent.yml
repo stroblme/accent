@@ -17,7 +17,8 @@ finish-args:
   # needs the host filesystem.
   - --filesystem=host
   # Host commands (`flatpak-spawn --host`): a terminal tab's shell is the host's, held there by
-  # the static accent-cli below (`terminal::host_cli`). Without it, the sandbox's shell.
+  # the static accent-cli below (`terminal::host_cli`), and so are a local vault's kernels and
+  # language servers. Without it, the sandbox's shell, and none of those.
   - --talk-name=org.freedesktop.Flatpak
 
 build-options:

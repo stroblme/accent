@@ -220,17 +220,12 @@ fn command(
     env: &[(String, String)],
     notebook: &Path,
 ) -> (Vec<String>, PathBuf, bool) {
-    let sandbox = std::env::var("FLATPAK_ID").ok();
-    let sandbox = sandbox.filter(|_| Path::new("/.flatpak-info").exists());
+    let sandbox = crate::flatpak::sandbox();
     match (sandbox, std::env::var_os("XDG_RUNTIME_DIR")) {
         (Some(id), Some(runtime)) => {
             let cwd = notebook.parent().unwrap_or(notebook);
-            let host = ["flatpak-spawn", "--host", "--watch-bus"].map(String::from);
-            let directory = format!("--directory={}", cwd.display());
-            let env = env.iter().map(|(k, v)| format!("--env={k}={v}"));
-            let argv = host.into_iter().chain([directory]).chain(env).chain(argv);
             (
-                argv.collect(),
+                crate::flatpak::on_host(argv, cwd, env),
                 Path::new(&runtime).join("app").join(id),
                 true,
             )

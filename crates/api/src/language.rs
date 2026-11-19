@@ -844,11 +844,16 @@ impl Languages {
         cfg: &LspConfig,
         waits: Waits,
     ) -> Task<Option<Vec<Call>>> {
-        let me = self.clone();
+        let (me, cfg) = (self.clone(), cfg.clone());
         let language = language_of(&rel);
-        let which = language.and_then(|language| server(cfg, language));
         let markers = language.map_or(&[][..], markers);
         Task::spawn(async move {
+            let which = match language {
+                Some(language) => {
+                    tokio::task::spawn_blocking(move || server(&cfg, language)).await?
+                }
+                None => None,
+            };
             let (language_id, argv) = match which {
                 Some(Server::External { language_id, argv }) => (language_id, argv),
                 Some(Server::Missing(name)) => {
@@ -924,11 +929,17 @@ impl Languages {
         text: String,
         cfg: &VaultConfig,
     ) -> Task<Support> {
-        let me = self.clone();
-        let which = server(&cfg.lsp, &language);
-        let ghost_command = ghost_command(&cfg.lsp, CLI.get().map(PathBuf::as_path));
+        let (me, lsp) = (self.clone(), cfg.lsp.clone());
         let configured_python = cfg.debug.python.clone();
         Task::spawn(async move {
+            let (which, ghost_command) = {
+                let language = language.clone();
+                tokio::task::spawn_blocking(move || {
+                    let cli = CLI.get().map(PathBuf::as_path);
+                    (server(&lsp, &language), ghost_command(&lsp, cli))
+                })
+                .await?
+            };
             // Outside the vault: a dependency a running server's answer led to is that server's
             // to answer for, and nothing is started for any other file there.
             if Path::new(&rel).is_absolute() {
@@ -1134,7 +1145,8 @@ pub fn set_cli(exe: PathBuf) {
 
 /// The ghost-text server's command line, its `--vault` still to come: `[lsp] ghost` where the
 /// config names one, else the bundled `accent-cli ghost`, a `merl-rt` on `PATH` mattering to
-/// neither. `None` where the one configured is not there, or no `accent-cli` was named.
+/// neither. `None` where the one configured is not there, or no `accent-cli` was named. Blocks
+/// as [`server`] does.
 fn ghost_command(cfg: &LspConfig, cli: Option<&Path>) -> Option<Vec<String>> {
     let Some((program, args)) = cfg.ghost.split_first() else {
         return cli.map(|cli| vec![cli.to_string_lossy().into_owned(), "ghost".to_string()]);
@@ -1144,7 +1156,7 @@ fn ghost_command(cfg: &LspConfig, cli: Option<&Path>) -> Option<Vec<String>> {
     let program = home_relative(program, Path::new(&home))
         .to_string_lossy()
         .into_owned();
-    in_path(&program).then(|| [vec![program], args.to_vec()].concat())
+    installed(&program).then(|| [vec![program], args.to_vec()].concat())
 }
 
 /// How long a server still loading its project is left before it is asked again.
@@ -1265,7 +1277,8 @@ const PYTHON: &[&[&str]] = &[&["pyright-langserver", "--stdio"], &["pylsp"]];
 const TYPESCRIPT: &[&[&str]] = &[&["typescript-language-server", "--stdio"]];
 
 /// Which provider a GtkSourceView language id gets. A configured command line wins over the
-/// built-in choices, which is how a vault picks `pylsp` over `pyright`.
+/// built-in choices, which is how a vault picks `pylsp` over `pyright`. Blocks in the Flatpak,
+/// which asks the host for each program ([`installed`]).
 pub(crate) fn server(cfg: &LspConfig, language: &str) -> Option<Server> {
     let row = SERVERS.iter().find(|(id, ..)| *id == language);
     let configured = cfg.servers.get(language).filter(|argv| !argv.is_empty());
@@ -1291,7 +1304,7 @@ pub(crate) fn server(cfg: &LspConfig, language: &str) -> Option<Server> {
     }
     // The protocol's name for the language, which is not always GtkSourceView's (`js`).
     let language_id = row.map_or(language, |(_, id, _)| id).to_string();
-    match alternatives.iter().find(|argv| in_path(&argv[0])) {
+    match alternatives.iter().find(|argv| installed(&argv[0])) {
         Some(argv) => Some(Server::External {
             language_id,
             argv: argv.clone(),
@@ -1355,6 +1368,15 @@ fn home_relative(arg: &str, home: &Path) -> PathBuf {
     match arg.strip_prefix("~/") {
         Some(rest) => home.join(rest),
         None => PathBuf::from(arg),
+    }
+}
+
+/// Whether a language server's program can be started where it runs: on the host from the
+/// Flatpak, which is asked ([`crate::flatpak::hosted`]), else here. Blocks in the Flatpak.
+fn installed(program: &str) -> bool {
+    match crate::flatpak::hosted(program, crate::flatpak::sandbox().is_some()) {
+        true => crate::flatpak::finds(program),
+        false => in_path(program),
     }
 }
 

@@ -246,14 +246,21 @@ impl Client {
     ///
     /// Everything announced here has a caller on the other side of `accent-api`: no
     /// `linkSupport`, because a plain [`crate::types::Location`] is all the UI jumps to.
-    pub async fn initialize(&self, root: &Path) -> Result<ServerCapabilities, Error> {
+    ///
+    /// `process` is the one the server may exit with once it is gone: `None` where the server
+    /// cannot see it, as on the Flatpak's host, where the sandbox's process ids name others.
+    pub async fn initialize(
+        &self,
+        root: &Path,
+        process: Option<u32>,
+    ) -> Result<ServerCapabilities, Error> {
         let uri = to_uri(root);
         let name = name_of(&uri);
         // Set before asking, so a server that wants the folders while initializing gets them.
         let _ = self.inner.root_uri.set(uri.clone());
 
         let params = json!({
-            "processId": std::process::id(),
+            "processId": process,
             "rootUri": uri,
             "rootPath": root.to_string_lossy(),
             "workspaceFolders": [{"uri": uri, "name": name}],
@@ -808,6 +815,7 @@ mod tests {
             let server = tokio::spawn(async move {
                 let ask = recv(&mut theirs).await;
                 assert_eq!(ask["method"], "initialize");
+                assert_eq!(ask["params"]["processId"], Value::Null);
                 let caps = &ask["params"]["capabilities"];
                 assert_eq!(caps["workspace"]["fileOperations"]["willRename"], true);
                 assert!(caps["textDocument"]["callHierarchy"].is_object());
@@ -827,7 +835,10 @@ mod tests {
                 recv(&mut theirs).await
             });
 
-            let caps = client.initialize(Path::new("/tmp/a vault")).await.unwrap();
+            let caps = client
+                .initialize(Path::new("/tmp/a vault"), None)
+                .await
+                .unwrap();
             assert_eq!(caps.position_encoding.as_deref(), Some("utf-8"));
             assert_eq!(
                 caps.completion_provider.map(|c| c.trigger_characters),

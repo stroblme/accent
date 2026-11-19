@@ -14,6 +14,7 @@ pub mod ffi;
 uniffi::setup_scaffolding!();
 pub mod debug;
 mod error;
+mod flatpak;
 pub mod git_remote;
 pub mod kernel;
 pub mod language;

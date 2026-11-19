@@ -185,7 +185,7 @@ fn main() -> glib::ExitCode {
         accent_core::pdf_text::set_reader(exe.clone());
         // So is the `accent-cli` whose `ghost` runs ghost text: the one beside this binary, or
         // the static one in `lib/accent` where there is none, as in the Flatpak, inside whose
-        // sandbox it runs as a local vault's language servers do.
+        // sandbox it runs, the one server there that is not the host's.
         let cli = Some(exe.with_file_name("accent-cli"))
             .filter(|cli| cli.is_file())
             .or_else(|| accent_api::ssh::server_binary(std::env::consts::ARCH));

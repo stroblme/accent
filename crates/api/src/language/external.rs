@@ -115,9 +115,18 @@ pub(crate) async fn start_configured(
         None if tinymist => super::typst::settings(),
         None => Value::Null,
     };
+    // From the Flatpak every server but its bundled ghost text is the host's.
+    let hosted = crate::flatpak::hosted(&name, crate::flatpak::sandbox().is_some());
+    let argv = match hosted {
+        true => crate::flatpak::on_host(argv, &root, &[]),
+        false => argv,
+    };
+    tracing::debug!("starting {argv:?}");
     let (client, notifications) = Client::spawn_configured(&argv, &root, settings)
         .map_err(|e| Error::Language(format!("cannot start {name}: {e}")))?;
-    let caps = client.initialize(&root).await?;
+    let caps = client
+        .initialize(&root, (!hosted).then(std::process::id))
+        .await?;
     let encoding = Encoding::parse(caps.position_encoding.as_deref());
     tracing::debug!("{name} started in {} ({encoding:?})", root.display());
 

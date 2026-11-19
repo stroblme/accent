@@ -193,7 +193,9 @@ fn python_command(root: &Path, command: &[String]) -> Option<Command> {
     Some(check)
 }
 
-fn run_within(
+/// `command`'s exit and, with `capture`, the start of its stdout; `None` where it did not start
+/// or did not end within `timeout`, when its process group is killed.
+pub(crate) fn run_within(
     mut command: Command,
     timeout: Duration,
     capture: bool,
