@@ -66,6 +66,8 @@ Follow these rules where they differ from Material 3, using a flat layout and ty
   A PDF's own links keep their shorter list (http, https, mailto, tel).
 - A tapped task's box flips as on the desktop (`markdown::click_box`), an edit of the note's text that the autosave writes, and the box is a link to its line on the page because the WebView runs no script to hear a checkbox.
 - Editing: the same text with the same styling spans, markup visible and dimmed.
+- Paste writes formatted text another app copied beside its plain text, a browser's or an office suite's, as the note's Markdown or org, as the desktop's `Ctrl+V` does (DESIGN.md, Editing).
+  The plain text goes in where the HTML marks nothing, in a code block, the front matter or a table row, in a file that is no note, and where text is dropped.
 
 ### PDF
 

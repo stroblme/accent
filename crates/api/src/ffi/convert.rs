@@ -176,6 +176,12 @@ impl Utf16 {
             .unwrap_or_else(|| self.0.last().copied().unwrap_or(0))
     }
 
+    /// The byte offset of UTF-16 unit `unit`, the way back: where the character it falls in
+    /// starts, or the next one for a unit inside a surrogate pair, and the end past it.
+    pub fn byte(&self, unit: u32) -> usize {
+        self.0.partition_point(|&u| u < unit).min(self.0.len() - 1)
+    }
+
     pub fn range(&self, r: &std::ops::Range<usize>) -> Range {
         Range {
             start: self.at(r.start),
@@ -619,6 +625,11 @@ mod tests {
         // Past the end is the end, not a panic.
         assert_eq!(map.at(text.len() + 10), 5);
         assert_eq!(Utf16::new("").at(0), 0);
+
+        // And back: a unit is the byte its character starts at, one inside 🙂 the next one's.
+        assert_eq!([0, 1, 2, 3, 4, 5].map(|u| map.byte(u)), [0, 2, 6, 6, 7, 8]);
+        assert_eq!(map.byte(9), text.len());
+        assert_eq!(Utf16::new("").byte(1), 0);
     }
 
     /// A colour is one number on the other side, and it has to survive the trip both ways.

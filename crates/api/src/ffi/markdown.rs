@@ -1,8 +1,9 @@
 //! Core Markdown analysis and rendering for Android. Convert output byte
 //! ranges to Kotlin UTF-16 units. A note's path picks its syntax, an `.org` file's org.
 
-use accent_core::markdown::{self, Click};
+use accent_core::markdown::{self, Click, Style};
 use accent_core::note::Syntax;
+use accent_core::{org, path};
 
 use crate::ffi::convert::{Analysis, Heading, Link, PdfAnchor, Span, Tag, TextEdit, Utf16};
 
@@ -47,6 +48,32 @@ pub fn click_box(text: String, rel: String, line: u32) -> Option<TextEdit> {
         range: Utf16::new(&text).range(&(at..at + 1)),
         text: tick.to_string(),
     })
+}
+
+/// What a paste of `html`, copied beside its plain text by another app, writes at UTF-16 offset
+/// `at` of `text`, the note at `rel`, as the desktop's formatted paste does: its Markdown, or org
+/// in an org note. `None` for the plain text, which goes in where the HTML marks nothing worth
+/// keeping, in a file that is no note, and in a code block, the front matter or a table row.
+#[uniffi::export]
+pub fn formatted_paste(text: String, rel: String, at: u32, html: String) -> Option<String> {
+    let syntax = Syntax::of(&rel);
+    if syntax == Syntax::Markdown && !path::is_note(&rel) {
+        return None;
+    }
+    let at = Utf16::new(&text).byte(at);
+    let verbatim = (syntax.analyze(&text).spans.iter())
+        .any(|s| matches!(s.style, Style::CodeBlock | Style::Frontmatter) && s.range.contains(&at));
+    let lines: Vec<&str> = text.split('\n').collect();
+    let line = text[..at].matches('\n').count();
+    let table = match syntax {
+        Syntax::Markdown => markdown::in_table(&lines, line),
+        Syntax::Org => lines[line].trim_start().starts_with('|'),
+    };
+    match syntax {
+        _ if verbatim || table => None,
+        Syntax::Markdown => markdown::from_html(&html),
+        Syntax::Org => org::from_html(&html),
+    }
 }
 
 /// The vault path an `accent://file/` request names, decoded; `None` for any other address.
@@ -112,7 +139,6 @@ pub fn analyze_utf16(text: String, rel: String) -> Analysis {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use accent_core::markdown::Style;
 
     /// Verify UTF-16 styling spans land on the same headings as core byte spans.
     #[test]
@@ -185,6 +211,32 @@ mod tests {
         let edit = click_box("- [-] a\n".to_string(), "n.org".into(), 1).unwrap();
         assert_eq!((edit.range.start, edit.text.as_str()), (3, " "));
         assert!(click_box("- a\n".to_string(), "n.md".into(), 1).is_none());
+    }
+
+    /// A formatted paste writes the note's own syntax, and leaves the plain text to a code block,
+    /// the front matter, a table row and a file that is no note, its offset counted in UTF-16.
+    #[test]
+    fn a_formatted_paste_is_the_notes_syntax_outside_verbatim_text() {
+        let paste = |text: &str, rel: &str, at: u32| {
+            formatted_paste(
+                text.into(),
+                rel.into(),
+                at,
+                "<p><b>bold</b> text</p>".into(),
+            )
+        };
+        assert_eq!(paste("", "n.md", 0).as_deref(), Some("**bold** text"));
+        assert_eq!(paste("", "n.org", 0).as_deref(), Some("*bold* text"));
+        assert_eq!(paste("", "n.py", 0), None);
+        // Unit 13 is the code's first letter, byte 21: byte 13 would be among the emoji.
+        let fenced = "🙂🙂🙂🙂\n```\ncode\n```\n";
+        assert_eq!(paste(fenced, "n.md", 13), None);
+        assert!(paste(fenced, "n.md", fenced.encode_utf16().count() as u32).is_some());
+        assert_eq!(paste("---\ntitle: x\n---\n", "n.md", 5), None);
+        assert_eq!(paste("| a | b |\n|---|---|\n| c | d |\n", "n.md", 2), None);
+        assert_eq!(paste("| a |\n", "n.org", 2), None);
+        let plain = formatted_paste(String::new(), "n.md".into(), 0, "plain".into());
+        assert_eq!(plain, None);
     }
 
     /// An org file renders and reads as org, by its path.

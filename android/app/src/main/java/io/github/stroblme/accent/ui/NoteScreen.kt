@@ -3,6 +3,10 @@ package io.github.stroblme.accent.ui
 import android.graphics.Color as AndroidColor
 import android.net.Uri
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.content.ReceiveContentListener
+import androidx.compose.foundation.content.TransferableContent
+import androidx.compose.foundation.content.contentReceiver
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
@@ -11,6 +15,7 @@ import android.webkit.WebViewClient
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.input.TextFieldBuffer
+import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.foundation.text.input.OutputTransformation
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.BasicTextField
@@ -22,6 +27,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
@@ -41,6 +47,7 @@ import io.github.stroblme.accent.ffi.analyzeUtf16
 import io.github.stroblme.accent.ffi.baseUri
 import io.github.stroblme.accent.ffi.click
 import io.github.stroblme.accent.ffi.clickBox
+import io.github.stroblme.accent.ffi.formattedPaste
 import io.github.stroblme.accent.ffi.toHtml
 import java.io.File
 import java.util.Locale
@@ -544,18 +551,59 @@ document.addEventListener('DOMContentLoaded', function () {
 // ------------------------------------------------------------------------------------ writing
 
 /** Edit [VaultModel.buffer] with core styling spans, in the syntax of [rel], keeping the markup visible. */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun Editor(model: VaultModel, rel: String) {
     val colors = MaterialTheme.colorScheme
     val styling = remember(colors, rel) { Styling(colors.onSurface, colors.primary, colors.onSurfaceVariant, rel) }
+    val paste = remember(model.buffer, rel) { FormattedPaste(model.buffer, rel) }
 
     BasicTextField(
         state = model.buffer,
-        modifier = Modifier.fillMaxSize().padding(horizontal = Gutter).verticalScroll(rememberScrollState()),
+        modifier = Modifier.contentReceiver(paste)
+            .fillMaxSize().padding(horizontal = Gutter).verticalScroll(rememberScrollState()),
         textStyle = MaterialTheme.typography.bodyLarge.copy(color = colors.onSurface),
         cursorBrush = androidx.compose.ui.graphics.SolidColor(colors.primary),
         outputTransformation = styling,
     )
+}
+
+/**
+ * Paste formatted text another app copied beside its plain text, as a browser or an office suite
+ * does, as the note's Markdown or org ([formattedPaste], the desktop's rule). Anything else goes
+ * back to the field, which pastes its plain text: a clipboard without HTML, a drop and whatever a
+ * keyboard sends.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+private class FormattedPaste(private val buffer: TextFieldState, private val rel: String) : ReceiveContentListener {
+    override fun onReceive(transferableContent: TransferableContent): TransferableContent? {
+        val clip = transferableContent.clipEntry.clipData
+        val html = clip.takeIf {
+            transferableContent.source == TransferableContent.Source.Clipboard && it.itemCount == 1
+        }?.getItemAt(0)?.htmlText
+        val pasted = buffer.pasteFormatted(html) { text, at, copied ->
+            runCatching { formattedPaste(text, rel, at.toUInt(), copied) }.getOrNull()
+        }
+        return if (pasted) null else transferableContent
+    }
+}
+
+/**
+ * Write [html] over the selection as [convert] reads it at the selection's start, as one undo
+ * step with the caret after it. False, and nothing written, where there is no HTML or [convert]
+ * leaves it to the plain text.
+ */
+internal fun TextFieldState.pasteFormatted(
+    html: String?,
+    convert: (text: String, at: Int, html: String) -> String?,
+): Boolean {
+    val at = selection
+    val written = html?.let { convert(text.toString(), at.min, it) } ?: return false
+    edit {
+        replace(at.min, at.max, written)
+        selection = TextRange(at.min + written.length)
+    }
+    return true
 }
 
 /**
