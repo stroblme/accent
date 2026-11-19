@@ -247,17 +247,17 @@ pub(super) async fn toast(app: &Rc<App>, prefix: &str) -> Option<String> {
     None
 }
 
-/// How many pages [`stall_diagram`] has, and how many boxes on each.
+/// How many pages [`bench_export_stall`]'s diagram has, and how many boxes on each.
 const STALL_PAGES: usize = 12;
 const STALL_BOXES: usize = 196;
 
-/// A large diagram for [`bench_export_stall`]: [`STALL_PAGES`] pages of [`STALL_BOXES`] labelled
-/// boxes, each joined to the one before, and two formulas; unless `flat`, two photo-like PNGs and
-/// two SVG charts on each page too.
-fn stall_diagram(flat: bool) -> String {
+/// A large diagram for [`bench_export_stall`]: `count` pages of [`STALL_BOXES`] labelled boxes,
+/// each joined to the one before, and two formulas; unless `flat`, two photo-like PNGs and two SVG
+/// charts on each page too.
+fn stall_diagram(count: usize, flat: bool) -> String {
     use super::diagram::pictures::{png_picture, svg_picture};
     let mut pages = String::new();
-    for p in 0..STALL_PAGES {
+    for p in 0..count {
         let mut cells = String::new();
         for i in 0..STALL_BOXES {
             let (x, y) = (20 + i % 14 * 110, 20 + i / 14 * 80);
@@ -298,7 +298,7 @@ fn stall_diagram(flat: bool) -> String {
 /// What one export did to the window: the longest the main loop went without a turn and its
 /// busy total (`native::Beat`), how long until it was done, and each state of the status bar's
 /// line and of the bar over the document column in turn, read every frame. The first frame that
-/// counts pages with the bar up is pictured into `shot`, where one is given.
+/// counts two pages done with the bar up is pictured into `shot`, where one is given.
 struct Watch {
     beat: super::native::Beat,
     started: Instant,
@@ -315,7 +315,7 @@ impl Watch {
             let (app, seen) = (app.clone(), seen.clone());
             move |_, _| {
                 let (line, bar) = (app.statusbar.progress_text(), app.connect.shown());
-                let counting = line.ends_with(" pages") && bar != "off";
+                let counting = line.ends_with(" 2/12 pages") && bar != "off";
                 if counting && let Some(path) = shot.take() {
                     let window = app.window.clone();
                     glib::idle_add_local_once(move || {
@@ -374,18 +374,24 @@ impl Watch {
 /// Every export of a large diagram ([`stall_diagram`], written into the vault): as PDF, PNG and
 /// SVG, its Print… as far as its dialog, and its print run to a PDF as GTK prints it; the note
 /// `note`, the notebook `notebook` and a note of four of the diagram's pages as HTML; and the
-/// diagram's PDF opened as a PDF and exported again; then a PDF export stopped at its second page.
-/// Each is [`Watch`]ed, and written into `dir`, as is a picture of the window while the diagram's
-/// PDF counts its pages (`export.png`).
+/// diagram's PDF opened as a PDF and exported again; a diagram of one such page as PDF, which has
+/// no pages to count; then a PDF export stopped at its fourth page, with the other tabs open. Each
+/// is [`Watch`]ed, and written into `dir`, as are pictures of the window while the diagram's PDF
+/// counts its pages, alone (`export.png`) and among the other tabs (`tabs.png`).
 fn bench_export_stall(app: &Rc<App>, note: &str, notebook: &str, dir: &Path, flat: bool) {
     use crate::diagram::export::{export_to, operation, print};
     use crate::export::{Export, Paper};
-    let (rel, embeds) = ("Export stall.drawio", "Export stall.md");
+    let (rel, embeds, one) = (
+        "Export stall.drawio",
+        "Export stall.md",
+        "Export one.drawio",
+    );
     let embedding: String = (0..4)
         .map(|p| format!("Page {p}\n\n![[{rel}#Page {p}]]\n\n"))
         .collect();
     let root = app.root();
-    let written = std::fs::write(root.join(rel), stall_diagram(flat))
+    let written = std::fs::write(root.join(rel), stall_diagram(STALL_PAGES, flat))
+        .and_then(|()| std::fs::write(root.join(one), stall_diagram(1, flat)))
         .and_then(|()| std::fs::write(root.join(embeds), embedding));
     if let Err(e) = written {
         println!("bench export_stall not_written {e}");
@@ -490,14 +496,27 @@ fn bench_export_stall(app: &Rc<App>, note: &str, notebook: &str, dir: &Path, fla
             watch.report(&app, "pdf export", &dest, || false).await;
         }
 
-        // The diagram's PDF again, stopped once its line counts a page: nothing written, no toast.
+        // A diagram of one page, whose line counts nothing and whose bar pulses.
+        app.open_path(one);
+        let single = || app.active_diagram().filter(|t| t.file().pages.len() == 1);
+        if let Some(single) = until("export_stall", "one-page tab", 20_000, single).await {
+            glib::timeout_future(Duration::from_millis(1000)).await;
+            let dest = dir.join("one.pdf");
+            let _ = std::fs::remove_file(&dest);
+            let watch = Watch::start(&app, None);
+            export_to(&app, &single, Export::Pdf, dest.clone());
+            watch.report(&app, "diagram one.pdf", &dest, || false).await;
+        }
+
+        // The diagram's PDF again, stopped once its line counts three pages: nothing written, no
+        // toast.
         app.open_path(rel);
         glib::timeout_future(Duration::from_millis(1000)).await;
         let dest = dir.join("stopped.pdf");
         let _ = std::fs::remove_file(&dest);
-        let watch = Watch::start(&app, None);
+        let watch = Watch::start(&app, Some(dir.join("tabs.png")));
         export_to(&app, &tab, Export::Pdf, dest.clone());
-        let counting = || app.statusbar.progress_text().ends_with("1/12 pages");
+        let counting = || app.statusbar.progress_text().ends_with("3/12 pages");
         until("export_stall", "a page", 60_000, counting).await;
         let stop = app.statusbar.transfer_stop();
         let offered = stop.is_visible();

@@ -258,7 +258,11 @@ impl Job {
     }
 
     /// `done` of `total` pages are made: "Exporting flow.pdf… 3/12 pages", the bar as far along.
+    /// A single page has nothing to count, so its line stays as it is and its bar pulses.
     pub(crate) fn pages(&self, done: usize, total: usize) {
+        if total < 2 {
+            return;
+        }
         let line = format!("{} {done}/{total} pages", self.busy);
         let old = self.line.replace(line.clone());
         self.app.statusbar.retell_transfer(&old, &line);
