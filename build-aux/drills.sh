@@ -202,8 +202,9 @@ drill_ring_panes() {
 
 # A finger's selection drag shows the loupe above the line under it, kept to that line however the
 # finger wobbles, sharp once its band has landed and on the screen at the view's top and its left
-# edge, a pen's too and a mouse's not, through the view's own path and through XTEST (DESIGN.md,
-# PDF).
+# edge, a pen's too and a mouse's not, through the view's own path and through XTEST. The handles
+# it leaves move either end out and back to where it was, under a finger and an XTEST mouse, and
+# a mouse's selection, a key and the keyboard leaving put them away (DESIGN.md, PDF).
 drill_pdf_loupe() {
 	test -e "$pdfium" || { echo "SKIPPED the PDF loupe drill: no libpdfium"; return 0; }
 	launch 150 ACCENT_BENCH_PDF=loupe >"$dir/loupe"
@@ -211,18 +212,33 @@ drill_pdf_loupe() {
 		'read shown=true ' \
 		'touch step=5 shown=true .* above=true .* on_screen=true .* selected="The loupe' \
 		'sharp shown=true .* source_scale=2 ' \
-		'lifted none ' \
+		'lifted none selected="The loupe.* handles=start=(' \
+		'grip end took=true' \
+		'grip end step=1 dx=60 shown=true .* source_scale=2 ' \
+		'grip start took=true' \
+		'grip start step=1 dx=60 shown=true ' \
+		'xtest_grip grown=true' \
 		'heading shown=true .* above=false .* on_screen=true ' \
 		'edge shown=true .* on_screen=true ' \
-		'pen shown=true ' \
-		'mouse none ' \
-		'xtest_mouse none selected="The loupe' \
+		'pen shown=true .* handles=start=(' \
+		'key gone=true' \
+		'focus_out up=true gone=true' \
+		'mouse none .* handles=none' \
+		'xtest_mouse none selected="The loupe.* handles=none' \
 		'xtest_mouse changed=true' \
 		'dense shown=true .* source_scale=2 '; do
 		grep -q "^bench loupe $want" "$dir/loupe" || { cat "$dir/loupe"; return 1; }
 	done
 	lines=$(sed -n 's/^bench loupe touch .* source=([^,]*,\([^,]*\),.*/\1/p' "$dir/loupe" | sort -u | wc -l)
 	test "$lines" -eq 1 || { cat "$dir/loupe"; return 1; }
+	# Out, the end's handle grows the selection past where it ended and the start's takes it in
+	# from where it began, the other end staying; back, each leaves it as it found it.
+	kept=$(sed -n 's/^bench loupe lifted .* selected="\(.*\)" handles=.*/\1/p' "$dir/loupe")
+	sel() { sed -n "s/^bench loupe grip $1 step=$2 .* selected=\"\(.*\)\" handles=.*/\1/p" "$dir/loupe"; }
+	grown=$(sel end 1) shrunk=$(sel start 1)
+	case $grown in "$kept"?*) ;; *) cat "$dir/loupe"; return 1 ;; esac
+	case $kept in ?*"$shrunk") test -n "$shrunk" ;; *) false ;; esac || { cat "$dir/loupe"; return 1; }
+	test "$(sel end 3)" = "$kept" && test "$(sel start 3)" = "$kept" || { cat "$dir/loupe"; return 1; }
 }
 
 # Its shells are real, so under a scratch HOME, running `true`, `false`, `pwd` and `sleep`.

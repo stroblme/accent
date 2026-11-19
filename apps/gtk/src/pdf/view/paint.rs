@@ -1,5 +1,6 @@
 //! Paint PDF paper, cached tiles and blurred stand-ins, then highlights, selections,
-//! strokes, search marks and the page-drop line. Request missing tiles once per change.
+//! strokes, search marks, the page-drop line and the selection's handles. Request missing tiles
+//! once per change.
 
 use accent_core::pdf::Theme;
 use adw::prelude::*;
@@ -223,6 +224,7 @@ impl imp::PdfView {
             snapshot.append_color(&accent, &line);
             snapshot.pop();
         }
+        obj.paint_handles(snapshot);
         snapshot.restore();
 
         // Asked for once per change, not once per frame: a scroll that reveals nothing new

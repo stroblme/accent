@@ -1,9 +1,12 @@
-//! The loupe over a finger selecting text, `ACCENT_BENCH_PDF=loupe`.
+//! The loupe over a finger selecting text and the handles its selection leaves,
+//! `ACCENT_BENCH_PDF=loupe`.
 //!
 //! No finger reaches a headless window, so a finger's drag goes through the view's own selection
-//! path from where the long press hands it over (`PdfView::bench_drag_select`). Each line prints
-//! the tab's `loupe_report` and what is selected; a mouse drag through XTEST shows no loupe. The
-//! report says how long each line's band took to render, and the loupe's longest paint.
+//! path from where the long press hands it over (`PdfView::bench_drag_select`), and a finger on a
+//! handle through the view's own handle path (`PdfView::bench_grip`). Each line prints the tab's
+//! `loupe_report`, what is selected and the view's `handles_report`; a mouse drag through XTEST
+//! shows no loupe and puts the handles away. The report says how long each line's band took to
+//! render, and the loupe's longest paint.
 
 use super::*;
 
@@ -19,11 +22,12 @@ const NAME: &str = "loupe-drill.pdf";
 /// Write a page with a heading at its top and a line of body text into the vault, open it at
 /// 100 %, and drag a finger along the body line, its height wobbling by a few pixels, printing the
 /// loupe at each step; hold it two seconds for a screenshot (`bench loupe hold`), its picture
-/// saved as `loupe.png` under `ACCENT_BENCH_SHOTS=<dir>`, and let go. Then a finger on the heading
-/// at the top of the view and on the body line's start at the view's left edge at 300 %, a pen and
-/// a mouse through the same path, and a real mouse drag through XTEST. Then two lines over a dense
-/// plot on the second page, and a drag down its lines and back a step a frame, with the longest
-/// gap between frames. Takes the file away again.
+/// saved as `loupe.png` under `ACCENT_BENCH_SHOTS=<dir>`, and let go. The handles left behind,
+/// pictured as `handles.png`, each dragged out and back, and the end's by a real mouse through
+/// XTEST. Then a finger on the heading at the top of the view and on the body line's start at the
+/// view's left edge at 300 %, a pen and a mouse through the same path, and a real mouse drag
+/// through XTEST. Then two lines over a dense plot on the second page, and a drag down its lines
+/// and back a step a frame, with the longest gap between frames. Takes the file away again.
 pub(super) fn run(app: &Rc<App>) {
     let path = app.root().join(NAME);
     if let Err(e) = write(&path) {
@@ -43,10 +47,13 @@ pub(super) fn run(app: &Rc<App>) {
         pdf.set_zoom(pdfview::PdfZoom::Scale(1.0));
         pdf.scroll_to(pdfview::Anchor::default());
         super::pdf::settled(&pdf, "loupe").await;
+        // The keyboard on the page throughout, so a loupe that took it would put the handles away.
+        super::git::xtest_now("focus").await;
+        view.grab_focus();
         let selected = || pdf.selection_in(view.upcast_ref()).unwrap_or_default();
         let say = |what: &str| {
-            let (loupe, text) = (pdf.loupe_report(), selected());
-            println!("bench loupe {what} {loupe} selected={text:?}");
+            let (loupe, text, handles) = (pdf.loupe_report(), selected(), view.handles_report());
+            println!("bench loupe {what} {loupe} selected={text:?} handles={handles}");
         };
         // Until the report says `what` of a popup laid out: a popup's surface is 1 by 1 before.
         let shows = |what: &'static str| {
@@ -102,6 +109,53 @@ pub(super) fn run(app: &Rc<App>) {
         view.bench_lift();
         say("lifted");
 
+        // The handles the finger's selection leaves at its ends, pictured, and each dragged out
+        // and back, the other end staying.
+        if let Ok(dir) = std::env::var("ACCENT_BENCH_SHOTS")
+            && let Some(overlay) = view.parent().and_then(|scroller| scroller.parent())
+        {
+            let shot = std::path::Path::new(&dir).join("handles.png");
+            println!(
+                "bench loupe handles pictured={}",
+                super::diagram::shoot(&overlay, &shot)
+            );
+        }
+        for (end, name) in [(1, "end"), (0, "start")] {
+            let Some((x, y)) = view.bench_disc(end) else {
+                println!("bench loupe grip {name} disc=none");
+                continue;
+            };
+            println!(
+                "bench loupe grip {name} took={}",
+                view.bench_grip(x, y, finger)
+            );
+            for (step, dx) in [30.0, 60.0, -30.0, 0.0].into_iter().enumerate() {
+                view.bench_grip_drag(dx, 0.0);
+                glib::timeout_future(Duration::from_millis(100)).await;
+                say(&format!("grip {name} step={step} dx={dx}"));
+            }
+            view.bench_grip_lift();
+            say(&format!("grip {name} lifted"));
+        }
+        // A real mouse on the end's handle drags it as well, the press keeping the selection.
+        if let Some((x, y)) = view.bench_disc(1) {
+            let at =
+                |dx: f64| super::diagram::on_screen(&app, &view, x + dx, y).unwrap_or_default();
+            let steps = format!(
+                "move {}; down; move {}; move {}; up",
+                at(0.0),
+                at(20.0),
+                at(45.0)
+            );
+            let before = selected();
+            super::git::xtest_now(&steps).await;
+            let grown = until("loupe", "xtest_grip", 3_000, || {
+                selected().len() > before.len()
+            });
+            println!("bench loupe xtest_grip grown={}", grown.await.is_some());
+            say("xtest_grip");
+        }
+
         // The heading at the top of the view: no room above it on the screen.
         let (hx, hy) = line(HEADING.0, HEADING.1);
         view.bench_drag_select((hx + 2.0, hy), (hx + 60.0, hy), finger);
@@ -139,6 +193,24 @@ pub(super) fn run(app: &Rc<App>) {
             }
             say(name);
             view.bench_lift();
+            if name != "pen" {
+                continue;
+            }
+            // A key puts the pen's handles away, and so does the keyboard leaving the page.
+            super::git::xtest_now("key Shift_L").await;
+            let gone = || view.handles_report() == "none";
+            println!(
+                "bench loupe key gone={}",
+                until("loupe", "key", 3_000, gone).await.is_some()
+            );
+            view.bench_drag_select((x0 + 2.0, y0), (x0 + 90.0, y0), hand);
+            view.bench_lift();
+            let up = view.handles_report() != "none";
+            if let Some(root) = view.root() {
+                root.set_focus(gtk::Widget::NONE);
+            }
+            println!("bench loupe focus_out up={up} gone={}", gone());
+            view.grab_focus();
         }
 
         // A real mouse's drag, held down while the loupe is asked about.

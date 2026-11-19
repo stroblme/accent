@@ -55,11 +55,22 @@ impl PdfView {
             move |gesture, x, y| {
                 obj.imp().drag_from.set(Some((x, y)));
                 obj.imp().held.set(false);
-                obj.note_hand(hand_of(gesture));
+                let hand = hand_of(gesture);
+                obj.note_hand(hand);
                 // A pen or an eraser claims the sequence at once, unlike a selection, which
                 // waits to see whether the pointer moves: a stroke that let the scrolled
                 // window have the first few pixels would scroll the page under the hand.
                 let mode = obj.effective_mode(gesture);
+                // A press on a handle moves that end, whatever pressed, unless it draws: claimed
+                // at once, so the scrolled window does not pan that touch nor a long press start
+                // a selection of its own. A mouse press anywhere else puts the handles away.
+                if matches!(mode, None | Some(Mode::Read)) && obj.take_grip(x, y, hand) {
+                    gesture.set_state(gtk::EventSequenceState::Claimed);
+                    return obj.imp().drag_mode.set(None);
+                }
+                if hand == Hand::Mouse {
+                    obj.show_handles(false);
+                }
                 obj.imp().drag_mode.set(mode);
                 let Some(mode) = mode else {
                     return;
@@ -114,6 +125,9 @@ impl PdfView {
             #[weak]
             obj,
             move |gesture, dx, dy| {
+                if obj.imp().grip.get().is_some() {
+                    return obj.drag_grip(dx, dy);
+                }
                 let Some((x, y)) = obj.imp().drag_from.get() else {
                     return;
                 };
@@ -192,6 +206,10 @@ impl PdfView {
                 obj.loupe(None);
                 let from = obj.imp().drag_from.replace(None);
                 let held = obj.imp().held.replace(false);
+                // A handle let go is no click, however little it moved.
+                if obj.drop_grip() {
+                    return;
+                }
                 let mode = obj.imp().drag_mode.get();
                 // The pages an eraser drag changed are read again now it is over.
                 if obj.imp().erasing.take().is_some()
@@ -272,6 +290,7 @@ impl PdfView {
             obj,
             move |_, _| {
                 obj.imp().drag_from.set(None);
+                obj.drop_grip();
                 obj.loupe(None);
             }
         ));
@@ -301,7 +320,8 @@ impl PdfView {
                     return;
                 }
                 match gesture.current_button() {
-                    1 if obj.imp().thumbnails.get() => {}
+                    // A press on a handle keeps the selection it moves.
+                    1 if obj.imp().thumbnails.get() || obj.grip_at(x, y).is_some() => {}
                     1 => {
                         let handler = obj.imp().on_pressed.borrow();
                         if let Some(f) = handler.as_ref() {
@@ -313,6 +333,27 @@ impl PdfView {
             }
         ));
         obj.add_controller(click);
+
+        // A key, or the keyboard going elsewhere, puts the handles away, as GTK's text views do.
+        let keys = gtk::EventControllerKey::new();
+        keys.connect_key_pressed(glib::clone!(
+            #[weak]
+            obj,
+            #[upgrade_or]
+            glib::Propagation::Proceed,
+            move |_, _, _, _| {
+                obj.show_handles(false);
+                glib::Propagation::Proceed
+            }
+        ));
+        obj.add_controller(keys);
+        let focus = gtk::EventControllerFocus::new();
+        focus.connect_leave(glib::clone!(
+            #[weak]
+            obj,
+            move |_| obj.show_handles(false)
+        ));
+        obj.add_controller(focus);
     }
 
     /// What a press means, by what pressed and the tool in hand (`tools::drag_of`): `None` for
@@ -748,9 +789,11 @@ impl PdfView {
     }
 
     /// A selection's drag from `from` reached `to`: the text between them is selected, and under
-    /// a finger or a pen, which cover what they select, the loupe shows it above the hand.
+    /// a finger or a pen, which cover what they select, the loupe shows it above the hand and the
+    /// handles come up at its ends.
     fn drag_select(&self, from: (f64, f64), to: (f64, f64), hand: Hand) {
         self.select_between(from.0, from.1, to.0, to.1);
+        self.show_handles(hand != Hand::Mouse);
         if hand != Hand::Mouse {
             self.loupe(Some(to));
         }

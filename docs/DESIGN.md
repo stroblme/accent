@@ -1319,6 +1319,10 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Until the band lands, and while a stroke of that page waits for its render, the loupe enlarges the frame the view last painted, with one band on its way at a time.
   A band takes the render thread 3 ms for a body line at 100 % and 19 ms for a 48 pt heading, but 0.4 to 0.6 s over a 30,000-point plot, whose whole path pdfium strokes for any part of the page, while the loupe's own paint stays under 3 ms of the main thread (AMCOMP, 2026-11-19).
   GTK keeps it on the screen, under the line where there is no room above.
+  A finger's or a pen's selection leaves a handle under each end, libadwaita's 20 px `cursor-handle` disc in the accent with its square corner at the text, as GTK's text views raise theirs after a touch selection (`gtktexthandle.c`), and the pen has them as it has the loupe (user decision 2026-11-19).
+  A press within 20 px across or 24 px down of a disc, `cursor-handle`'s padding, takes the handle whatever pressed, unless the press would draw, and its drag moves that end through the selection's own path with the loupe over it, the other end staying and the two trading places once one passes the other.
+  A mouse press elsewhere puts them away, as do a key, the keyboard leaving the page and the selection going, and an end scrolled out of the view hides its handle unless that handle is in the hand.
+  The view paints them itself, so a handle under the view's last line is cut at its edge, where GTK's float in popups of their own.
   A tap follows a link on its release, once it is known to be no pan.
   The pen is known by the event's device tool, since on Wayland a tablet's events come through a device whose source is a mouse.
 - A stroke stays painted over the page until the re-rendered tile carries it, as that tile will show it, under the highlights and the selection.

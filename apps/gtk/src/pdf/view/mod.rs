@@ -4,9 +4,11 @@
 //! and use blurred low-resolution stand-ins; `tab.rs` owns the document and render thread.
 //! A reading view and thumbnail view share one document.
 //!
-//! `paint` draws pages, `gesture` handles the pointer and `scroll` manages reading position.
+//! `paint` draws pages, `gesture` handles the pointer, `handles` the selection's touch handles and
+//! `scroll` manages reading position.
 
 mod gesture;
+mod handles;
 mod paint;
 mod scroll;
 
@@ -847,8 +849,12 @@ impl PdfView {
     }
 
     /// The boxes of the selected glyphs, in page points, per page: one entry for a selection
-    /// inside a page, one per page for a drag that ran across a page break.
+    /// inside a page, one per page for a drag that ran across a page break. Nothing selected puts
+    /// the handles away.
     pub fn set_selection(&self, selection: Vec<(usize, Vec<accent_core::pdf::Rect>)>) {
+        if selection.iter().all(|(_, boxes)| boxes.is_empty()) {
+            self.imp().handles.set(false);
+        }
         *self.imp().selection.borrow_mut() = selection;
         self.queue_draw();
     }
@@ -1018,6 +1024,10 @@ mod imp {
         /// Whether the finger on the page was held still for a long press, which makes its drag
         /// a selection rather than a pan.
         pub held: Cell<bool>,
+        /// Whether the selection's handles are up, which a finger's or a pen's selection raises,
+        /// and the handle in the hand while one is.
+        pub handles: Cell<bool>,
+        pub grip: Cell<Option<super::handles::Grip>>,
         /// What the config says about the tools; see [`super::PdfView::set_drawing_config`].
         pub style: RefCell<accent_core::config::DrawingConfig>,
         /// Pages whose content changed and whose visible tiles are therefore out of date. The
@@ -1142,6 +1152,8 @@ mod imp {
                 mode: Cell::new(super::Mode::default()),
                 drag_mode: Cell::new(None),
                 held: Cell::new(false),
+                handles: Cell::new(false),
+                grip: Cell::new(None),
                 style: RefCell::new(accent_core::config::DrawingConfig::default()),
                 stale_pages: RefCell::new(HashMap::new()),
                 stale_tiles: RefCell::new(HashSet::new()),
