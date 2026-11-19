@@ -457,8 +457,8 @@ impl Index {
     /// leaves the row untouched and returns [`Change::Unchanged`], avoiding reloads on save
     /// echoes.
     ///
-    /// This path does not deduplicate `(dev, ino)`; duplicate symlink entries remain until full
-    /// reconciliation.
+    /// This path does not deduplicate `(dev, ino)`: the vault's worker asks first whether `rel` is
+    /// a second path to a file a row holds, and makes it an alias ([`Index::alias`]).
     pub fn update_file(&mut self, root: &Path, rel: &str) -> Result<Change> {
         let meta = match self.stat(root, rel) {
             Ok(Some(meta)) => meta,
@@ -560,6 +560,9 @@ impl Index {
         let content = read_content(meta);
         let tx = self.write_tx()?;
         upsert(&tx, meta, content, &mut ReconcileStats::default())?;
+        // A path that was a second one to another file is this one's row now.
+        tx.prepare_cached("DELETE FROM aliases WHERE rel_path = ?1")?
+            .execute([rel])?;
         write_bodies(&tx)?;
         // The file's own links were just written unresolved, and a new note can be what a link
         // written long before it existed was waiting for — or a shorter path for one that
@@ -581,6 +584,12 @@ impl Index {
     /// ([`delete_file_rows`]), so there is nothing for a batch caller to defer.
     pub fn remove_file_batched(&mut self, rel: &str) -> Result<usize> {
         let (lo, hi) = path::subtree_range(rel);
+        // A second path to a file goes with its name, the file keeping its row.
+        self.conn
+            .prepare_cached(
+                "DELETE FROM aliases WHERE rel_path = ?1 OR (rel_path >= ?2 AND rel_path < ?3)",
+            )?
+            .execute(params![rel, lo, hi])?;
         let ids: Vec<i64> = {
             let mut st = self.conn.prepare_cached(
                 "SELECT id FROM files WHERE rel_path = ?1 OR (rel_path >= ?2 AND rel_path < ?3)",
@@ -599,6 +608,32 @@ impl Index {
         write_bodies(&tx)?;
         tx.commit()?;
         Ok(ids.len())
+    }
+
+    /// Make `rel` a second path to the file the row at `row` holds, as the walk records one, a
+    /// row of its own at `rel` going ([`delete_file_rows`]). False, and nothing written, where
+    /// `row` is no row.
+    pub fn alias(&mut self, rel: &str, row: &str) -> Result<bool> {
+        let tx = self.write_tx()?;
+        let own: Option<i64> = tx
+            .prepare_cached("SELECT id FROM files WHERE rel_path = ?1")?
+            .query_row([rel], |r| r.get(0))
+            .optional()?;
+        let added = tx
+            .prepare_cached(
+                "INSERT OR REPLACE INTO aliases(rel_path, file_id)
+                 SELECT ?1, id FROM files WHERE rel_path = ?2 AND rel_path <> ?1",
+            )?
+            .execute(params![rel, row])?;
+        if added == 0 {
+            return Ok(false);
+        }
+        if let Some(id) = own {
+            delete_file_rows(&tx, id)?;
+            write_bodies(&tx)?;
+        }
+        tx.commit()?;
+        Ok(true)
     }
 }
 

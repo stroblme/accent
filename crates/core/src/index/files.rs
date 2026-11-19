@@ -108,6 +108,33 @@ impl Index {
         Ok(out)
     }
 
+    /// The row other than `rel` whose file is `(dev, ino)`: the path the index keeps a file under
+    /// that `rel` is a second path to.
+    pub fn holder(&self, dev: u64, ino: u64, rel: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .prepare_cached(
+                "SELECT rel_path FROM files
+                  WHERE dev = ?1 AND ino = ?2 AND rel_path <> ?3 AND kind <> ?4 LIMIT 1",
+            )?
+            .query_row(
+                params![dev as i64, ino as i64, rel, FileKind::Dir.as_i64()],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// The aliases of the rows at `rel` or under it, which those rows take with them as they go.
+    pub fn aliases_under(&self, rel: &str) -> Result<Vec<String>> {
+        let (lo, hi) = path::subtree_range(rel);
+        let mut st = self.conn.prepare_cached(
+            "SELECT a.rel_path FROM aliases a JOIN files f ON f.id = a.file_id
+              WHERE f.rel_path = ?1 OR (f.rel_path >= ?2 AND f.rel_path < ?3)",
+        )?;
+        let rows = st.query_map(params![rel, lo, hi], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Every alias as `(row, alias)`: a second vault path to a row's file, a symlink or a hard
     /// link the walk kept out of the rows. A handful in a vault.
     pub fn aliases(&self) -> Result<Vec<(String, String)>> {
@@ -334,6 +361,7 @@ fn file_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<FileRow> {
         mtime_ns: r.get(5)?,
         dependency: false,
         dangling: false,
+        alias: false,
     })
 }
 

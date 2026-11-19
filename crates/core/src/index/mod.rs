@@ -155,6 +155,9 @@ pub struct FileRow {
     /// True for a symlink whose target is not there (`crate::walk::Unindexed::Dangling`), listed so
     /// its folder's listing is whole and marked, since nothing opens it.
     pub dangling: bool,
+    /// True for a second path to a file another row holds, a link into the vault or a hard link,
+    /// which the index keeps as an alias of that row and the file tree lists beside it.
+    pub alias: bool,
 }
 
 /// One hit of [`Index::search`]: an occurrence of the query in a file, not a file that holds it.

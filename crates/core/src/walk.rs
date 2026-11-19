@@ -251,7 +251,7 @@ pub fn out_of_reach(name: &str) -> bool {
 }
 
 /// Classify by file name. Conflict wins over extension: `Note.sync-conflict-….md` is not a note.
-fn classify(name: &str) -> FileKind {
+pub fn classify(name: &str) -> FileKind {
     if crate::fs::is_sync_conflict(name) {
         return FileKind::Conflict;
     }
@@ -566,8 +566,9 @@ pub fn scan_until(
     });
     let mut files = collected.into_inner().unwrap_or_else(|e| e.into_inner());
 
-    // Deterministic winner: shallowest path, then lexicographic. `build_parallel` yields in an
-    // arbitrary order, so "first path wins" only means anything after a sort.
+    // Deterministic winner: a path no link leads to, so a link into the vault is the second path
+    // to the file it names; then the shallowest, then lexicographic. `build_parallel` yields in
+    // an arbitrary order, so "first path wins" only means anything after a sort.
     files.sort_unstable_by(|a, b| {
         let (da, db) = (
             a.rel_path.matches('/').count(),
@@ -575,21 +576,33 @@ pub fn scan_until(
         );
         da.cmp(&db).then_with(|| a.rel_path.cmp(&b.rel_path))
     });
-    let mut seen: HashMap<(u64, u64), String> = HashMap::with_capacity(files.len());
+    let real_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let linked = |f: &FileMeta| f.canonical != real_root.join(&f.rel_path);
+    let mut keeper: HashMap<(u64, u64), usize> = HashMap::with_capacity(files.len());
+    for (i, f) in files.iter().enumerate() {
+        keeper
+            .entry((f.dev, f.ino))
+            .and_modify(|k| {
+                if linked(&files[*k]) && !linked(f) {
+                    *k = i;
+                }
+            })
+            .or_insert(i);
+    }
+    let winners: HashMap<(u64, u64), String> = (keeper.into_iter())
+        .map(|(id, i)| (id, files[i].rel_path.clone()))
+        .collect();
     let mut aliases = Vec::new();
-    files.retain(|f| match seen.get(&(f.dev, f.ino)) {
-        None => {
-            seen.insert((f.dev, f.ino), f.rel_path.clone());
-            true
-        }
-        Some(winner) => {
+    files.retain(|f| {
+        let winner = &winners[&(f.dev, f.ino)];
+        if *winner != f.rel_path {
             aliases.push(Alias {
                 rel_path: f.rel_path.clone(),
                 target_rel_path: winner.clone(),
                 canonical: f.canonical.clone(),
             });
-            false
         }
+        *winner == f.rel_path
     });
     skipped.sort_unstable_by(|a, b| a.path.cmp(&b.path));
     // Debug, not a toast: skipping a `.venv` is the expected outcome, not news the user has to
@@ -1096,12 +1109,12 @@ mod tests {
         .unwrap();
 
         let r = scan(vault.path(), &ScanOptions::default());
-        // Shallowest path wins the FileMeta; the deeper one becomes the alias.
-        assert!(rels(&r).contains(&"alias.md"), "{:?}", rels(&r));
-        assert!(!rels(&r).contains(&"d/note.md"), "{:?}", rels(&r));
+        // The file's own path wins the FileMeta, however deep; the link becomes the alias.
+        assert!(rels(&r).contains(&"d/note.md"), "{:?}", rels(&r));
+        assert!(!rels(&r).contains(&"alias.md"), "{:?}", rels(&r));
         assert_eq!(r.aliases.len(), 1);
-        assert_eq!(r.aliases[0].rel_path, "d/note.md");
-        assert_eq!(r.aliases[0].target_rel_path, "alias.md");
+        assert_eq!(r.aliases[0].rel_path, "alias.md");
+        assert_eq!(r.aliases[0].target_rel_path, "d/note.md");
     }
 
     #[test]

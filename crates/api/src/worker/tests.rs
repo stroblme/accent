@@ -340,18 +340,21 @@ fn a_burst_handed_over_in_parts_is_counted_whole() {
     worker.join().unwrap();
 }
 
-/// A link to nothing, one the walk found or one made since, is indexed once its target appears,
-/// and its folder listed again, though the watcher hears of the target in the target's folder
-/// alone; and one whose target goes is one again, indexed once more when it comes back.
-/// Depends on real inotify events.
+/// A link to nothing, one the walk found or one made since, is listed as the second path to its
+/// file once that appears, and its folder listed again, though the watcher hears of the file in
+/// the file's folder alone; and one whose file goes is one again, and listed so once more when it
+/// comes back. Depends on real inotify events.
 #[test]
-fn a_link_to_nothing_is_indexed_once_its_target_appears() {
+fn a_link_to_nothing_is_listed_with_its_file_once_that_appears() {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir(root.path().join("real")).unwrap();
     std::os::unix::fs::symlink("real/a.md", root.path().join("a.md")).unwrap();
     let f = Fixture::open_dir(root, VaultConfig::default());
     let root = f.vault.root().to_path_buf();
-    let indexed = |rel: &str| f.vault.file_paths(false).unwrap().iter().any(|p| p == rel);
+    let aliased = |rel: &str| {
+        let listed = f.vault.list_dir("").unwrap();
+        listed.iter().any(|r| r.rel_path == rel && r.alias)
+    };
     let root_listed =
         |e: &Event| matches!(e, Event::DirsChanged(dirs) if dirs.iter().any(String::is_empty));
     std::os::unix::fs::symlink("real/b.md", root.join("b.md")).unwrap();
@@ -364,21 +367,191 @@ fn a_link_to_nothing_is_indexed_once_its_target_appears() {
         "the links' folder was not listed again"
     );
     assert!(
-        poll_until(|| indexed("a.md") && indexed("b.md"), BUDGET),
-        "a link stayed out of the index"
+        poll_until(|| aliased("a.md") && aliased("b.md"), BUDGET),
+        "a link was not listed with its file"
+    );
+    assert_eq!(
+        f.vault.file_paths(false).unwrap(),
+        ["real/a.md", "real/b.md"]
     );
 
     std::fs::remove_file(root.join("real/a.md")).unwrap();
     assert!(
         f.wait(|e| matches!(e, Event::FileRemoved(p) if p == "a.md"))
             .is_some(),
-        "the link outlived its target"
+        "the link outlived its file"
     );
     f.write("real/a.md", "again\n");
     assert!(
-        poll_until(|| indexed("a.md"), BUDGET),
-        "the target came back unheard"
+        poll_until(|| aliased("a.md"), BUDGET),
+        "the file came back unheard"
     );
+}
+
+/// Both paths to a file a link into the vault names are listed, the link as the second one, and
+/// the index keeps one row, under the file's own path however deep, as a Reload of either folder
+/// keeps it.
+#[test]
+fn a_link_into_the_vault_is_listed_beside_its_file_under_one_row() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("real")).unwrap();
+    std::fs::write(root.path().join("real/pre.md"), "pre\n").unwrap();
+    std::os::unix::fs::symlink("real/pre.md", root.path().join("pre.md")).unwrap();
+    let f = Fixture::open_dir(root, VaultConfig::default());
+    // A listing's files as `(path, a row of the index, a second path)`.
+    let files = |dir: &str| -> Vec<(String, bool, bool)> {
+        (f.vault.list_dir(dir).unwrap().into_iter())
+            .filter(|r| r.kind != accent_core::walk::FileKind::Dir)
+            .map(|r| (r.rel_path, r.id != 0, r.alias))
+            .collect()
+    };
+    for dir in ["real", ""] {
+        assert_eq!(files(""), [("pre.md".to_string(), false, true)]);
+        assert_eq!(files("real"), [("real/pre.md".to_string(), true, false)]);
+        assert_eq!(f.vault.file_paths(false).unwrap(), ["real/pre.md"]);
+        f.vault.rescan_dir(dir).unwrap();
+        assert!(
+            f.wait(|e| matches!(e, Event::Reconciled(s) if s.dir == dir))
+                .is_some()
+        );
+    }
+    assert_eq!(files(""), [("pre.md".to_string(), false, true)]);
+    assert_eq!(f.vault.file_paths(false).unwrap(), ["real/pre.md"]);
+}
+
+/// News of a second path to a file makes it the alias of the file's row, never a row of its own,
+/// whichever comes first: a link heard of before the file it names, and a hard link made while
+/// open, which keeps the file under a row of its own once the row's path goes. A move heard as
+/// its new name and then its old one stays a row, and so does a real file written over a link.
+/// The hand-overs are the test's own, so the order is too.
+#[test]
+fn news_of_a_second_path_makes_it_an_alias() {
+    let root = tempfile::tempdir().unwrap();
+    let root_path = root.path().canonicalize().unwrap();
+    std::fs::create_dir(root_path.join("t")).unwrap();
+    std::fs::write(root_path.join("t/x.md"), "x\n").unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let db = cache.path().join("index.db");
+    let (tx, rx) = channel();
+    let (events, event_rx) = channel();
+    let worker = spawn(
+        root_path.clone(),
+        Index::open(&db).unwrap(),
+        rx,
+        tx.clone(),
+        events,
+        false,
+        Arc::new(AtomicU8::new(RUN)),
+        Arc::new(Ignored::new(PathBuf::new())),
+        None,
+    )
+    .unwrap();
+    assert!(wait_for(&event_rx, |e| matches!(e, Event::Reconciled(_)), BUDGET).is_some());
+    let path = |rel: &str| root_path.join(rel);
+    // Hand `news` over at once and say the rows and the aliases, `(row, alias)`, once it is in.
+    let after = |news: Vec<VaultEvent>| {
+        tx.send(Msg::Watched(news)).unwrap();
+        let (reply, settled) = channel();
+        tx.send(Msg::Settled(reply)).unwrap();
+        settled.recv_timeout(BUDGET).unwrap();
+        let ix = Index::open(&db).unwrap();
+        let mut rows = ix.file_paths(false).unwrap();
+        rows.sort();
+        (rows, ix.aliases().unwrap())
+    };
+    let pair = |row: &str, alias: &str| (row.to_string(), alias.to_string());
+
+    std::fs::write(path("t/y.md"), "y\n").unwrap();
+    std::os::unix::fs::symlink("t/y.md", path("y.md")).unwrap();
+    let news = vec![
+        VaultEvent::Changed(path("y.md")),
+        VaultEvent::Changed(path("t/y.md")),
+    ];
+    assert_eq!(
+        after(news),
+        (
+            vec!["t/x.md".into(), "t/y.md".into()],
+            vec![pair("t/y.md", "y.md")]
+        )
+    );
+
+    std::fs::rename(path("t/x.md"), path("t/z.md")).unwrap();
+    let news = vec![
+        VaultEvent::Changed(path("t/z.md")),
+        VaultEvent::Removed(path("t/x.md")),
+    ];
+    assert_eq!(after(news).0, ["t/y.md", "t/z.md"], "a move");
+
+    std::fs::hard_link(path("t/z.md"), path("h.md")).unwrap();
+    let news = vec![VaultEvent::Changed(path("h.md"))];
+    assert_eq!(
+        after(news).1,
+        [pair("t/z.md", "h.md"), pair("t/y.md", "y.md")]
+    );
+    std::fs::remove_file(path("t/z.md")).unwrap();
+    let news = vec![VaultEvent::Removed(path("t/z.md"))];
+    assert_eq!(
+        after(news),
+        (
+            vec!["h.md".into(), "t/y.md".into()],
+            vec![pair("t/y.md", "y.md")]
+        )
+    );
+
+    std::fs::remove_file(path("y.md")).unwrap();
+    std::fs::write(path("y.md"), "mine\n").unwrap();
+    let news = vec![VaultEvent::Changed(path("y.md"))];
+    assert_eq!(
+        after(news),
+        (vec!["h.md".into(), "t/y.md".into(), "y.md".into()], vec![])
+    );
+    tx.send(Msg::Shutdown).unwrap();
+    worker.join().unwrap();
+}
+
+/// Renaming or deleting either path through the vault does to that path what a file manager
+/// does: a link renamed is still the second path to its file, one deleted leaves the file, and
+/// the file renamed or deleted leaves the link leading nowhere, a link to nothing again.
+#[test]
+fn renaming_or_deleting_either_path_moves_that_path_alone() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("real")).unwrap();
+    std::fs::write(root.path().join("real/pre.md"), "pre\n").unwrap();
+    std::os::unix::fs::symlink("real/pre.md", root.path().join("pre.md")).unwrap();
+    let f = Fixture::open_dir(root, VaultConfig::default());
+    let rename = |from: &str, to: &str| {
+        let moves = [(from.to_string(), to.to_string())];
+        f.vault
+            .rename(&f.vault.plan_moves(&moves).unwrap(), true)
+            .unwrap();
+        f.vault.settle_index();
+    };
+    // The root's files as `(path, a second path, a link to nothing)`.
+    let root_files = || -> Vec<(String, bool, bool)> {
+        (f.vault.list_dir("").unwrap().into_iter())
+            .filter(|r| r.kind != accent_core::walk::FileKind::Dir)
+            .map(|r| (r.rel_path, r.alias, r.dangling))
+            .collect()
+    };
+    let rows = || f.vault.file_paths(false).unwrap();
+
+    rename("pre.md", "short.md");
+    assert!(
+        f.root.path().join("short.md").is_symlink(),
+        "the link itself moved"
+    );
+    assert_eq!(root_files(), [("short.md".to_string(), true, false)]);
+    assert_eq!(rows(), ["real/pre.md"]);
+
+    f.vault.delete("short.md").unwrap();
+    f.vault.settle_index();
+    assert_eq!(root_files(), []);
+    assert_eq!(rows(), ["real/pre.md"], "the file stayed");
+
+    std::os::unix::fs::symlink("real/pre.md", f.root.path().join("pre.md")).unwrap();
+    rename("real/pre.md", "real/moved.md");
+    assert_eq!(root_files(), [("pre.md".to_string(), false, true)]);
+    assert_eq!(rows(), ["real/moved.md"]);
 }
 
 /// Depends on real inotify events.

@@ -11,6 +11,7 @@ use crate::Result;
 use accent_core::code::Lang;
 use accent_core::index::Index;
 use accent_core::order::Order;
+use accent_core::path::{basename, parent_dir};
 use accent_core::walk::{self, FileKind};
 use accent_core::{git, notebook, search};
 
@@ -403,9 +404,27 @@ pub(crate) fn list_dir(index: &Index, root: &Path, rel: &str) -> Result<Vec<File
         tracing::debug!(dir = rel, "listing the unindexed children: {e}");
         Vec::new()
     });
-    if extra.is_empty() {
+    // A second path to a file a row holds, a link into the vault or a hard link, is listed beside
+    // that row while it still leads to a file: one leading nowhere is a link to nothing above.
+    let aliases: Vec<String> = (index.aliases()?.into_iter())
+        .map(|(_, alias)| alias)
+        .filter(|alias| parent_dir(alias) == rel && root.join(alias).is_file())
+        .filter(|alias| !held.contains(alias.as_str()))
+        .collect();
+    if extra.is_empty() && aliases.is_empty() {
         return Ok(rows);
     }
+    rows.extend(aliases.into_iter().map(|rel_path| FileRow {
+        id: 0,
+        kind: walk::classify(basename(&rel_path)),
+        rel_path,
+        title: None,
+        size: 0,
+        mtime_ns: 0,
+        dependency: false,
+        dangling: false,
+        alias: true,
+    }));
     rows.extend(extra.into_iter().map(|(rel_path, kind, why)| FileRow {
         id: 0,
         rel_path,
@@ -415,6 +434,7 @@ pub(crate) fn list_dir(index: &Index, root: &Path, rel: &str) -> Result<Vec<File
         mtime_ns: 0,
         dependency: why == walk::Unindexed::Dependency,
         dangling: why == walk::Unindexed::Dangling,
+        alias: false,
     }));
     // `Index::list_files` orders directories first and then by path, case-insensitively; the
     // merged listing has to come out the same way or the disk rows would land in a block of

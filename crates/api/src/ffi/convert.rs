@@ -52,6 +52,7 @@ pub struct FileRow {
     pub mtime_ns: i64,
     pub dependency: bool,
     pub dangling: bool,
+    pub alias: bool,
 }
 
 #[uniffi::remote(Enum)]

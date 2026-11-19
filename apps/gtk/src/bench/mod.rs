@@ -419,8 +419,9 @@ use user_commands::bench_commands;
 /// - `ACCENT_BENCH_HIDDEN=1`: hidden-file visibility and git row colours.
 /// - `ACCENT_BENCH_SORT=1`: the Files tree's sorts and folders among files; `shot:<dir>` the
 ///   Sort Files menu, light and dark (`sort::bench_sort`).
-/// - `ACCENT_BENCH_DANGLING=1`: links to nothing in the Files tree, an editor's lock never listed
-///   and a link indexed once its file appears (`dangling::bench_dangling`). Writes into the vault.
+/// - `ACCENT_BENCH_DANGLING=1`: links in the Files tree, one to nothing marked, an editor's lock
+///   never listed, a link into the vault listed beside its file and one to nothing listed so once
+///   its file appears (`dangling::bench_dangling`). Writes into the vault.
 /// - `ACCENT_BENCH_RETYPE=1`: an open tab following a rename to another extension
 ///   (`retype::bench_retype`). Saves: a scratch vault under `/tmp`.
 /// - `ACCENT_BENCH_UNFOLD=<rel>,<rel>,…`: folder expansion; `race:<dir>`,

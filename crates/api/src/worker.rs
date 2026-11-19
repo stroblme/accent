@@ -895,6 +895,7 @@ impl Worker {
                     if self.moved(&from) {
                         b.moved.insert(to.clone());
                     }
+                    let aliased = self.aliases_under(&from);
                     if let Err(e) = self.index.remove_file_batched(&from) {
                         self.fail(&format!("removing {from}"), e);
                     }
@@ -902,6 +903,7 @@ impl Worker {
                     self.update(&to, false, b);
                     b.dirs.insert(parent_dir(&from).to_string());
                     b.dirs.insert(parent_dir(&to).to_string());
+                    self.retake(aliased, b);
                     self.renamed(from, to);
                 }
             }
@@ -920,6 +922,7 @@ impl Worker {
 
     /// Take a path, and everything under it, out of the index.
     fn remove(&mut self, rel: &str, b: &mut Batch) {
+        let aliased = self.aliases_under(rel);
         if let Err(e) = self.index.remove_file_batched(rel) {
             self.fail(&format!("removing {rel}"), e);
         }
@@ -928,6 +931,53 @@ impl Worker {
         self.seen_conflicts.remove(rel);
         self.dangles(rel);
         self.emit(Event::FileRemoved(rel.to_string()));
+        self.retake(aliased, b);
+    }
+
+    /// The second paths to the files at `rel` or under it ([`Index::aliases_under`]).
+    fn aliases_under(&mut self, rel: &str) -> Vec<String> {
+        self.index.aliases_under(rel).unwrap_or_else(|e| {
+            self.fail("listing the aliases", e);
+            Vec::new()
+        })
+    }
+
+    /// Take in afresh each second path to a file whose row went: a hard link keeps the file under
+    /// a row of its own, which is no new file, and a link into the vault leads nowhere now.
+    fn retake(&mut self, aliases: Vec<String>, b: &mut Batch) {
+        for rel in aliases {
+            match self.root.join(&rel).exists() {
+                true => {
+                    b.moved.insert(rel.clone());
+                    self.update(&rel, false, b);
+                }
+                false => self.remove(&rel, b),
+            }
+        }
+    }
+
+    /// The path that keeps the file at `rel` when the vault reaches it by another too, as the walk
+    /// keeps one (`walk::scan`), asked only of a path a link leads to or a file of more than one
+    /// link, so an ordinary file costs a stat and a `canonicalize`. A link into the vault names
+    /// that path, unless the walk does not take it in; a hard link finds the row its file has,
+    /// which news never takes from it. The root is canonical (`Local::open`).
+    fn keeper(&self, rel: &str) -> Option<String> {
+        let path = self.root.join(rel);
+        let meta = std::fs::metadata(&path).ok().filter(|m| m.is_file())?;
+        let real = path.canonicalize().ok()?;
+        if real != path {
+            let inside = real.strip_prefix(&self.root).ok().and_then(Path::to_str);
+            if let Some(inside) = inside {
+                return matches!(walk::stat_one(&self.root, inside), Ok(Some(_)))
+                    .then(|| inside.to_string());
+            }
+        } else if meta.nlink() < 2 {
+            return None;
+        }
+        let row = self.index.holder(meta.dev(), meta.ino(), rel).ok()??;
+        let same = std::fs::metadata(self.root.join(&row))
+            .is_ok_and(|m| (m.dev(), m.ino()) == (meta.dev(), meta.ino()));
+        same.then_some(row)
     }
 
     /// Keep `rel` among the links to nothing if it is one now: made so, or left so by its target
@@ -972,6 +1022,27 @@ impl Worker {
             }
             return self.update(&row, own, b);
         }
+        // A second path to a file is the alias of its row, never a row of its own, the file's own
+        // path taken in first so the order news comes in does not decide which is which.
+        if let Some(keeper) = self.keeper(rel) {
+            if !matches!(self.index.get_file(&keeper), Ok(Some(_))) {
+                self.update(&keeper, false, b);
+            }
+            let row = self.row_of(&keeper).unwrap_or(keeper);
+            match self.index.alias(rel, &row) {
+                Ok(true) => {
+                    b.dirs.insert(parent_dir(rel).to_string());
+                    return;
+                }
+                Ok(false) => {}
+                Err(e) => return self.fail(&format!("indexing {rel}"), e),
+            }
+        }
+        // What a row that goes held by its second paths, taken in afresh once it has (`retake`).
+        let aliased = match self.root.join(rel).exists() {
+            true => Vec::new(),
+            false => self.aliases_under(rel),
+        };
         // The links the file holds and the ones its names answer to are resolved as it goes, in a
         // few index lookups: a pass over every link is 0.1–0.35 s a batch at `make vault`.
         let change = self.index.update_file(&self.root, rel);
@@ -1001,6 +1072,7 @@ impl Worker {
                 b.dirs.insert(parent_dir(rel).to_string());
                 b.removed.insert(rel.to_string());
                 self.dangles(rel);
+                self.retake(aliased, b);
             }
             Ok(Change::Updated(kind)) => {
                 // Every kind but a directory reports: a PDF rebuilt by a tool or a source file

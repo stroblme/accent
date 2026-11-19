@@ -136,9 +136,13 @@ fn splice(
         .into_iter()
         // `id == 0` is `Vault::list_dir` saying this row came off the disk rather than out of
         // the index.
-        // A link to nothing hides as a file the index holds does: it is no skipped tree. A
-        // dot-named one never comes this far (`walk::unindexed_children`).
-        .filter(|r| !hidden(r.kind, &r.rel_path, r.id != 0 || r.dangling, show_hidden))
+        // A link to nothing, or a second path to a file a row holds, hides as a file the index
+        // holds does: neither is a skipped tree. A dot-named link to nothing never comes this far
+        // (`walk::unindexed_children`).
+        .filter(|r| {
+            let held = r.id != 0 || r.dangling || r.alias;
+            !hidden(r.kind, &r.rel_path, held, show_hidden)
+        })
         .map(|r| encode(r.kind, &r.rel_path, r.id != 0, r.dependency, r.dangling))
         .collect();
     let Some((at, removed, added)) = changed_span(&current(store), &items) else {

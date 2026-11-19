@@ -762,6 +762,7 @@ mod tests {
             mtime_ns: 0,
             dependency: false,
             dangling: false,
+            alias: false,
         };
         let rows = vec![
             row("fig/plots", FileKind::Dir),
