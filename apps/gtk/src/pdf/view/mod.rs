@@ -127,12 +127,21 @@ impl PdfView {
     }
 
     pub fn set_zoom(&self, zoom: PdfZoom) {
-        if self.imp().zoom.get() == zoom {
+        self.set_presenting(self.imp().presenting.get(), zoom);
+    }
+
+    /// Present at `zoom`, or stop presenting and go back to it, in one layout. Taking the room
+    /// below the last page away before the zoom goes back would clamp the view first, and lose
+    /// the page at the top when it was one of the last.
+    pub fn set_presenting(&self, on: bool, zoom: PdfZoom) {
+        if self.imp().presenting.replace(on) == on && self.imp().zoom.get() == zoom {
             return;
         }
         crate::widgets::stop_coasting(self);
         self.imp().zoom.set(zoom);
         self.relayout();
+        // Presenting names the page a turn goes on from, which can differ with nothing scrolled.
+        self.imp().notice_page();
         self.zoomed();
     }
 
@@ -316,7 +325,7 @@ impl PdfView {
         self.imp().sizes.borrow().get(page).copied()
     }
 
-    /// Called with the page under the middle of the viewport whenever it changes.
+    /// Called with the page being read ([`PdfView::current_page`]) whenever it changes.
     pub fn connect_page(&self, f: impl Fn(usize) + 'static) {
         *self.imp().on_page.borrow_mut() = Some(Box::new(f));
     }
@@ -988,6 +997,8 @@ mod imp {
         pub layout: RefCell<super::Layout>,
         pub cache: OnceCell<std::rc::Rc<RefCell<Cache>>>,
         pub zoom: Cell<PdfZoom>,
+        /// Presented, where pages fitted to the height leave room below the last one.
+        pub presenting: Cell<bool>,
         pub theme: Cell<Theme>,
         pub thumbnails: Cell<bool>,
         pub marks: RefCell<HashMap<usize, Vec<accent_core::pdf::Rect>>>,
@@ -1121,6 +1132,7 @@ mod imp {
                 layout: RefCell::new(super::Layout::default()),
                 cache: OnceCell::new(),
                 zoom: Cell::new(PdfZoom::default()),
+                presenting: Cell::new(false),
                 theme: Cell::new(Theme::Plain),
                 thumbnails: Cell::new(false),
                 marks: RefCell::new(HashMap::new()),
@@ -1225,7 +1237,7 @@ mod imp {
         /// and the pages on screen when they do, for the drawing tools. A strip reports nothing:
         /// it frames the page the reading view hands it ([`super::PdfView::set_framed`]), not the
         /// one in the middle of its own viewport.
-        fn notice_page(&self) {
+        pub(super) fn notice_page(&self) {
             if self.thumbnails.get() {
                 return;
             }

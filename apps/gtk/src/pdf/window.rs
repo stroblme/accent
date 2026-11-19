@@ -42,9 +42,9 @@ impl App {
             #[weak(rename_to = app)]
             self,
             move |_| {
-                // Edge-triggered: `PdfView` reports the page under the middle of the viewport
-                // only when it changes, so this is once per page boundary crossed, not once per
-                // scrolled pixel, and needs no debounce of its own.
+                // Edge-triggered: `PdfView` reports the page being read only when it changes,
+                // so this is once per page boundary crossed, not once per scrolled pixel, and
+                // needs no debounce of its own.
                 app.sync_status();
                 app.follow_outline();
                 app.save_session_soon();

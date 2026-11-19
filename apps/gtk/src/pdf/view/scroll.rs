@@ -131,8 +131,13 @@ impl PdfView {
         }
     }
 
-    /// The page under the middle of the viewport: what "page 4 of 12" means.
+    /// The page being read, what "page 4 of 12" names: the one under the middle of the viewport,
+    /// or while presenting the one a turn goes on from ([`Self::turning_page`]). Reading keeps the
+    /// middle, where the turning page would name each page whose top scrolls by for a moment.
     pub fn current_page(&self) -> usize {
+        if self.imp().presenting.get() {
+            return self.turning_page();
+        }
         let (_, y) = self.scroll_offset();
         let middle = y + self.vadjustment().map_or(0.0, |a| a.page_size()) / 2.0;
         page_at(&self.imp().layout.borrow(), middle)
@@ -163,6 +168,14 @@ impl PdfView {
     pub fn first_page_on_screen(&self) -> usize {
         let (_, y) = self.scroll_offset();
         first_on_screen(&self.imp().layout.borrow(), y)
+    }
+
+    /// How far the view scrolls, and the pages' own height, for a drill: more than that is room
+    /// below the last page.
+    #[cfg(feature = "bench")]
+    pub fn scroll_range(&self) -> (f64, f64) {
+        let upper = self.vadjustment().map_or(0.0, |a| a.upper());
+        (upper, f64::from(self.imp().layout.borrow().height))
     }
 
     /// The pages at least partly on screen, first to last.
@@ -254,10 +267,11 @@ impl PdfView {
         }
         let layout = layout(&sizes, scale, w as f32);
         let (width, mut height) = (f64::from(layout.width), f64::from(layout.height));
-        // Fitted pages shorter than the viewport (wide ones, or ones beside a taller page, which
-        // the fit is to) leave room below the last one, so a turn puts it at the top as it puts
-        // every other page, and goes on from there.
-        if self.imp().zoom.get() == PdfZoom::FitPage
+        // Presented, fitted pages shorter than the viewport (wide ones, or ones beside a taller
+        // page, which the fit is to) leave room below the last one, so a turn puts it at the top
+        // as it puts every other page, and goes on from there. Reading ends at its bottom.
+        if self.imp().presenting.get()
+            && self.imp().zoom.get() == PdfZoom::FitPage
             && let Some(last) = layout.pages.last()
         {
             height = height.max(f64::from(last.y) + f64::from(h));

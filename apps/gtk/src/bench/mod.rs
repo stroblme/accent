@@ -199,7 +199,8 @@ use user_commands::bench_commands;
 ///   (active-pane/find focus), `present:<note>,<pdf>,<image>,<side>`
 ///   (presentation and restored layout), `laser` (presentation's laser
 ///   pointer, XTEST; writes into a scratch vault), `paging` (the keys turning a presented
-///   diagram's and PDF's pages, XTEST; writes into a scratch vault), `toasts` (toast replacement/counts).
+///   diagram's and PDF's pages, the page the status bar names and the room presenting leaves
+///   below a PDF's last page, XTEST; writes into a scratch vault), `toasts` (toast replacement/counts).
 /// - `ACCENT_BENCH_PATHS=1`: path-entry completion and sizing.
 /// - `ACCENT_BENCH_STYLE=<rel_path>`: styling latency, tag transfer and edits.
 ///   Modes: `typing:<rel>` (4–256 KB typing), `wrap:<rel>,<rel>…` (wrap indent,

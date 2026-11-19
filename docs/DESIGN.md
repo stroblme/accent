@@ -454,7 +454,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A tab switched back to opens on its caret's section.
   The caret's row is put back when the pointer leaves.
   There is no toggle.
-- On a PDF it follows the page being read the same way: the bookmark that page is under — the one starting on it or last before it, the innermost of several starting on one page — is selected and scrolled to as the page under the middle of the view changes, and above the first bookmark the list returns to its top.
+- On a PDF it follows the page being read the same way: the bookmark that page is under — the one starting on it or last before it, the innermost of several starting on one page — is selected and scrolled to as the page being read changes, and above the first bookmark the list returns to its top.
   On a diagram the page shown is the selected row.
   A page edit refills the list in place, the thumbnail strip staying under it.
 - On a notebook the caret is followed through its cells: the heading it is under is the last before it, in its own cell or a markdown cell above.
@@ -942,7 +942,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   The copy a PDF or image tab reads has none: the tab is waiting on it.
   A bibliography's PDF download and its Refresh Metadata wait carry a line and a Stop of the same kind (Bibliography), and a stop there leaves the reference as it was.
 - The facts: what the file is (`Markdown`, `PDF`, `Image`, `Notebook · <language>`, or `<language> · UTF-8 · LF` for code), whether it has unsaved edits, one count of its own, and its zoom; last, at the corner, while a text tab has a selection (a comparison's editor side included), how many characters it holds ("42 characters"): Unicode characters, the unit GTK's offsets count, whitespace and line breaks included, every caret's selection summed, so it reads no text and costs the same at any size.
-- The count is what the tab counts: a note's words (300 ms after the last keystroke), a code tab's errors and warnings, a PDF's `Page 4 of 12` (the page under the middle of the viewport), a notebook's cells, and after them its errors and warnings in every cell, which press as a code tab's do.
+- The count is what the tab counts: a note's words (300 ms after the last keystroke), a code tab's errors and warnings, a PDF's `Page 4 of 12` (the page being read, which is the one under the middle of the viewport, or while presenting the page a turn goes on from as Zoom says, user decision 2026-11-19), a notebook's cells, and after them its errors and warnings in every cell, which press as a code tab's do.
   A PDF's count is a button opening Add Page Before, Add Page After and Delete Page for that page, as the page's own menu offers them.
   A diagram's opens Go to Diagram Page…, the find bar's go-to row, which its `Ctrl+G` (Group) does not reach outside presentation, then Add Diagram Page Before, Add Diagram Page After and Delete Diagram Page for the page shown.
 - The unsaved mark is the `•` a dirty tab wears: one symbol, one meaning.
@@ -2286,7 +2286,8 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 - The range is a tenth to eight times for a page or an image, a half to triple for the document font.
 - The readout at the end of the status bar is the Reset control: clicking it is `Ctrl+0` — 100 % for a document, Fit Height for a PDF, though a PDF opens at Fit Width.
 - Fit Height fills the viewport's height with one page, edge to edge, landing on the top of the page being read: any margin would only show the next page.
-  Pages that do not fill it, wide ones or ones fitted beside a taller page of the same file, leave room below the last page, so a turn puts every page at the top, and a turn goes on from the page at the top while the whole of it is on screen, since the middle of the viewport may already lie on the next one (presented or not).
+  Presented, pages that do not fill it, wide ones or ones fitted beside a taller page of the same file, leave room below the last page, so a turn puts every page at the top, while reading ends at the last page's bottom (user decision 2026-11-19).
+  A turn goes on from the page at the top while the whole of it is on screen, since the middle of the viewport may already lie on the next one, and a presented PDF's count names that page too (Status bar).
   A pane too narrow for that fits the width, so the whole page stays on screen.
 - A PDF always shows its zoom (`Fit Width`, `Fit Height` or `N %`), fitting being a zoom too, and an image likewise (`Fit` or `N %`); a document and a terminal only off 100 %; a status page, a diff and a window with no tab never.
   Right-clicking it over a PDF offers Fit Width and Fit Height in a menu opening upwards, the bar being the window's bottom edge; the readout takes that press whatever the tab, so it never reaches the window handle under it.

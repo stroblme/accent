@@ -665,7 +665,10 @@ drill_laser() {
 
 # The keys that turn a presented diagram's page and a presented PDF's, each previous-page key
 # mirroring its next-page one, on a deck of pages fitted shorter than half the view too, which a
-# turn has to go on from at the top (DESIGN.md, Views and Zoom).
+# turn has to go on from at the top and the status bar names while presenting, reading naming the
+# page under the middle. That deck read at Fit Height ends at its last page's bottom, and only
+# presenting it leaves room below, while the page at the top stays there on the way in and out
+# (DESIGN.md, Status bar, Views and Zoom).
 drill_paging() {
 	test -e "$pdfium" || { echo "SKIPPED the paging drill: no libpdfium"; return 0; }
 	launch 90 ACCENT_BENCH_CHROME=paging >"$dir/paging"
@@ -678,11 +681,19 @@ drill_paging() {
 	done
 	has "$dir/paging" \
 		'bench paging diagram Page_Down 2>3' 'bench paging diagram Page_Up 2>1' \
-		'bench paging wide Right 3>4' 'bench paging wide Left 3>2' \
-		'bench paging wide space 3>4' 'bench paging wide shift+space 3>2' \
-		'bench paging wide n 3>4' 'bench paging wide p 3>2' \
-		'bench paging wide End 3>8' 'bench paging wide Home 3>1' \
-		'bench paging wide end 8 Left 7'
+		'bench paging wide range reading top=3 room=false status="Page 4 of 8"' \
+		'bench paging wide reading Right 3>4 status="Page 5 of 8"' \
+		'bench paging wide range presented top=3 room=true status="Page 3 of 8"' \
+		'bench paging wide Right 3>4 status="Page 4 of 8"' \
+		'bench paging wide Left 3>2 status="Page 2 of 8"' \
+		'bench paging wide space 3>4 status="Page 4 of 8"' \
+		'bench paging wide shift+space 3>2 status="Page 2 of 8"' \
+		'bench paging wide n 3>4 status="Page 4 of 8"' \
+		'bench paging wide p 3>2 status="Page 2 of 8"' \
+		'bench paging wide End 3>8 status="Page 8 of 8"' \
+		'bench paging wide Home 3>1 status="Page 1 of 8"' \
+		'bench paging wide end 8 "Page 8 of 8" Left 7 "Page 7 of 8"' \
+		'bench paging wide range left top=3 room=false status="Page 4 of 8"'
 }
 
 drill_sort() {

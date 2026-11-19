@@ -442,7 +442,10 @@ const PAGES: &str = r#"<mxfile host="accent">
 /// Page Up), printing the page shown
 /// before and after it (`bench paging <kind> <key> 2>3`). A wide page fitted to the view is
 /// shorter than half of it, so the middle of the view lies on the next page, where a turn has to
-/// go on from the page at the top. Last, `End` and `Left` on the wide deck (`wide end`).
+/// go on from the page at the top, and which the status bar names while presenting (`status=`).
+/// Last, `End` and `Left` on the wide deck (`wide end`). The wide deck is read at Fit Height before
+/// it is presented, turned once with `Right` (`wide reading`), and its scroll range and status bar
+/// printed then, presented, and after it is left, at its third page and at its last (`wide range`).
 pub(super) fn bench_paging(app: &Rc<App>) {
     scratch_only(app, "ACCENT_BENCH_CHROME=paging");
     let root = app.root();
@@ -477,7 +480,35 @@ pub(super) fn bench_paging(app: &Rc<App>) {
             ("wide", "wide.pdf", 2),
         ];
         for (kind, rel, middle) in cases {
+            if kind == "wide" {
+                if let Some(doc) = app.doc_for(rel) {
+                    app.reveal_page(doc.page());
+                }
+                glib::timeout_future(Duration::from_millis(500)).await;
+                if let Some(pdf) = app.active_pdf() {
+                    pdf.set_zoom(pdfview::PdfZoom::FitPage);
+                    pdf.goto_page(middle);
+                }
+                glib::timeout_future(Duration::from_millis(400)).await;
+                range(&app, "reading");
+                // A turn goes on from the page at the top while reading too.
+                app.focus_document(&app.pane());
+                let before = presented_page(&app);
+                super::git::xtest("key Right").await;
+                println!(
+                    "bench paging wide reading Right {before}>{} status={:?}",
+                    presented_page(&app),
+                    status(&app)
+                );
+                if let Some(pdf) = app.active_pdf() {
+                    pdf.goto_page(middle);
+                }
+                glib::timeout_future(Duration::from_millis(400)).await;
+            }
             present(&app, rel).await;
+            if kind == "wide" {
+                range(&app, "presented");
+            }
             for key in PAGING {
                 // A PDF's Page Down and Page Up scroll most of a screen, as GTK's do, and are no
                 // turn of its pages.
@@ -493,19 +524,41 @@ pub(super) fn bench_paging(app: &Rc<App>) {
                 glib::timeout_future(Duration::from_millis(400)).await;
                 let before = presented_page(&app);
                 super::git::xtest(&format!("key {key}")).await;
+                let status = match kind {
+                    "wide" => format!(" status={:?}", status(&app)),
+                    _ => String::new(),
+                };
                 println!(
-                    "bench paging {kind} {key} {before}>{}",
+                    "bench paging {kind} {key} {before}>{}{status}",
                     presented_page(&app)
                 );
             }
             if kind == "wide" {
                 super::git::xtest("key End").await;
-                let end = presented_page(&app);
+                let end = (presented_page(&app), status(&app));
                 super::git::xtest("key Left").await;
-                println!("bench paging wide end {end} Left {}", presented_page(&app));
+                println!(
+                    "bench paging wide end {} {:?} Left {} {:?}",
+                    end.0,
+                    end.1,
+                    presented_page(&app),
+                    status(&app)
+                );
+                if let Some(pdf) = app.active_pdf() {
+                    pdf.goto_page(middle);
+                }
+                glib::timeout_future(Duration::from_millis(400)).await;
             }
             app.set_presenting(false);
             glib::timeout_future(Duration::from_millis(500)).await;
+            if kind == "wide" {
+                range(&app, "left");
+                present(&app, rel).await;
+                super::git::xtest("key End").await;
+                app.set_presenting(false);
+                glib::timeout_future(Duration::from_millis(500)).await;
+                range(&app, "left_end");
+            }
         }
         bench_quit(&app);
     });
@@ -519,6 +572,35 @@ fn presented_page(app: &App) -> usize {
         (_, Some(pdf)) => pdf.top_page() + 1,
         _ => 0,
     }
+}
+
+/// The status bar's count, where a PDF names the page being read.
+fn status(app: &App) -> String {
+    let label = app
+        .statusbar
+        .facts_control()
+        .child()
+        .and_downcast::<gtk::Label>();
+    label
+        .map(|label| label.label().to_string())
+        .unwrap_or_default()
+}
+
+/// `bench paging wide range <case> top=<page> room=<bool> status=<count>`: the page at the top,
+/// whether the view scrolls on past the pages' own height, which presenting leaves as room below
+/// the last page, and the page the status bar names. The pixels follow on a `range_px` line.
+fn range(app: &App, case: &str) {
+    let Some(pdf) = app.active_pdf() else {
+        return println!("bench paging wide range {case} no pdf");
+    };
+    let (upper, content) = pdf.scroll_range();
+    println!(
+        "bench paging wide range {case} top={} room={} status={:?}",
+        presented_page(app),
+        upper > content + 0.5,
+        status(app)
+    );
+    println!("bench paging wide range_px {case} upper={upper:.1} content={content:.1}");
 }
 
 /// Bring `rel`'s tab to the front with the keyboard in it, and present it.

@@ -516,7 +516,7 @@ impl PdfTab {
         self.view.page_size(page)
     }
 
-    /// The page being read: the one under the middle of the reading view.
+    /// The page being read ([`PdfView::current_page`]).
     pub fn current_page(&self) -> usize {
         self.view.current_page()
     }
@@ -607,11 +607,11 @@ impl PdfTab {
         match (on, self.presenting.get()) {
             (true, None) => {
                 self.presenting.set(Some(self.view.zoom()));
-                self.set_zoom(PdfZoom::FitPage);
+                self.view.set_presenting(true, PdfZoom::FitPage);
             }
             (false, Some(before)) => {
                 self.presenting.set(None);
-                self.set_zoom(before);
+                self.view.set_presenting(false, before);
             }
             _ => {}
         }
@@ -646,6 +646,12 @@ impl PdfTab {
     #[cfg(feature = "bench")]
     pub fn top_page(&self) -> usize {
         self.view.first_page_on_screen()
+    }
+
+    /// The reading view's scroll range and the pages' own height, for a drill.
+    #[cfg(feature = "bench")]
+    pub fn scroll_range(&self) -> (f64, f64) {
+        self.view.scroll_range()
     }
 
     /// Where the reader is, and how to put them back there. The pane's history is what holds
