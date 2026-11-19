@@ -477,6 +477,17 @@ methods! {
     /// [`rescan`](Vault::rescan) scans the whole vault.
     rescan_dir(dir: ref str) -> ();
     search(query: ref str, limit: val usize, include_ignored: val bool) -> Vec<SearchHit>;
+    /// [`search`](Vault::search) with the links the `hidden` files write counted by no
+    /// qualifier: MCP's, which shows no file a symlink brings in from outside.
+    search_hiding(
+        query: ref str,
+        limit: val usize,
+        include_ignored: val bool,
+        hidden: ref [String],
+    ) -> Vec<SearchHit>;
+    /// The files besides its rows whose links `query`'s qualifiers read: a `linked-from:` note,
+    /// and every file quoting a highlight for `has:highlights`.
+    qualifier_sources(query: ref str) -> Vec<String>;
     /// A note's saved search: [`search`](Vault::search) without what git ignores, which neither
     /// cancels the Search pane's query nor is cancelled by it.
     saved_search(query: ref str, limit: val usize) -> Vec<SearchHit>;

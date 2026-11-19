@@ -777,6 +777,46 @@ fn mcp_counts_and_quotes_only_the_files_it_shows() {
     c.close();
 }
 
+/// A search's qualifiers count no link a file from outside writes: `linked-from:` it leads
+/// nowhere, its highlights mark no PDF, and either left out with a `-` leaves nothing out.
+#[test]
+fn search_qualifiers_read_only_the_links_of_files_it_shows() {
+    let scratch = Scratch::new("qualifiers");
+    let write = |rel: &str, text: &str| std::fs::write(scratch.dir.join(rel), text).unwrap();
+    write("vault/p.pdf", "%PDF-1.4\n%%EOF\n");
+    write("vault/q.pdf", "%PDF-1.4\n%%EOF\n");
+    write("vault/z.md", "[[q.pdf#page=1&selection=0,0,0,4|mine]]\n");
+    write(
+        "outside/hl.md",
+        "[[a]]\n[[p.pdf#page=1&selection=0,0,0,6|theirs]]\n",
+    );
+    let mut c = Client::start(&scratch, &[]);
+    c.initialize();
+    let mut paths = |query: &str| {
+        let (said, error) = c.call("search_notes", json!({"query": query}));
+        assert!(!error, "{query}: {said:?}");
+        let rows: Value = serde_json::from_str(&said[0]).unwrap();
+        let mut paths: Vec<String> = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["path"].as_str().unwrap().to_string())
+            .collect();
+        paths.sort();
+        paths
+    };
+
+    assert_eq!(paths("linked-from:a"), ["b.md"]);
+    assert!(paths("linked-from:hl").is_empty());
+    assert_eq!(
+        paths("kind:note -linked-from:hl"),
+        ["Templates/Day.md", "a.md", "b.md", "z.md"]
+    );
+    assert_eq!(paths("has:highlights"), ["q.pdf", "z.md"]);
+    assert_eq!(paths("kind:pdf -has:highlights"), ["p.pdf"]);
+    c.close();
+}
+
 /// Explore ranks linked notes, returns whole cards for explicit paths, and respects its budget.
 #[test]
 fn explore_ranks_by_links_and_answers_a_path_with_its_card() {

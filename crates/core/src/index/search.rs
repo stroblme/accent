@@ -48,17 +48,30 @@ impl Index {
         limit: usize,
         include_ignored: bool,
     ) -> Result<Vec<SearchHit>> {
+        self.search_hiding(query, limit, include_ignored, &[])
+    }
+
+    /// [`search`](Self::search) as a caller that shows only some files asks it: the links the
+    /// `hidden` files write count for no qualifier ([`qualifier_sources`](Self::qualifier_sources)
+    /// names those that would).
+    pub fn search_hiding(
+        &self,
+        query: &str,
+        limit: usize,
+        include_ignored: bool,
+        hidden: &[String],
+    ) -> Result<Vec<SearchHit>> {
         let q = query::parse(query, &chrono::Local::now())?;
         if q.text.is_empty() {
             return match q.filters.is_empty() {
                 true => Ok(Vec::new()),
-                false => self.listed(&q, limit, include_ignored),
+                false => self.listed(&q, limit, include_ignored, hidden),
             };
         }
         let needles = needles(&q.text);
-        let hits = self.ranked(&q, &needles, limit, include_ignored)?;
+        let hits = self.ranked(&q, &needles, limit, include_ignored, hidden)?;
         let hits = match hits.is_empty() {
-            true => self.infix(&q, &needles, limit, include_ignored)?,
+            true => self.infix(&q, &needles, limit, include_ignored, hidden)?,
             false => hits,
         };
         self.per_match(hits, &needles, limit)
@@ -108,10 +121,14 @@ impl Index {
     ) -> Result<Vec<SearchHit>> {
         let q = query::parse(query, &chrono::Local::now())?;
         let needles = needles(&q.text);
-        if q.text.is_empty() || self.ranked(&q, &needles, 1, include_ignored)?.is_empty() {
+        if q.text.is_empty()
+            || self
+                .ranked(&q, &needles, 1, include_ignored, &[])?
+                .is_empty()
+        {
             return Ok(Vec::new());
         }
-        let hits = self.infix(&q, &needles, limit + skip.len(), include_ignored)?;
+        let hits = self.infix(&q, &needles, limit + skip.len(), include_ignored, &[])?;
         let hits = hits.into_iter().filter(|h| !skip.contains(&h.rel_path));
         self.per_match(hits.take(limit).collect(), &needles, limit)
     }
@@ -124,13 +141,14 @@ impl Index {
         needles: &str,
         limit: usize,
         include_ignored: bool,
+        hidden: &[String],
     ) -> Result<Vec<SearchHit>> {
         let fts = fts_query(&q.text);
         if fts.is_empty() {
             return Ok(Vec::new());
         }
         // The qualifiers narrow the files that are ranked, so `LIMIT` counts the ones they leave.
-        let (filter, values) = filter::sql(&q.filters, "g", 7);
+        let (filter, values) = filter::sql(&q.filters, hidden, "g", 7);
         let mut st = self.conn.prepare_cached(&ranked_sql(&filter))?;
         // The window is cut around the first of the words in the note, and the snippet marks every
         // one in it. They go in folded, and with their whitespace squeezed, because that is how
@@ -152,8 +170,14 @@ impl Index {
     /// A query of qualifiers alone: the files they leave, newest first, at most `limit`, one
     /// row each with no snippet and no place in the file. Every kind of file but a folder and a
     /// conflict copy, and what git ignores only as [`search`](Self::search) takes it.
-    fn listed(&self, q: &Query, limit: usize, include_ignored: bool) -> Result<Vec<SearchHit>> {
-        let (filter, values) = filter::sql(&q.filters, "f", 4);
+    fn listed(
+        &self,
+        q: &Query,
+        limit: usize,
+        include_ignored: bool,
+        hidden: &[String],
+    ) -> Result<Vec<SearchHit>> {
+        let (filter, values) = filter::sql(&q.filters, hidden, "f", 4);
         let kinds = [FileKind::Markdown, FileKind::Pdf, FileKind::Other].map(|k| k.as_i64());
         let mut st = self.conn.prepare_cached(&format!(
             "SELECT f.rel_path, f.title FROM files f
@@ -234,6 +258,7 @@ impl Index {
         needles: &str,
         limit: usize,
         include_ignored: bool,
+        hidden: &[String],
     ) -> Result<Vec<SearchHit>> {
         // One quoted term per window: `detail='none'` answers no phrase of several.
         let windows: Vec<String> = q
@@ -251,7 +276,7 @@ impl Index {
         if windows.is_empty() {
             return Ok(Vec::new());
         }
-        let (filter, values) = filter::sql(&q.filters, "g", 6);
+        let (filter, values) = filter::sql(&q.filters, hidden, "g", 6);
         let mut st = self.conn.prepare_cached(&infix_sql(&filter))?;
         let mut args = vec![
             Value::Text(windows.join(" AND ")),
@@ -1364,7 +1389,7 @@ mod tests {
         assert_eq!(files(&hits), ["mini.md", "u.md"], "shortest first");
         assert!(hits[1].snippet.contains("Uni«café»"), "{:?}", hits[1]);
         let q = query::parse("50%", &chrono::Local::now()).unwrap();
-        let hits = ix.infix(&q, &needles(&q.text), 10, false).unwrap();
+        let hits = ix.infix(&q, &needles(&q.text), 10, false, &[]).unwrap();
         assert_eq!(files(&hits), ["share.md"]);
         // Each word mid-word or not, in any order; one shorter than a trigram is checked too.
         let hits = ix.search("afe un", 10, false).unwrap();
@@ -1633,7 +1658,7 @@ mod tests {
         }
 
         let q = query::parse("kind:notebook", &chrono::Local::now()).unwrap();
-        let (filter, _) = filter::sql(&q.filters, "g", 6);
+        let (filter, _) = filter::sql(&q.filters, &[], "g", 6);
         let mut st = ix
             .conn
             .prepare(&format!("EXPLAIN {}", infix_sql(&filter)))

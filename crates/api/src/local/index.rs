@@ -57,6 +57,23 @@ impl Local {
         Ok(self.supersede(|index| index.search(query, limit, include_ignored))?)
     }
 
+    /// [`search`](Self::search) with the links the `hidden` files write counted by no qualifier
+    /// ([`Index::search_hiding`]), superseded as it is.
+    pub fn search_hiding(
+        &self,
+        query: &str,
+        limit: usize,
+        include_ignored: bool,
+        hidden: &[String],
+    ) -> Result<Vec<SearchHit>> {
+        Ok(self.supersede(|index| index.search_hiding(query, limit, include_ignored, hidden))?)
+    }
+
+    /// See [`Index::qualifier_sources`].
+    pub fn qualifier_sources(&self, query: &str) -> Result<Vec<String>> {
+        Ok(self.index().qualifier_sources(query)?)
+    }
+
     /// A saved search's rows (a `search` block in a note): [`search`](Self::search) with what git
     /// ignores left out, on the same connection but never superseded, nor superseding the pane's
     /// query, which it waits for instead.

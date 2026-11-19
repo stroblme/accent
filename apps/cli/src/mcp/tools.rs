@@ -330,11 +330,19 @@ impl Server {
             let partial = s.ready.wait();
             let limit = a.limit.unwrap_or(20).min(100);
             let ignored = a.include_ignored.unwrap_or(false);
+            // A qualifier reads only the links of files shown, as a row is one of them.
+            let hidden: Vec<String> = s
+                .vault
+                .qualifier_sources(&a.query)
+                .map_err(fail)?
+                .into_iter()
+                .filter(|rel| !s.shown(rel))
+                .collect();
             let hits = {
                 let _turn = locked(&s.search);
                 s.first_shown(
                     limit,
-                    |n| s.vault.search(&a.query, n, ignored).map_err(fail),
+                    |n| s.vault.search_hiding(&a.query, n, ignored, &hidden).map_err(fail),
                     |h| &h.rel_path,
                 )?
             };

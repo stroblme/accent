@@ -1,9 +1,11 @@
 //! A query's qualifiers ([`crate::query::Filter`]) as SQL over the `files` row a statement names,
 //! each one a condition ANDed onto the statement's own.
 
+use super::Index;
 use super::search::{fold, fts_term};
+use crate::Result;
 use crate::markdown::link_key;
-use crate::query::{Filter, On};
+use crate::query::{self, Filter, On};
 use rusqlite::types::Value;
 
 /// The file one link key names, by [`super::links`]'s rule (`BEST_FILE`): the shortest path that
@@ -15,8 +17,14 @@ const BEST_ID: &str = "SELECT k.file_id FROM file_keys k JOIN files b ON b.id = 
 const HIGHLIGHT: &str = "anchor LIKE 'page=%selection=%'";
 
 /// `filters` as ` AND (…)` conditions on the row `alias` names, their values numbered from `?first`
-/// on, in the order the returned values hold them.
-pub(super) fn sql(filters: &[Filter], alias: &str, first: usize) -> (String, Vec<Value>) {
+/// on, in the order the returned values hold them. The links the `hidden` files write count for
+/// neither `linked-from:` nor `has:highlights`.
+pub(super) fn sql(
+    filters: &[Filter],
+    hidden: &[String],
+    alias: &str,
+    first: usize,
+) -> (String, Vec<Value>) {
     let (mut sql, mut values) = (String::new(), Vec::new());
     for filter in filters {
         let mut param = |value: Value| {
@@ -60,17 +68,22 @@ pub(super) fn sql(filters: &[Filter], alias: &str, first: usize) -> (String, Vec
             }
             On::LinkedFrom(target) => {
                 let p = param(Value::Text(link_key(target)));
+                let skip = not_hidden(hidden.iter().map(|rel| param(Value::Text(rel.clone()))));
                 format!(
                     "{id} IN (SELECT resolved_file FROM links WHERE src_file = ({}) \
-                     AND resolved_file IS NOT NULL)",
+                     AND resolved_file IS NOT NULL{skip})",
                     BEST_ID.replace("{}", &p)
                 )
             }
             // `IS NOT NULL`, because a `NULL` in the list would make every `NOT IN` unknown.
-            On::Highlights => format!(
-                "{id} IN (SELECT src_file FROM links WHERE {HIGHLIGHT} UNION \
-                 SELECT resolved_file FROM links WHERE {HIGHLIGHT} AND resolved_file IS NOT NULL)"
-            ),
+            On::Highlights => {
+                let skip = not_hidden(hidden.iter().map(|rel| param(Value::Text(rel.clone()))));
+                format!(
+                    "{id} IN (SELECT src_file FROM links WHERE {HIGHLIGHT}{skip} UNION \
+                     SELECT resolved_file FROM links WHERE {HIGHLIGHT}{skip} \
+                     AND resolved_file IS NOT NULL)"
+                )
+            }
             On::Modified { lo, hi } => format!(
                 "{alias}.mtime_ns >= {} AND {alias}.mtime_ns < {}",
                 param(Value::Integer(*lo)),
@@ -81,6 +94,56 @@ pub(super) fn sql(filters: &[Filter], alias: &str, first: usize) -> (String, Vec
         sql.push_str(&format!(" AND {not}({cond})"));
     }
     (sql, values)
+}
+
+/// The condition leaving out the links that the files these parameters name write, or none.
+fn not_hidden(hidden: impl Iterator<Item = String>) -> String {
+    let hidden: Vec<String> = hidden.collect();
+    match hidden.is_empty() {
+        true => String::new(),
+        false => format!(
+            " AND src_file NOT IN (SELECT id FROM files WHERE rel_path IN ({}))",
+            hidden.join(", ")
+        ),
+    }
+}
+
+impl Index {
+    /// The files besides its own rows whose links `query`'s qualifiers read: the note a
+    /// `linked-from:` target names, and for `has:highlights` every file quoting a PDF's
+    /// highlight. A caller that shows only some files passes those it does not to
+    /// [`search_hiding`](Self::search_hiding).
+    pub fn qualifier_sources(&self, query: &str) -> Result<Vec<String>> {
+        let q = query::parse(query, &chrono::Local::now())?;
+        let mut out: Vec<String> = Vec::new();
+        for filter in &q.filters {
+            let found: Vec<String> = match &filter.on {
+                On::LinkedFrom(target) => {
+                    let best = BEST_ID.replace("{}", "?1");
+                    let mut st = self.conn.prepare_cached(&format!(
+                        "SELECT rel_path FROM files WHERE id = ({best})"
+                    ))?;
+                    let rows = st.query_map([link_key(target)], |r| r.get(0))?;
+                    rows.collect::<rusqlite::Result<_>>()?
+                }
+                On::Highlights => {
+                    let mut st = self.conn.prepare_cached(&format!(
+                        "SELECT DISTINCT s.rel_path FROM links l JOIN files s ON s.id = l.src_file
+                         WHERE l.{HIGHLIGHT}"
+                    ))?;
+                    let rows = st.query_map([], |r| r.get(0))?;
+                    rows.collect::<rusqlite::Result<_>>()?
+                }
+                _ => Vec::new(),
+            };
+            for rel in found {
+                if !out.contains(&rel) {
+                    out.push(rel);
+                }
+            }
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
@@ -104,7 +167,7 @@ mod tests {
                 on: On::Modified { lo: 1, hi: 2 },
             },
         ];
-        let (sql, values) = sql(&filters, "g", 7);
+        let (sql, values) = sql(&filters, &[], "g", 7);
         assert!(sql.starts_with(" AND (g.id IN (SELECT file_id FROM tags WHERE fold(name) = ?7"));
         assert!(sql.contains("= ?8 || '/'"), "{sql}");
         assert!(sql.contains(" AND NOT (g.doc IN (2, 1))"), "{sql}");
@@ -121,6 +184,6 @@ mod tests {
                 Value::Integer(2)
             ]
         );
-        assert_eq!(super::sql(&[], "g", 1), (String::new(), Vec::new()));
+        assert_eq!(super::sql(&[], &[], "g", 1), (String::new(), Vec::new()));
     }
 }
