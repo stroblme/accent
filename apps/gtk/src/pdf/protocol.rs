@@ -53,6 +53,8 @@ pub enum Reply {
         image: accent_core::pdf::RgbaImage,
     },
     Links(usize, Vec<accent_core::pdf::Link>),
+    /// One page's form fields, each widget with the field it shows, answered with its links.
+    Fields(usize, Vec<pdf::FormField>),
     /// What other readers wrote on one page, answered with its links.
     Comments(usize, Vec<pdf::Comment>),
     /// One page's glyphs and their boxes, for selecting text on it.
@@ -173,7 +175,7 @@ pub enum Request {
         rect: (i32, i32, i32, i32),
         theme: pdf::Theme,
     },
-    /// One page's links, and its comments with them.
+    /// One page's links, and its form fields and comments with them.
     Links(usize),
     /// Every page's comments from this page on, for the Outline pane's list. A batch, as a
     /// search is: a newer one replaces it, and anything else is a detour it resumes after.

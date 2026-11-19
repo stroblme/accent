@@ -241,6 +241,17 @@ drill_pdf_loupe() {
 	test "$(sel end 3)" = "$kept" && test "$(sel start 3)" = "$kept" || { cat "$dir/loupe"; return 1; }
 }
 
+# The fixture form's fields as the tab reads them, and the pointer and the tooltip over each
+# (DESIGN.md, PDF Forms).
+drill_pdf_form() {
+	test -e "$pdfium" || { echo "SKIPPED the PDF form drill: no libpdfium"; return 0; }
+	launch 90 ACCENT_BENCH_PDF=form >"$dir/form"
+	has "$dir/form" \
+		'bench form fields page=0 count=13 name:text address:multiline person.email:text agree:check size:radio size:radio code:comb amount:text(read-only) country:combo fruit:list secret:password reset:button sign:signature' \
+		'bench form cursor name=text address=text person.email=text agree=pointer size=pointer size=pointer code=text amount=default country=pointer fruit=pointer secret=default reset=default sign=default' \
+		'bench form tips name="Your name" secret="Accent does not store passwords"'
+}
+
 # Its shells are real, so under a scratch HOME, running `true`, `false`, `pwd` and `sleep`.
 drill_commands() {
 	export HOME="$dir/home" SHELL=/bin/sh

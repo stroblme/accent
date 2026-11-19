@@ -6,6 +6,7 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::{gio, glib};
 
+use super::field;
 use super::protocol::{Asker, Request};
 use super::tab::{PAGE_ACTIONS, PdfTab};
 use super::{self as pdfview, PdfView};
@@ -69,6 +70,9 @@ impl PdfTab {
                 // page is not text to be selected, and a link is not to be followed.
                 if view.mode() != pdfview::Mode::Read {
                     return;
+                }
+                if let Some(cursor) = tab.over_field(view, (x, y), |_, f| field::cursor_of(f)) {
+                    return view.set_cursor_from_name(Some(cursor));
                 }
                 let over = tab.link_at(view, x, y).is_some();
                 let on_page = view.page_point(x, y).is_some();

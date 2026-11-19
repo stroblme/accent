@@ -1092,6 +1092,11 @@ fn run(out: &Path, notes: usize, files: usize, seed: u64, force: bool) -> Result
     }
     g.write("Attachments/pages.pdf", &Gen::pages_pdf(5))?;
     g.write("Attachments/comments.pdf", &Gen::comments_pdf())?;
+    // `accent_pdf::fixtures::form_objects` says what is on it; `ACCENT_BENCH_PDF=form:` reads it.
+    g.write(
+        "Attachments/form.pdf",
+        &accent_pdf::fixtures::form_document(),
+    )?;
     // Image auto-theming's drill inputs: three figures a dark theme recolours, and a photo (noise,
     // to the classifier) it leaves alone.
     g.write("Attachments/figure.png", &figure_png())?;

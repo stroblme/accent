@@ -123,6 +123,8 @@ pub struct PdfTab {
     /// The zoom to restore when presentation mode ends.
     pub(super) presenting: Cell<Option<PdfZoom>>,
     pub(super) links: RefCell<std::collections::HashMap<usize, Vec<pdf::Link>>>,
+    /// Each page's form fields, asked for with its links.
+    pub(super) fields: RefCell<HashMap<usize, Vec<pdf::FormField>>>,
     /// The pages an erase, a move, an Undo or an export changed this turn of the main loop, or in
     /// the eraser drag under way, whose links, comments and strokes are asked for once it is
     /// over. See [`PdfTab::reread`].
@@ -333,6 +335,7 @@ pub fn open(
         pending: Cell::new(Some(place)),
         pending_select: Cell::new(None),
         links: RefCell::new(std::collections::HashMap::new()),
+        fields: RefCell::default(),
         stale: RefCell::default(),
         comments: RefCell::default(),
         tip: RefCell::default(),
@@ -615,6 +618,7 @@ impl PdfTab {
             }
             _ => {}
         }
+        self.tint_fields();
     }
 
     /// Go to a page, remembering where the reader was so Back returns there.

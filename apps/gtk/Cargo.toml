@@ -12,8 +12,8 @@ path = "src/main.rs"
 [features]
 default = ["termprops"]
 # The `ACCENT_BENCH_*` drills (`src/bench/`) and what only they call. Off in a shipped build;
-# `make smoke`, `make check` and CI turn it on.
-bench = []
+# `make smoke`, `make check` and CI turn it on. The form drill writes `accent_pdf`'s fixture form.
+bench = ["dep:accent-pdf", "accent-pdf/fixtures"]
 # VTE 0.78's termprops: a program's OSC 52 copy, and the shell's commands and prompts reported to
 # the tab. Without it accent builds against VTE 0.76, MacPorts' on macOS 12.
 termprops = ["vte4-sys/v0_78"]
@@ -25,6 +25,7 @@ accent-core = { workspace = true, features = ["pdf"] }
 # `pdf` for the `[[paper.pdf#` completion, which reads the document's outline.
 accent-api = { workspace = true, features = ["pdf"] }
 accent-drawio.workspace = true
+accent-pdf = { workspace = true, optional = true }
 # Formulas laid out natively, in a math font the system HarfBuzz reads (`math`).
 accent-math.workspace = true
 anyhow.workspace = true

@@ -411,6 +411,12 @@ impl PdfView {
         self.queue_draw();
     }
 
+    /// The form fields a reader can fill in, per page, which the page tints.
+    pub fn set_fields(&self, fields: HashMap<usize, Vec<accent_core::pdf::Rect>>) {
+        *self.imp().fields.borrow_mut() = fields;
+        self.queue_draw();
+    }
+
     /// Which highlight is under this widget coordinate, if any.
     pub fn highlight_at(&self, x: f64, y: f64) -> Option<usize> {
         let (page, px, py) = self.page_point(x, y)?;
@@ -1011,6 +1017,8 @@ mod imp {
         /// Where the note links that highlight this document land, per page, each with the index
         /// of the link it came from so a click on one can open the note that holds it.
         pub highlights: RefCell<super::Highlights>,
+        /// The form fields a reader can fill in, per page.
+        pub fields: RefCell<HashMap<usize, Vec<accent_core::pdf::Rect>>>,
         /// The selected glyphs' boxes, per page the selection covers.
         pub selection: RefCell<Vec<(usize, Vec<accent_core::pdf::Rect>)>>,
         /// Where a drag began, in widget coordinates, while one is in progress.
@@ -1147,6 +1155,7 @@ mod imp {
                 thumbnails: Cell::new(false),
                 marks: RefCell::new(HashMap::new()),
                 highlights: RefCell::new(HashMap::new()),
+                fields: RefCell::default(),
                 selection: RefCell::new(Vec::new()),
                 drag_from: Cell::new(None),
                 mode: Cell::new(super::Mode::default()),

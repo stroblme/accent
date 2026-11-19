@@ -310,6 +310,12 @@ impl imp::PdfView {
             snapshot.append_border(&outline, &[2.0; 4], &[accent; 4]);
         }
 
+        if let Some(page_fields) = self.fields.borrow().get(&index) {
+            let colour = theme::at(accent, theme::FIELD_ALPHA);
+            for field in page_fields {
+                snapshot.append_color(&colour, &layout.rect_of(rect, field));
+            }
+        }
         // Under the selection and the search marks: a highlight is what the page says, the
         // other two are what the reader is doing to it right now.
         if let Some(page_highlights) = self.highlights.borrow().get(&index) {

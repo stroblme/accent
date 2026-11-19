@@ -97,7 +97,7 @@ impl<'a> Document<'a> {
         Document { pdf, update, pages }
     }
 
-    fn get(&self, r: Ref) -> Result<Object> {
+    pub(crate) fn get(&self, r: Ref) -> Result<Object> {
         match self.update {
             Some(update) => update.get(self.pdf, r),
             None => self.pdf.get(r),
@@ -105,7 +105,7 @@ impl<'a> Document<'a> {
     }
 
     /// `object`, or what it refers to; null for none.
-    fn resolve(&self, object: Option<&Object>) -> Result<Object> {
+    pub(crate) fn resolve(&self, object: Option<&Object>) -> Result<Object> {
         match object {
             Some(&Object::Ref(r)) => self.get(r),
             Some(o) => Ok(o.clone()),
@@ -114,7 +114,7 @@ impl<'a> Document<'a> {
     }
 
     /// `key` of `dict` as a dictionary, a reference followed; empty for anything else.
-    fn dict(&self, dict: &Dict, key: &[u8]) -> Result<Dict> {
+    pub(crate) fn dict(&self, dict: &Dict, key: &[u8]) -> Result<Dict> {
         Ok(self
             .resolve(dict.get(key))?
             .as_dict()
@@ -122,7 +122,7 @@ impl<'a> Document<'a> {
             .unwrap_or_default())
     }
 
-    fn root(&self) -> Result<Dict> {
+    pub(crate) fn root(&self) -> Result<Dict> {
         self.dict(self.pdf.trailer(), b"Root")
     }
 
@@ -432,7 +432,7 @@ impl<'a> Document<'a> {
     }
 
     /// A rectangle, normalised; `None` for anything but four numbers.
-    fn rect(&self, rect: Option<&Object>) -> Result<Option<[f32; 4]>> {
+    pub(crate) fn rect(&self, rect: Option<&Object>) -> Result<Option<[f32; 4]>> {
         let Object::Array(values) = self.resolve(rect)? else {
             return Ok(None);
         };

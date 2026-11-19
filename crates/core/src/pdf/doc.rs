@@ -450,7 +450,7 @@ impl PdfDoc {
     /// What `read` makes of the document; where an object is not where the xref puts it, what
     /// it makes of the document's bytes read through an xref rebuilt from them, as pdfium
     /// repairs a file.
-    fn reading<T>(
+    pub(super) fn reading<T>(
         &self,
         read: impl Fn(&accent_pdf::Document) -> accent_pdf::Result<T>,
     ) -> Result<T> {

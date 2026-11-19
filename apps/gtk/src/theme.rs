@@ -233,6 +233,8 @@ pub const MARK_ALPHA: f32 = 0.3;
 pub const CURRENT_MARK_ALPHA: f32 = 0.6;
 pub const GHOST_ALPHA: f32 = 0.6;
 pub const PAGE_EDGE_ALPHA: f32 = 0.15;
+/// A form field a reader can fill in, as pdf.js tints one (13 %).
+pub const FIELD_ALPHA: f32 = 0.13;
 /// A diagram's grid over its paper, in the ink that reads on it: draw.io's `#e6e6e6` on white.
 pub const GRID_ALPHA: f32 = 0.1;
 

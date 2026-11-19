@@ -797,3 +797,140 @@ fn a_damaged_xref_is_rebuilt_from_the_objects() {
     let read = read(Arc::new(packed), outline_of).unwrap();
     assert_eq!(read, [(0, "Packed".to_string(), Some(1))]);
 }
+
+/// A form's widgets as their fields say: a field merged with its widget, one shown on two pages
+/// through two kids, a field under a non-terminal parent, `/FT`, `/Ff` and `/V` inherited, the
+/// form's `/DA` and `/Q` where a field leaves them out, `/Opt` pairs and plain strings, a check
+/// box's states, a parent chain that loops, and widgets of no field or held by value left out.
+#[test]
+fn a_form_reads_its_fields_as_their_widgets_show_them() {
+    let mut b = Build::new();
+    b.obj(
+        1,
+        "<</Type/Catalog/Pages 2 0 R/AcroForm<</Fields[10 0 R 11 0 R 12 0 R 17 0 R 19 0 R]\
+         /DA(/Helv 0 Tf 0 g)/Q 1/NeedAppearances true>>>>",
+    );
+    b.obj(2, TWO_PAGES);
+    b.obj(
+        3,
+        "<</Type/Page/Parent 2 0 R/Annots[10 0 R 13 0 R 15 0 R 16 0 R 17 0 R 21 0 R\
+         <</Subtype/Widget/FT/Tx/T(direct)>>]>>",
+    );
+    b.obj(4, "<</Type/Page/Parent 2 0 R/Annots[14 0 R]>>");
+    b.obj(
+        10,
+        "<</Subtype/Widget/FT/Tx/T(name)/TU(Your name)/V(Ada)/DA(/Helv 12 Tf 0 0 1 rg)\
+         /Rect[120 80 20 60]/F 4/MaxLen 20>>",
+    );
+    b.obj(
+        11,
+        "<</FT/Tx/Ff 4096/T(address)/V<FEFF0047007200FC00DF0065>/Kids[13 0 R 14 0 R]>>",
+    );
+    b.obj(13, "<</Subtype/Widget/Parent 11 0 R/Rect[0 0 50 20]>>");
+    b.obj(14, "<</Subtype/Widget/Parent 11 0 R/Rect[0 0 50 20]/F 2>>");
+    b.obj(12, "<</T(person)/FT/Ch/Ff 131072/Kids[15 0 R]>>");
+    b.obj(
+        15,
+        "<</Subtype/Widget/Parent 12 0 R/T(country)/Opt[[(de)(Germany)](fr)[(it)]]/V(fr)\
+         /I[1]/TI 1/Q 2>>",
+    );
+    b.obj(16, "<</Subtype/Widget/Parent 18 0 R/Rect[0 0 1 1]>>");
+    b.obj(18, "<</Parent 19 0 R/T(a)>>");
+    b.obj(19, "<</Parent 18 0 R/T(b)/FT/Btn/Ff 49152/V/M>>");
+    b.obj(
+        17,
+        "<</Subtype/Widget/FT/Btn/T(agree)/V/Yes/AS/Yes/AP<</N<</Off 20 0 R/Yes 20 0 R>>>>>>",
+    );
+    b.stream(20, "", b"");
+    b.obj(21, "<</Subtype/Widget/T(lost)/Rect[0 0 1 1]>>");
+    let at = b.table("/Size 22/Root 1 0 R");
+    let pdf = open(b.end(at)).unwrap();
+    let pages = pdf.pages().unwrap();
+    let doc = Document::new(&pdf, None, &pages);
+    let form = doc.form().unwrap().unwrap();
+    assert!(form.need_appearances && !form.xfa);
+    let first = doc.fields(pages[0]).unwrap();
+    let said: Vec<_> = (first.iter())
+        .map(|w| (w.widget.num, w.field.num, w.name.as_str(), &w.kind[..]))
+        .collect();
+    assert_eq!(
+        said,
+        [
+            (10, 10, "name", &b"Tx"[..]),
+            (13, 11, "address", b"Tx"),
+            (15, 15, "person.country", b"Ch"),
+            (16, 18, "b.a", b"Btn"),
+            (17, 17, "agree", b"Btn"),
+        ]
+    );
+    let [name, address, country, looped, agree] = &first[..] else {
+        unreachable!()
+    };
+    assert_eq!(name.tip.as_deref(), Some("Your name"));
+    assert_eq!(name.value, Object::String(b"Ada".to_vec()));
+    assert_eq!(name.da, b"/Helv 12 Tf 0 0 1 rg");
+    assert_eq!(
+        (name.rect, name.max_len, name.align),
+        ([20.0, 60.0, 120.0, 80.0], Some(20), 1)
+    );
+    assert_eq!(
+        (address.flags, &address.da[..]),
+        (4096, &b"/Helv 0 Tf 0 g"[..])
+    );
+    assert_eq!(
+        text_string(match &address.value {
+            Object::String(s) => s,
+            other => panic!("{other:?}"),
+        }),
+        "Grüße"
+    );
+    let pair = |a: &str, b: &str| (a.to_string(), b.to_string());
+    assert_eq!(
+        country.options,
+        [pair("de", "Germany"), pair("fr", "fr"), pair("it", "it")]
+    );
+    assert_eq!((country.flags, country.align, country.top), (131072, 2, 1));
+    assert_eq!(country.picked, [1]);
+    assert_eq!(
+        (looped.flags, &looped.value),
+        (49152, &Object::Name(b"M".to_vec()))
+    );
+    assert_eq!(
+        (agree.states.clone(), agree.state.clone()),
+        (vec![b"Yes".to_vec()], Some(b"Yes".to_vec()))
+    );
+    let second = doc.fields(pages[1]).unwrap();
+    assert_eq!(
+        (second.len(), second[0].field.num, second[0].hidden),
+        (1, 11, true)
+    );
+}
+
+/// A field added to an encrypted file reads back as it was written: its name and value through
+/// the file's own handler.
+#[test]
+fn an_encrypted_form_reads_its_fields_in_the_clear() {
+    let base = fixtures::encrypted_document(6);
+    let pdf = open(base.clone()).unwrap();
+    let mut update = Update::new(&pdf);
+    let lex = |s: &str| {
+        crate::lex::Lexer::new(s.as_bytes(), 0, true)
+            .object()
+            .unwrap()
+    };
+    let widget = update.add(lex(
+        "<</Subtype/Widget/FT/Tx/T(secret name)/V(Grace)/Rect[0 0 9 9]>>",
+    ));
+    let mut page = pdf.get(r(3)).unwrap().as_dict().cloned().unwrap();
+    page.set(b"Annots", Object::Array(vec![Object::Ref(widget)]));
+    update.set(r(3), Object::Dict(page));
+    let bytes = [base, update.section()].concat();
+    assert_eq!(memchr::memmem::find(&bytes, b"secret name"), None);
+    let after = open(bytes).unwrap();
+    let pages = after.pages().unwrap();
+    let fields = Document::new(&after, None, &pages)
+        .fields(pages[0])
+        .unwrap();
+    assert_eq!(fields[0].name, "secret name");
+    assert_eq!(fields[0].value, Object::String(b"Grace".to_vec()));
+}

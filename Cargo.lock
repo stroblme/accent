@@ -10,6 +10,7 @@ dependencies = [
  "accent-core",
  "accent-drawio",
  "accent-math",
+ "accent-pdf",
  "anyhow",
  "cairo-rs",
  "chrono",

@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::annot::{OURS, PRINT};
 use super::cos::{Objects, decoded, dict, name, reals, text};
+use super::form::Da;
 use super::{PdfDoc, Rect};
 use crate::{Error, Result};
 
@@ -258,16 +259,7 @@ impl Objects {
 
 /// The size and colour a `/DA` string sets: `/Helv 14 Tf 1 0 0 rg`, or a grey's `0 g`.
 fn style_of(da: &[u8]) -> Option<TextStyle> {
-    let words: Vec<&str> = std::str::from_utf8(da).ok()?.split_whitespace().collect();
-    let op = |op: &str| words.iter().position(|w| *w == op);
-    let number = |at: Option<usize>| words.get(at?)?.parse::<f32>().ok();
-    let channel = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-    let size = number(op("Tf")?.checked_sub(1))?;
-    let rgb = match (op("rg"), op("g")) {
-        (Some(at), _) => [3, 2, 1].map(|back| number(at.checked_sub(back)).map_or(0, channel)),
-        (None, Some(at)) => [number(at.checked_sub(1)).map_or(0, channel); 3],
-        _ => [0; 3],
-    };
+    let Da { size, rgb, .. } = Da::parse(da)?;
     Some(TextStyle { size, rgb })
 }
 

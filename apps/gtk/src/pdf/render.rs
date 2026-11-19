@@ -223,6 +223,9 @@ fn render_loop(
                     if let Ok(links) = doc.links(page) {
                         send(view, Reply::Links(page, links));
                     }
+                    if let Ok(fields) = doc.fields(page) {
+                        send(view, Reply::Fields(page, fields));
+                    }
                     if let Ok(comments) = doc.comments(page) {
                         send(view, Reply::Comments(page, comments));
                     }

@@ -48,6 +48,7 @@ mod panes;
 mod paste;
 mod pdf;
 mod pdf_draw;
+mod pdf_form;
 mod pdf_hover;
 mod pdf_loupe;
 mod pdf_outline;
@@ -286,6 +287,8 @@ use user_commands::bench_commands;
 ///   held two seconds for a screenshot at `bench loupe hold`; the selection's handles dragged out
 ///   and back by a finger and by an XTEST mouse; lines over a 30,000-point plot and a drag down
 ///   them a step a frame; writes and removes `loupe-drill.pdf`),
+///   `form` (the fixture form's fields as the tab reads them, the pointer and the tooltip over
+///   each through XTEST; writes and removes `form-drill.pdf`),
 ///   `scroll:<rel_path>` (wheel input and continuous PDF frame pacing, then Alt+wheel paging, `n`
 ///   at the end and Ctrl+wheel zoom),
 ///   `broken:<rel_path or absolute path>` (truncation/recovery; scratch file),
@@ -780,6 +783,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if rel == "loupe" {
                 return pdf_loupe::run(&app);
+            }
+            if rel == "form" {
+                return pdf_form::bench_pdf_form(&app);
             }
             if let Some(rel) = rel.strip_prefix("scroll:") {
                 return pdf_scroll::run(&app, rel);

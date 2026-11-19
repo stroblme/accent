@@ -1,6 +1,7 @@
-//! Encrypted documents for tests, here and in `accent-core` (the `fixtures` feature): AES-128
+//! Documents for tests, here and in `accent-core` (the `fixtures` feature): encrypted ones, AES-128
 //! (revision 4) and AES-256 (revision 6) under the empty user password, which nothing on the
-//! machine writes. Ghostscript stops at RC4 (revision 3); its files are `fixtures/*.pdf`.
+//! machine writes (Ghostscript stops at RC4, revision 3; its files are `fixtures/*.pdf`), and a
+//! form with a field of every kind.
 
 use md5::{Digest, Md5};
 
@@ -63,6 +64,121 @@ pub fn encrypted_document(r: i64) -> Vec<u8> {
     out.extend(b"trailer\n");
     write::object(&mut out, &trailer);
     out.extend(format!("\nstartxref\n{xref}\n%%EOF\n").bytes());
+    out
+}
+
+/// The objects of a form of two 400 × 300 pt pages, numbered from 1, the catalog first: a field
+/// of every kind, which accent-core's tests, the generated vault's `Attachments/form.pdf` and the
+/// form drill read. A text field merged with its widget, with a tooltip; a multi-line one shown
+/// on both pages through two kids; one under a parent it inherits `/FT` and `/DA` from,
+/// right-aligned; a check box whose on-state draws a red cross; a radio group across both pages
+/// whose on-state draws a green square; a comb; a read-only field; a combo box of
+/// `[export shown]` pairs; a multi-select list box with `/I`; a password; a Reset push button and
+/// a signature.
+pub fn form_objects() -> Vec<String> {
+    let stream = |dict: &str, content: &str| {
+        format!(
+            "<<{dict}/Length {}>>stream\n{content}\nendstream",
+            content.len()
+        )
+    };
+    let widget =
+        |page: u32, rest: &str| format!("<</Type/Annot/Subtype/Widget/F 4/P {page} 0 R{rest}>>");
+    [
+        "<</Type/Catalog/Pages 2 0 R/AcroForm 3 0 R>>".to_string(),
+        "<</Type/Pages/Kids[4 0 R 5 0 R]/Count 2>>".to_string(),
+        "<</Fields[9 0 R 10 0 R 13 0 R 15 0 R 18 0 R 23 0 R 24 0 R 25 0 R 26 0 R 27 0 R 28 0 R \
+         29 0 R]/DA(/Helv 0 Tf 0 g)/DR<</Font<</Helv 6 0 R/ZaDb 7 0 R>>>>>>"
+            .to_string(),
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 400 300]/Contents 8 0 R\
+         /Resources<</Font<</F1 6 0 R>>>>/Annots[9 0 R 11 0 R 14 0 R 15 0 R 19 0 R 20 0 R \
+         23 0 R 24 0 R 25 0 R 26 0 R 27 0 R 28 0 R 29 0 R]>>"
+            .to_string(),
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 400 300]/Annots[12 0 R 21 0 R]>>".to_string(),
+        "<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>".to_string(),
+        "<</Type/Font/Subtype/Type1/BaseFont/ZapfDingbats>>".to_string(),
+        stream("", "BT /F1 10 Tf 20 280 Td (A form) Tj ET"),
+        widget(
+            4,
+            "/FT/Tx/T(name)/TU(Your name)/V(Ada)/DA(/Helv 12 Tf 0 0 1 rg)/Rect[20 240 200 260]\
+             /MK<</BG[1 1 0.9]/BC[0 0 0]>>",
+        ),
+        "<</FT/Tx/Ff 4096/T(address)/Kids[11 0 R 12 0 R]>>".to_string(),
+        widget(4, "/Parent 10 0 R/Rect[20 180 200 230]"),
+        widget(5, "/Parent 10 0 R/Rect[20 180 200 230]"),
+        "<</T(person)/FT/Tx/DA(/Helv 10 Tf 0 g)/Kids[14 0 R]>>".to_string(),
+        widget(4, "/Parent 13 0 R/T(email)/Q 2/Rect[220 240 380 260]"),
+        widget(
+            4,
+            "/FT/Btn/T(agree)/V/Off/AS/Off/Rect[20 140 36 156]/AP<</N<</Yes 16 0 R/Off 17 0 R>>>>\
+             /MK<</CA(4)>>/DA(/ZaDb 0 Tf 0 g)",
+        ),
+        stream(
+            "/Type/XObject/Subtype/Form/BBox[0 0 16 16]",
+            "1 0 0 RG 2 w 2 2 m 14 14 l 2 14 m 14 2 l S",
+        ),
+        stream("/Type/XObject/Subtype/Form/BBox[0 0 16 16]", ""),
+        "<</FT/Btn/Ff 49152/T(size)/V/M/Kids[19 0 R 20 0 R 21 0 R]>>".to_string(),
+        widget(
+            4,
+            "/Parent 18 0 R/Rect[60 140 76 156]/AS/Off/AP<</N<</S 22 0 R/Off 17 0 R>>>>",
+        ),
+        widget(
+            4,
+            "/Parent 18 0 R/Rect[90 140 106 156]/AS/M/AP<</N<</M 22 0 R/Off 17 0 R>>>>",
+        ),
+        widget(
+            5,
+            "/Parent 18 0 R/Rect[60 140 76 156]/AS/Off/AP<</N<</L 22 0 R/Off 17 0 R>>>>",
+        ),
+        stream(
+            "/Type/XObject/Subtype/Form/BBox[0 0 16 16]",
+            "0 0.6 0 rg 4 4 8 8 re f",
+        ),
+        widget(
+            4,
+            "/FT/Tx/T(code)/Ff 16777216/MaxLen 5/Rect[220 140 320 160]",
+        ),
+        widget(4, "/FT/Tx/T(amount)/Ff 1/V(12.50)/Rect[220 100 320 120]"),
+        widget(
+            4,
+            "/FT/Ch/Ff 131072/T(country)/Opt[[(de)(Germany)][(fr)(France)][(it)(Italy)]]/V(fr)\
+             /Rect[20 100 200 120]",
+        ),
+        widget(
+            4,
+            "/FT/Ch/Ff 2097152/T(fruit)/Opt[(Apple)(Banana)(Cherry)]/V[(Apple)(Cherry)]/I[0 2]\
+             /Rect[20 30 120 90]",
+        ),
+        widget(4, "/FT/Tx/Ff 8192/T(secret)/Rect[220 60 320 80]"),
+        widget(
+            4,
+            "/FT/Btn/Ff 65536/T(reset)/Rect[220 30 300 50]/A<</S/ResetForm>>/MK<</CA(Reset)>>",
+        ),
+        widget(4, "/FT/Sig/T(sign)/Rect[320 30 390 50]"),
+    ]
+    .into()
+}
+
+/// The form of [`form_objects`] as a file.
+pub fn form_document() -> Vec<u8> {
+    document_of(&form_objects())
+}
+
+/// A file of `objects`, numbered from 1, the first the catalog, in a classic xref table.
+pub fn document_of(objects: &[String]) -> Vec<u8> {
+    let mut out = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n".to_vec();
+    let mut rows = Vec::new();
+    for (i, text) in objects.iter().enumerate() {
+        let r = reference(i as u32 + 1);
+        rows.push((r, out.len() as u64));
+        out.extend(format!("{} 0 obj\n{text}\nendobj\n", r.num).bytes());
+    }
+    let xref = out.len();
+    write::table(&mut out, &rows, true);
+    let size = objects.len() + 1;
+    let tail = format!("trailer\n<</Size {size}/Root 1 0 R>>\nstartxref\n{xref}\n%%EOF\n");
+    out.extend(tail.bytes());
     out
 }
 

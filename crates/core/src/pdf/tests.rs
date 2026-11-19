@@ -2,6 +2,7 @@ use std::ops::Range;
 
 mod doc;
 mod foreign_ink;
+mod forms;
 mod highlights;
 mod ink;
 mod pages;

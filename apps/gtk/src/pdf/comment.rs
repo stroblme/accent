@@ -28,7 +28,13 @@ impl PdfTab {
                     return false;
                 }
                 let Some((content, area)) = tab.tip(x.into(), y.into()) else {
-                    return false;
+                    // A form field's name for a reader, where no comment is.
+                    let Some((tip, area)) = tab.field_tip(x.into(), y.into()) else {
+                        return false;
+                    };
+                    tooltip.set_text(Some(&tip));
+                    tooltip.set_tip_area(&area);
+                    return true;
                 };
                 tooltip.set_custom(Some(&content));
                 // Off it the tooltip goes, and comes back for the next comment where it is.
