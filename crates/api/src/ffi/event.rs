@@ -42,6 +42,11 @@ pub enum Event {
         from: String,
         to: String,
     },
+    /// Files that appeared in the vault, a sync's or a download's, which count as used in the
+    /// switcher ([`crate::Event::FilesUsed`]): none of a burst of more than a few.
+    FilesUsed {
+        rels: Vec<String>,
+    },
     /// Syncthing left a conflict copy beside a note.
     Conflict {
         original: String,
@@ -68,16 +73,16 @@ pub(crate) fn narrow(e: crate::Event) -> Option<Event> {
         crate::Event::FileChanged(rel) => Event::FileChanged { rel },
         crate::Event::FileRemoved(rel) => Event::FileRemoved { rel },
         crate::Event::FileRenamed { from, to } => Event::FileRenamed { from, to },
+        crate::Event::FilesUsed(rels) => Event::FilesUsed { rels },
         crate::Event::Conflict { original, conflict } => Event::Conflict { original, conflict },
         crate::Event::Error(message) => Event::Error { message },
         crate::Event::WalkFailed => Event::WalkFailed,
         crate::Event::WorkerGone => Event::WorkerGone,
         // Git, the remote connection, language servers and their background jobs, debug sessions,
         // kernels and the watch on unindexed folders: none of them run on a phone, so nothing
-        // here ever has to match them. A file added is not counted as used on a phone yet.
+        // here ever has to match them. A file added matters there only once it counts as used.
         crate::Event::GitChanged
         | crate::Event::FilesAdded(_)
-        | crate::Event::FilesUsed(_)
         | crate::Event::UnindexedChanged(_)
         | crate::Event::Connecting { .. }
         | crate::Event::Connected

@@ -533,6 +533,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         // How far the batch said the walk had got.
         var seen: Progress? = null
         val touched = mutableSetOf<String>()
+        val used = mutableListOf<String>()
         for (event in batch) when (event) {
             is Event.Reconciled -> {
                 reindexed = true
@@ -546,6 +547,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
                 touched += parentOf(event.to)
             }
             is Event.Conflict -> onConflict(event.original)
+            is Event.FilesUsed -> used += event.rels
             // Over, the progress it had made with it, and not paused. Its error, if this vault has
             // not said it already, is an [Event.Error] of its own.
             Event.WalkFailed -> {
@@ -559,6 +561,12 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
             }
             is Event.Error -> _state.update { it.copy(message = event.message) }
             is Event.Progress -> seen = event.progress
+        }
+        // Files that appeared count as used in the switcher, as on the desktop: a sync's, a
+        // download's. The revision asks an open Files page to rank them again.
+        if (used.isNotEmpty()) {
+            recents.touch(Recents.Kind.Notes, used)
+            _state.update { it.copy(revision = it.revision + 1) }
         }
         if (reindexed) {
             // The walk is over, so whatever the vault holds is in the index — unless it was

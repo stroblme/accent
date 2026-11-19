@@ -332,6 +332,40 @@ mod tests {
         ));
     }
 
+    /// A file a resume's rescan finds, synced while the app was away, counts as used once the
+    /// burst of files it added has ended, a phone having no watcher to hear of it sooner.
+    #[test]
+    fn a_file_a_rescan_finds_counts_as_used() {
+        let root = tempfile::tempdir().unwrap();
+        let index = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("old.md"), "a").unwrap();
+        let (inner, events) = crate::Vault::open_unwatched_at(
+            root.path(),
+            &index.path().join("index.db"),
+            VaultConfig::default(),
+        )
+        .unwrap();
+        let v = Vault {
+            inner,
+            events: Mutex::new(events),
+        };
+        let heard = |wanted: &dyn Fn(&Event) -> bool| {
+            let end = std::time::Instant::now() + crate::tests::BUDGET;
+            while std::time::Instant::now() < end {
+                if v.next_events(100).iter().any(wanted) {
+                    return true;
+                }
+            }
+            false
+        };
+        assert!(heard(&|e| matches!(e, Event::Reconciled { .. })));
+        std::fs::write(root.path().join("synced.md"), "b").unwrap();
+        v.rescan().unwrap();
+        assert!(heard(
+            &|e| matches!(e, Event::FilesUsed { rels } if rels == &["synced.md"])
+        ));
+    }
+
     /// Browse's tree comes in the order picked, the times read off the disk.
     #[test]
     fn a_folder_lists_in_the_order_picked() {

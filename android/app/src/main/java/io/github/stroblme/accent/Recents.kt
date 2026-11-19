@@ -10,9 +10,11 @@ class Recents(context: Context) {
         prefs.getString(of.key, "").orEmpty().split('\n').filter { it.isNotEmpty() }
 
     /** Move [value] to the front, keeping the list to [Kind.cap]. */
-    fun touch(of: Kind, value: String) {
-        val kept = (listOf(value) + list(of).filter { it != value }).take(of.cap)
-        prefs.edit().putString(of.key, kept.joinToString("\n")).apply()
+    fun touch(of: Kind, value: String) = touch(of, listOf(value))
+
+    /** Move [values] to the front in one write, the last of them first ([fronted]). */
+    fun touch(of: Kind, values: List<String>) {
+        prefs.edit().putString(of.key, fronted(list(of), values, of.cap).joinToString("\n")).apply()
     }
 
     /** Return recency ranks for [haystacks] used by the switcher. */
@@ -27,3 +29,7 @@ class Recents(context: Context) {
         Commands("commands", 20),
     }
 }
+
+/** [list] with each of [values] moved to its front in turn, so the last is first, kept to [cap]. */
+internal fun fronted(list: List<String>, values: List<String>, cap: Int): List<String> =
+    (values.asReversed() + list).distinct().take(cap)
