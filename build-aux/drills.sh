@@ -677,8 +677,8 @@ drill_sort() {
 
 # Links in the root, Show Hidden Files on: one to nothing marked, an editor's lock never listed
 # (one there from the start and one made while open), a dot-named link to a file outside listed,
-# and a link into the vault listed, dimmed, beside the file it names, which the index holds once;
-# then the marked one listed so once its file is written, with no reload.
+# and a link into the vault listed beside the file it names, dimmed with a link after its name,
+# the index holding the file once; then the marked one listed so once its file is written.
 drill_dangling() {
 	mkdir "$vault/real"
 	ln -s real/x.md "$vault/link.md"
@@ -689,9 +689,9 @@ drill_dangling() {
 	ln -s real/pre.md "$vault/pre.md"
 	launch 60 ACCENT_BENCH_DANGLING=1 >"$dir/dangling"
 	has "$dir/dangling" \
-		'bench dangling open show_hidden=Some(true) link.md=b .#note.md=- .linked.md=fi pre.md=f real/pre.md=fi' \
+		'bench dangling open show_hidden=Some(true) link.md=b .#note.md=- .linked.md=fi pre.md=f+link real/pre.md=fi' \
 		'bench dangling made gone.md=b .#other.md=-' \
-		'bench dangling target link.md=f real/x.md=fi once=true'
+		'bench dangling target link.md=f+link real/x.md=fi once=true'
 }
 
 if [ -n "${HEADLESS_DIR-}" ]; then

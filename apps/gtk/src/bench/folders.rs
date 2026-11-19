@@ -560,7 +560,8 @@ pub(super) fn drawn_rows(view: &gtk::ListView) -> Vec<(String, bool)> {
             let row = expander.list_row().and_then(|row| row.item());
             let dim = expander
                 .child()
-                .and_then(|row| row.last_child())
+                .and_then(|row| row.first_child())
+                .and_then(|icon| icon.next_sibling())
                 .is_some_and(|label| label.has_css_class("dimmed"));
             Some((tree::decode(row.as_ref()?)?.rel, dim))
         })
@@ -577,7 +578,7 @@ pub(super) fn drawn_tints(view: &gtk::ListView) -> Vec<(String, &'static str, St
         .into_iter()
         .filter_map(|expander| {
             let rel = tree::decode(expander.list_row()?.item().as_ref()?)?.rel;
-            let label = expander.child()?.last_child()?;
+            let label = expander.child()?.first_child()?.next_sibling()?;
             let class = ["git-modified", "git-added"]
                 .into_iter()
                 .find(|class| label.has_css_class(class))?;

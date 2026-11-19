@@ -68,11 +68,20 @@ pub struct Row {
     /// Dependency files are visible but read-only because they are externally managed. Ordinary
     /// gitignored folders remain editable; being unindexed affects search only. Implies `!indexed`.
     pub dependency: bool,
+    /// Whether the row is a second path to a file another row holds, a link into the vault or a
+    /// hard link (`FileRow::alias`): dimmed as search does not reach it, and drawn with a link
+    /// after its name ([`LINK_ICON`]). Implies `!indexed`.
+    pub alias: bool,
 }
 
 /// A row's kind for a symlink whose target is not there: listed dimmed under a glyph that says it
 /// cannot be used, and opening it says why.
 pub const DANGLING: char = 'b';
+
+/// The glyph after the name of a second path to a file another row holds ([`Row::alias`]), as a
+/// file manager marks a symlink with an emblem: tabler's link, bundled as the file kinds' icons
+/// are, since Adwaita's `insert-link-symbolic` draws an insertion mark.
+const LINK_ICON: &str = "file-link-symbolic";
 
 impl Row {
     pub fn is_dir(&self) -> bool {
@@ -1293,9 +1302,12 @@ fn setup_row(
         .xalign(0.0)
         .ellipsize(gtk::pango::EllipsizeMode::Middle)
         .build();
+    let link = gtk::Image::from_icon_name(LINK_ICON);
+    link.set_visible(false);
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     row.append(&icon);
     row.append(&label);
+    row.append(&link);
     let expander = gtk::TreeExpander::new();
     expander.set_child(Some(&row));
     // The name is ellipsized in the middle inside a 200 px sidebar, so the only way to read
@@ -1449,6 +1461,11 @@ fn bind_row(
         .and_downcast::<gtk::Label>()
         .expect("label");
     label.set_text(basename(&item.rel));
+    let link = label
+        .next_sibling()
+        .and_downcast::<gtk::Image>()
+        .expect("link");
+    link.set_visible(item.alias);
     // Both branches, always: row widgets are recycled, so a row that stops being ignored has
     // to have the class taken off it again. A row the index does not hold is dimmed by the
     // same rule and for the same reason the ignored ones are: search does not reach it. A
@@ -1458,7 +1475,11 @@ fn bind_row(
         || dot_named(&item.rel)
         || ignored.borrow().has(&item.rel)
         || cut.borrow().contains(&item.rel);
-    for widget in [icon.upcast_ref::<gtk::Widget>(), label.upcast_ref()] {
+    for widget in [
+        icon.upcast_ref::<gtk::Widget>(),
+        label.upcast_ref(),
+        link.upcast_ref(),
+    ] {
         set_class(widget, "dimmed", dim);
     }
     // The name alone, as VS Code tints it: the icon is the kind of file, not its state.

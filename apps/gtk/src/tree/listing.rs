@@ -6,9 +6,16 @@ use super::*;
 /// Encode rows as `GtkStringObject`s containing `"<kind><state><rel_path>"`.
 ///
 /// This avoids a custom GObject subclass for the current small state. `kind` is `d`, `f` or a
-/// link to nothing [`DANGLING`]; `state` is indexed `i`, gitignored `g` or dependency-tree `x`
-/// ([`Row::dependency`]).
-fn encode(kind: FileKind, rel: &str, indexed: bool, dependency: bool, dangling: bool) -> String {
+/// link to nothing [`DANGLING`]; `state` is indexed `i`, gitignored `g`, dependency-tree `x`
+/// ([`Row::dependency`]) or a second path to a file another row holds `a` ([`Row::alias`]).
+fn encode(
+    kind: FileKind,
+    rel: &str,
+    indexed: bool,
+    dependency: bool,
+    dangling: bool,
+    alias: bool,
+) -> String {
     // What a file is — its icon, what it opens as — is read off its name, so a directory and a
     // link that leads nowhere are the things the row has to carry.
     let c = match kind {
@@ -16,10 +23,11 @@ fn encode(kind: FileKind, rel: &str, indexed: bool, dependency: bool, dangling: 
         FileKind::Dir => 'd',
         _ => 'f',
     };
-    let state = match (indexed, dependency) {
-        (true, _) => 'i',
-        (false, false) => 'g',
-        (false, true) => 'x',
+    let state = match (indexed, dependency, alias) {
+        (true, ..) => 'i',
+        (false, true, _) => 'x',
+        (false, false, true) => 'a',
+        (false, false, false) => 'g',
     };
     format!("{c}{state}{rel}")
 }
@@ -38,6 +46,7 @@ fn decode_str(s: &str) -> Option<Row> {
         rel: cs.as_str().to_string(),
         indexed: state == 'i',
         dependency: state == 'x',
+        alias: state == 'a',
     })
 }
 
@@ -143,7 +152,16 @@ fn splice(
             let held = r.id != 0 || r.dangling || r.alias;
             !hidden(r.kind, &r.rel_path, held, show_hidden)
         })
-        .map(|r| encode(r.kind, &r.rel_path, r.id != 0, r.dependency, r.dangling))
+        .map(|r| {
+            encode(
+                r.kind,
+                &r.rel_path,
+                r.id != 0,
+                r.dependency,
+                r.dangling,
+                r.alias,
+            )
+        })
         .collect();
     let Some((at, removed, added)) = changed_span(&current(store), &items) else {
         return;
@@ -292,8 +310,9 @@ mod tests {
 
     #[test]
     fn a_row_carries_whether_the_index_holds_it() {
-        let row =
-            |kind, rel, indexed, dep| decode_str(&encode(kind, rel, indexed, dep, false)).unwrap();
+        let row = |kind, rel, indexed, dep| {
+            decode_str(&encode(kind, rel, indexed, dep, false, false)).unwrap()
+        };
         let note = row(FileKind::Markdown, "Notes/A.md", true, false);
         assert_eq!(note.kind, 'f');
         assert_eq!(note.rel, "Notes/A.md");
@@ -312,8 +331,27 @@ mod tests {
         assert!(!ignored.indexed);
         assert!(!ignored.dependency);
         // A link to nothing says so, whatever its name makes it.
-        let dangling = decode_str(&encode(FileKind::Markdown, "a.md", false, false, true)).unwrap();
+        let dangling = decode_str(&encode(
+            FileKind::Markdown,
+            "a.md",
+            false,
+            false,
+            true,
+            false,
+        ))
+        .unwrap();
         assert!(dangling.kind == DANGLING && !dangling.is_dir());
+        // A second path to a file is out of the index, and drawn with a link on it.
+        let alias = decode_str(&encode(
+            FileKind::Markdown,
+            "a.md",
+            false,
+            false,
+            false,
+            true,
+        ))
+        .unwrap();
+        assert!(alias.alias && !alias.indexed && !alias.dependency);
     }
 
     #[test]
