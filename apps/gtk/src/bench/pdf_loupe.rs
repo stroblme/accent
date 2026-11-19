@@ -2,22 +2,28 @@
 //!
 //! No finger reaches a headless window, so a finger's drag goes through the view's own selection
 //! path from where the long press hands it over (`PdfView::bench_drag_select`). Each line prints
-//! the tab's `loupe_report` and what is selected; a mouse drag through XTEST shows no loupe.
+//! the tab's `loupe_report` and what is selected; a mouse drag through XTEST shows no loupe. The
+//! report says how long each line's band took to render, and the loupe's longest paint.
 
 use super::*;
 
 /// A body line at 11 pt and a heading at 48 pt, in points down the page: baselines and sizes.
 const BODY: (f64, f64) = (200.0, 11.0);
 const HEADING: (f64, f64) = (60.0, 48.0);
+/// The second page's three body lines, over a plot of [`PLOT`] points: the page whose band costs
+/// the most to render.
+const DENSE: [f64; 3] = [200.0, 230.0, 260.0];
+const PLOT: u32 = 30_000;
 const NAME: &str = "loupe-drill.pdf";
 
 /// Write a page with a heading at its top and a line of body text into the vault, open it at
 /// 100 %, and drag a finger along the body line, its height wobbling by a few pixels, printing the
-/// loupe at each step; hold it two seconds for a screenshot (`bench loupe hold`), its popover
-/// pictured as `loupe.png` under `ACCENT_BENCH_SHOTS=<dir>`, and let go. Then a finger on the
-/// heading at the top of the view and on the body line's start at the view's left edge at 300 %,
-/// a pen and a mouse through the same path, and a real mouse drag through XTEST. Takes the file
-/// away again.
+/// loupe at each step; hold it two seconds for a screenshot (`bench loupe hold`), its picture
+/// saved as `loupe.png` under `ACCENT_BENCH_SHOTS=<dir>`, and let go. Then a finger on the heading
+/// at the top of the view and on the body line's start at the view's left edge at 300 %, a pen and
+/// a mouse through the same path, and a real mouse drag through XTEST. Then two lines over a dense
+/// plot on the second page, and a drag down its lines and back a step a frame, with the longest
+/// gap between frames. Takes the file away again.
 pub(super) fn run(app: &Rc<App>) {
     let path = app.root().join(NAME);
     if let Err(e) = write(&path) {
@@ -50,14 +56,15 @@ pub(super) fn run(app: &Rc<App>) {
                 report.contains(what) && !report.contains(", 1, 1))")
             })
         };
-        let line = |baseline: f64, size: f64| {
+        let line_on = |page: usize, baseline: f64, size: f64| {
             let r = accent_core::pdf::Rect::from_corners(
                 (60.0, (baseline - size * 0.7) as f32),
                 (300.0, baseline as f32),
             );
-            let r = view.widget_rect(0, &r).expect("the line on screen");
+            let r = view.widget_rect(page, &r).expect("the line on screen");
             (f64::from(r.x()), f64::from(r.y() + r.height() / 2))
         };
+        let line = |baseline: f64, size: f64| line_on(0, baseline, size);
         let finger = pdfview::tools::Hand::Finger;
 
         // Along the body line, the first step asking for the page's glyphs.
@@ -79,11 +86,16 @@ pub(super) fn run(app: &Rc<App>) {
             glib::timeout_future(Duration::from_millis(100)).await;
             say(&format!("touch step={step}"));
         }
+        // Sharp once the line's band has landed, which the steps above asked for once.
+        shows("source_scale=2").await;
+        say("sharp");
         println!("bench loupe hold");
         let shots = std::env::var("ACCENT_BENCH_SHOTS");
-        if let (Ok(dir), Some(popover)) = (shots, pdf.loupe_popover()) {
+        // Its picture, the popover around it being a surface of its own that paints nothing here.
+        let picture = pdf.loupe_popover().and_then(|popover| popover.child());
+        if let (Ok(dir), Some(picture)) = (shots, picture) {
             let shot = std::path::Path::new(&dir).join("loupe.png");
-            let pictured = super::diagram::shoot(popover.upcast_ref(), &shot);
+            let pictured = super::diagram::shoot(&picture, &shot);
             println!("bench loupe pictured={pictured}");
         }
         glib::timeout_future(Duration::from_millis(2500)).await;
@@ -148,11 +160,51 @@ pub(super) fn run(app: &Rc<App>) {
         say("xtest_mouse");
         println!("bench loupe xtest_mouse changed={}", changed.is_some());
         super::git::xtest_now("up").await;
+
+        // The plot's page: a band of its first line, then of its second.
+        pdf.scroll_to(pdfview::Anchor {
+            page: 1,
+            u: 0.0,
+            v: 0.0,
+        });
+        super::pdf::settled(&pdf, "loupe_dense").await;
+        let (x0, y0) = line_on(1, DENSE[0], BODY.1);
+        let from = (x0 + 2.0, y0);
+        for (name, baseline) in [("dense", DENSE[0]), ("dense_next", DENSE[1])] {
+            let (_, y) = line_on(1, baseline, BODY.1);
+            view.bench_drag_select(from, (x0 + 60.0, y), finger);
+            shows("source_scale=2").await;
+            say(name);
+        }
+        // Down the three lines and back, a step a frame: the longest gap between frames meanwhile.
+        let gaps = Rc::new(std::cell::Cell::new((0i64, 0i64, 0u32)));
+        let clock = view.frame_clock().expect("a frame clock");
+        let counted = gaps.clone();
+        let handler = clock.connect_after_paint(move |clock| {
+            let (last, gap, frames) = counted.get();
+            let now = clock.frame_time();
+            let gap = if last > 0 { gap.max(now - last) } else { gap };
+            counted.set((now, gap, frames + 1));
+        });
+        for step in 0..60 {
+            let (_, y) = line_on(1, DENSE[[0, 1, 2, 1, 0, 1][step / 10]], BODY.1);
+            view.bench_drag_select(from, (x0 + 10.0 + 3.0 * step as f64, y), finger);
+            glib::timeout_future(Duration::from_millis(16)).await;
+        }
+        clock.disconnect(handler);
+        let (_, gap, frames) = gaps.get();
+        println!(
+            "bench loupe glide frames={frames} gap_ms={:.1}",
+            gap as f64 / 1000.0
+        );
+        say("glide");
+        view.bench_lift();
         quit(&app, &path);
     });
 }
 
-/// The drill's page: the heading, and the body line under it, in cairo's own sans.
+/// The drill's pages, in cairo's own sans: the heading and the body line under it, then three lines
+/// over a plot.
 fn write(path: &std::path::Path) -> Result<(), cairo::Error> {
     let surface = cairo::PdfSurface::new(595.0, 842.0, path)?;
     let cr = cairo::Context::new(&surface)?;
@@ -164,6 +216,27 @@ fn write(path: &std::path::Path) -> Result<(), cairo::Error> {
         cr.set_font_size(size);
         cr.move_to(60.0, baseline);
         cr.show_text(text)?;
+    }
+    cr.show_page()?;
+    // A random walk across the page, light enough for the lines over it to read.
+    cr.set_source_rgb(0.7, 0.7, 0.7);
+    cr.set_line_width(0.5);
+    cr.move_to(40.0, 400.0);
+    let mut seed: u32 = 1;
+    for i in 0..PLOT {
+        seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+        let y = 100.0 + f64::from(seed >> 16) % 600.0;
+        cr.line_to(40.0 + 515.0 * f64::from(i) / f64::from(PLOT), y);
+    }
+    cr.stroke()?;
+    cr.set_source_rgb(0.0, 0.0, 0.0);
+    cr.set_font_size(BODY.1);
+    for (n, baseline) in DENSE.into_iter().enumerate() {
+        cr.move_to(60.0, baseline);
+        cr.show_text(&format!(
+            "Line {} of the plot's page, over its points.",
+            n + 1
+        ))?;
     }
     cr.show_page()?;
     drop(cr);

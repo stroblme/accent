@@ -1315,7 +1315,10 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A finger held still for a long press (GTK's, half a second) and then dragged selects from where it was held, as on a phone; the scrolled window's own long press stops it panning that touch.
   While a finger or a pen drags a selection, a loupe above the hand shows the line under it twice as large, as GTK's text views show one (`gtk_text_view_show_magnifier`), and the mouse, which covers nothing it selects, gets none.
   The loupe is that line twice as tall and a third wider, never under 80 px, in libadwaita's `magnifier` popover with its picture rounded 7 px inside the popover's 15 px corner as the link preview's is.
-  It is cut from the frame the view last painted, so it shows the selection as the page does and renders no page again, and GTK keeps it on the screen, under the line where there is no room above.
+  Its line is rendered again at twice the view's scale once the hand reaches it, a band across what the view shows of the page, so its text is as sharp as the page's, and the view paints its highlights, selection and marks over the band as it paints them over its tiles.
+  Until the band lands, and while a stroke of that page waits for its render, the loupe enlarges the frame the view last painted, with one band on its way at a time.
+  A band takes the render thread 3 ms for a body line at 100 % and 19 ms for a 48 pt heading, but 0.4 to 0.6 s over a 30,000-point plot, whose whole path pdfium strokes for any part of the page, while the loupe's own paint stays under 3 ms of the main thread (AMCOMP, 2026-11-19).
+  GTK keeps it on the screen, under the line where there is no room above.
   A tap follows a link on its release, once it is known to be no pan.
   The pen is known by the event's device tool, since on Wayland a tablet's events come through a device whose source is a mouse.
 - A stroke stays painted over the page until the re-rendered tile carries it, as that tile will show it, under the highlights and the selection.

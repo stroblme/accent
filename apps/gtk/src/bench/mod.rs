@@ -282,8 +282,9 @@ use user_commands::bench_commands;
 ///   fingers; generated `Attachments/pages.pdf`),
 ///   `loupe` (a finger's selection drag, from where its long press hands it over, along a line,
 ///   on a heading at the view's top and at its left edge, a pen's and a mouse's, and a real mouse
-///   drag through XTEST, each with the loupe's place and what it enlarges, held two seconds for a
-///   screenshot at `bench loupe hold`; writes and removes `loupe-drill.pdf`),
+///   drag through XTEST, each with the loupe's place, what it enlarges and how long its band took,
+///   held two seconds for a screenshot at `bench loupe hold`; lines over a 30,000-point plot and a
+///   drag down them a step a frame; writes and removes `loupe-drill.pdf`),
 ///   `scroll:<rel_path>` (wheel input and continuous PDF frame pacing, then Alt+wheel paging, `n`
 ///   at the end and Ctrl+wheel zoom),
 ///   `broken:<rel_path or absolute path>` (truncation/recovery; scratch file),

@@ -201,21 +201,24 @@ drill_ring_panes() {
 }
 
 # A finger's selection drag shows the loupe above the line under it, kept to that line however the
-# finger wobbles and on the screen at the view's top and its left edge, a pen's too and a mouse's
-# not, through the view's own path and through XTEST (DESIGN.md, PDF).
+# finger wobbles, sharp once its band has landed and on the screen at the view's top and its left
+# edge, a pen's too and a mouse's not, through the view's own path and through XTEST (DESIGN.md,
+# PDF).
 drill_pdf_loupe() {
 	test -e "$pdfium" || { echo "SKIPPED the PDF loupe drill: no libpdfium"; return 0; }
-	launch 90 ACCENT_BENCH_PDF=loupe >"$dir/loupe"
+	launch 150 ACCENT_BENCH_PDF=loupe >"$dir/loupe"
 	for want in \
 		'read shown=true ' \
-		'touch step=5 shown=true .* above=true .* on_screen=true selected="The loupe' \
+		'touch step=5 shown=true .* above=true .* on_screen=true .* selected="The loupe' \
+		'sharp shown=true .* source_scale=2 ' \
 		'lifted none ' \
 		'heading shown=true .* above=false .* on_screen=true ' \
 		'edge shown=true .* on_screen=true ' \
 		'pen shown=true ' \
 		'mouse none ' \
 		'xtest_mouse none selected="The loupe' \
-		'xtest_mouse changed=true'; do
+		'xtest_mouse changed=true' \
+		'dense shown=true .* source_scale=2 '; do
 		grep -q "^bench loupe $want" "$dir/loupe" || { cat "$dir/loupe"; return 1; }
 	done
 	lines=$(sed -n 's/^bench loupe touch .* source=([^,]*,\([^,]*\),.*/\1/p' "$dir/loupe" | sort -u | wc -l)

@@ -35,7 +35,6 @@ impl imp::PdfView {
 
         snapshot.save();
 
-        let frame = obj.color();
         let accent = theme::accent();
         // What is on screen first, then what is within reach of it: the render thread works
         // down the list, and a list a scroll overtakes starts again from its head.
@@ -45,12 +44,6 @@ impl imp::PdfView {
         #[cfg(feature = "bench")]
         let mut reused = 0;
         let cache = obj.cache();
-        let marks = self.marks.borrow();
-        let highlights = self.highlights.borrow();
-        let strokes = self.strokes.borrow();
-        let picked = self.picked.borrow();
-        let lasso = self.lasso.borrow();
-        let selection = self.selection.borrow();
         let shown = ((ox, ox + vw), (oy, oy + vh));
         let near = reach(shown, sf);
         // The ends of that range are two binary searches; the pages outside it are not looked
@@ -213,88 +206,7 @@ impl imp::PdfView {
                 let h = texture.height() as f32 / sf;
                 base.append_texture(&texture, &graphene::Rect::new(x, y, w, h));
             }
-            // Under the highlights and the selection, as in the tile that will carry them.
-            let mut page_node = base.to_node();
-            for stroke in strokes.iter().filter(|s| s.page == index) {
-                let style = obj.ink_style(stroke.tool);
-                let next = gtk::Snapshot::new();
-                if let Some(node) = &page_node {
-                    next.append_node(node);
-                }
-                let path = stroke_path(stroke, rect, &layout);
-                let line = gsk::Stroke::new(style.width * layout.scale);
-                line.set_line_cap(gsk::LineCap::Round);
-                line.set_line_join(gsk::LineJoin::Round);
-                match (style.multiply, &page_node) {
-                    (true, Some(node)) => stroked(&next, &path, &line, style, theme, node),
-                    _ => next.append_stroke(&path, &line, &as_rendered(style, theme)),
-                }
-                page_node = next.to_node();
-            }
-            // A thumbnail's corners are as round as the buttons over them (`organize::CORNER`).
-            let corner = if thumbnails {
-                crate::organize::CORNER
-            } else {
-                0.0
-            };
-            let outline = gsk::RoundedRect::from_rect(bounds, corner);
-            if thumbnails {
-                snapshot.push_rounded_clip(&outline);
-            }
-            if let Some(node) = page_node {
-                snapshot.append_node(&node);
-            }
-
-            // A hairline, so a white page on a light background still reads as a page.
-            snapshot.append_border(
-                &outline,
-                &[1.0; 4],
-                &[theme::at(frame, theme::PAGE_EDGE_ALPHA); 4],
-            );
-
-            let framed =
-                crate::organize::framed(&self.strip_picked.borrow(), self.page.get(), index);
-            if thumbnails && framed {
-                snapshot.append_border(&outline, &[2.0; 4], &[accent; 4]);
-            }
-
-            // Under the selection and the search marks: a highlight is what the page says,
-            // the other two are what the reader is doing to it right now.
-            if let Some(page_highlights) = highlights.get(&index) {
-                let colour = theme::at(accent, theme::HIGHLIGHT_ALPHA);
-                for quad in page_highlights.iter().flat_map(|(quads, _)| quads) {
-                    snapshot.append_color(&colour, &layout.rect_of(rect, quad));
-                }
-            }
-            if let Some((_, boxes)) = selection.iter().find(|(at, _)| *at == index) {
-                let colour = theme::at(accent, theme::SELECTION_ALPHA);
-                for glyph in boxes {
-                    snapshot.append_color(&colour, &layout.rect_of(rect, glyph));
-                }
-            }
-            if let Some(s) = picked.as_ref().filter(|s| s.page == index) {
-                paint_selection(snapshot, s, rect, &layout, &accent);
-            }
-            if let Some(lasso) = lasso.as_ref().filter(|l| l.page == index) {
-                paint_lasso(snapshot, &lasso.points, rect, &layout, &accent);
-            }
-            if let Some(page_marks) = marks.get(&index) {
-                for (n, mark) in page_marks.iter().enumerate() {
-                    let alpha = match self.current_mark.get() == Some((index, n)) {
-                        true => theme::CURRENT_MARK_ALPHA,
-                        false => theme::MARK_ALPHA,
-                    };
-                    let colour = theme::at(accent, alpha);
-                    snapshot.append_color(&colour, &layout.rect_of(rect, mark));
-                }
-            }
-            if let Some((_, spot)) = self.spot.get().filter(|(at, _)| *at == index) {
-                let colour = theme::at(accent, theme::CURRENT_MARK_ALPHA);
-                snapshot.append_color(&colour, &layout.rect_of(rect, &spot));
-            }
-            if thumbnails {
-                snapshot.pop();
-            }
+            self.paint_page(snapshot, index, rect, &layout, base.to_node());
             snapshot.restore();
         }
         // A PDF dragged over the pages: the line across the gap its pages would go into.
@@ -311,8 +223,6 @@ impl imp::PdfView {
             snapshot.append_color(&accent, &line);
             snapshot.pop();
         }
-        drop(marks);
-        drop(selection);
         snapshot.restore();
 
         // Asked for once per change, not once per frame: a scroll that reveals nothing new
@@ -335,6 +245,149 @@ impl imp::PdfView {
                 f(&obj, device_scale, theme, wanted);
             }
         }
+    }
+
+    /// Page `index` from `base`, its paper and what has been rendered of it, in the page's own
+    /// pixels from its corner `rect`: the strokes no tile carries yet drawn into it, its edge, and
+    /// over it the highlights, the selection, what Select holds, the lasso and the marks. What a
+    /// frame paints of each page, and the loupe over a band rendered for one.
+    fn paint_page(
+        &self,
+        snapshot: &gtk::Snapshot,
+        index: usize,
+        rect: &PageRect,
+        layout: &Layout,
+        base: Option<gsk::RenderNode>,
+    ) {
+        let obj = self.obj();
+        let theme = self.theme.get();
+        let thumbnails = self.thumbnails.get();
+        let accent = theme::accent();
+        let bounds = graphene::Rect::new(rect.x, rect.y, rect.w, rect.h);
+        // Under the highlights and the selection, as in the tile that will carry them.
+        let mut page_node = base;
+        for stroke in self.strokes.borrow().iter().filter(|s| s.page == index) {
+            let style = obj.ink_style(stroke.tool);
+            let next = gtk::Snapshot::new();
+            if let Some(node) = &page_node {
+                next.append_node(node);
+            }
+            let path = stroke_path(stroke, rect, layout);
+            let line = gsk::Stroke::new(style.width * layout.scale);
+            line.set_line_cap(gsk::LineCap::Round);
+            line.set_line_join(gsk::LineJoin::Round);
+            match (style.multiply, &page_node) {
+                (true, Some(node)) => stroked(&next, &path, &line, style, theme, node),
+                _ => next.append_stroke(&path, &line, &as_rendered(style, theme)),
+            }
+            page_node = next.to_node();
+        }
+        // A thumbnail's corners are as round as the buttons over them (`organize::CORNER`).
+        let corner = if thumbnails {
+            crate::organize::CORNER
+        } else {
+            0.0
+        };
+        let outline = gsk::RoundedRect::from_rect(bounds, corner);
+        if thumbnails {
+            snapshot.push_rounded_clip(&outline);
+        }
+        if let Some(node) = page_node {
+            snapshot.append_node(&node);
+        }
+
+        // A hairline, so a white page on a light background still reads as a page.
+        snapshot.append_border(
+            &outline,
+            &[1.0; 4],
+            &[theme::at(obj.color(), theme::PAGE_EDGE_ALPHA); 4],
+        );
+
+        let framed = crate::organize::framed(&self.strip_picked.borrow(), self.page.get(), index);
+        if thumbnails && framed {
+            snapshot.append_border(&outline, &[2.0; 4], &[accent; 4]);
+        }
+
+        // Under the selection and the search marks: a highlight is what the page says, the
+        // other two are what the reader is doing to it right now.
+        if let Some(page_highlights) = self.highlights.borrow().get(&index) {
+            let colour = theme::at(accent, theme::HIGHLIGHT_ALPHA);
+            for quad in page_highlights.iter().flat_map(|(quads, _)| quads) {
+                snapshot.append_color(&colour, &layout.rect_of(rect, quad));
+            }
+        }
+        let selection = self.selection.borrow();
+        if let Some((_, boxes)) = selection.iter().find(|(at, _)| *at == index) {
+            let colour = theme::at(accent, theme::SELECTION_ALPHA);
+            for glyph in boxes {
+                snapshot.append_color(&colour, &layout.rect_of(rect, glyph));
+            }
+        }
+        if let Some(s) = self.picked.borrow().as_ref().filter(|s| s.page == index) {
+            paint_selection(snapshot, s, rect, layout, &accent);
+        }
+        if let Some(lasso) = self.lasso.borrow().as_ref().filter(|l| l.page == index) {
+            paint_lasso(snapshot, &lasso.points, rect, layout, &accent);
+        }
+        if let Some(page_marks) = self.marks.borrow().get(&index) {
+            for (n, mark) in page_marks.iter().enumerate() {
+                let alpha = match self.current_mark.get() == Some((index, n)) {
+                    true => theme::CURRENT_MARK_ALPHA,
+                    false => theme::MARK_ALPHA,
+                };
+                let colour = theme::at(accent, alpha);
+                snapshot.append_color(&colour, &layout.rect_of(rect, mark));
+            }
+        }
+        if let Some((_, spot)) = self.spot.get().filter(|(at, _)| *at == index) {
+            let colour = theme::at(accent, theme::CURRENT_MARK_ALPHA);
+            snapshot.append_color(&colour, &layout.rect_of(rect, &spot));
+        }
+        if thumbnails {
+            snapshot.pop();
+        }
+    }
+}
+
+impl super::PdfView {
+    /// Paint page `page` as a frame paints it, but from `band` in place of its tiles: a texture
+    /// of part of it, `at` in the page's own logical pixels, over its paper. In the view's own
+    /// coordinates, the page's corner on the device's pixel grid as a frame puts it, so a loupe
+    /// enlarging the view enlarges this instead. False, and nothing painted, while a stroke of
+    /// the page waits for its render: the band may carry it already, or not yet.
+    pub fn paint_band(
+        &self,
+        snapshot: &gtk::Snapshot,
+        page: usize,
+        band: &gdk::Texture,
+        at: &graphene::Rect,
+    ) -> bool {
+        let imp = self.imp();
+        if imp.strokes.borrow().iter().any(|s| s.page == page) {
+            return false;
+        }
+        let layout = imp.layout.borrow();
+        let Some(corner) = layout.pages.get(page) else {
+            return false;
+        };
+        let (ox, oy) = self.scroll_offset();
+        let sf = self.scale_factor().max(1);
+        snapshot.save();
+        snapshot.translate(&graphene::Point::new(
+            on_grid(corner.x, ox, sf),
+            on_grid(corner.y, oy, sf),
+        ));
+        let rect = PageRect {
+            x: 0.0,
+            y: 0.0,
+            ..*corner
+        };
+        let base = gtk::Snapshot::new();
+        base.append_color(&imp.paper(), &graphene::Rect::new(0.0, 0.0, rect.w, rect.h));
+        base.append_texture(band, at);
+        imp.paint_page(snapshot, page, &rect, &layout, base.to_node());
+        snapshot.restore();
+        true
     }
 }
 

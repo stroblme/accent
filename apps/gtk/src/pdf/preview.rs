@@ -99,13 +99,17 @@ impl PdfTab {
         ));
     }
 
-    /// The band a preview asked for landed. One for a link the pointer has left since is dropped.
+    /// The band a preview or the loupe asked for landed. One for a link the pointer has left since
+    /// is dropped.
     pub(super) fn band_landed(
         &self,
         page: usize,
         rect: (i32, i32, i32, i32),
         image: pdf::RgbaImage,
     ) {
+        let Some(image) = self.loupe_landed(page, rect, image) else {
+            return;
+        };
         let sf = self.view.scale_factor().max(1);
         let mut preview = self.preview.borrow_mut();
         let Some(shown) = preview.as_mut() else {
