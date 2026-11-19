@@ -13,15 +13,16 @@ fn note() -> String {
         .map(|i| format!("Filler paragraph {i}, there for the page to scroll.\n\n"))
         .collect();
     format!(
-        "# Tasks\n\n- [ ] open, see [[tasks-other]]\n- [x] done\n- [X] upper\n- [/] doing\n\
-         > - [ ] quoted\n\n{filler}"
+        "# Tasks\n\n- [ ] open, see [[tasks-other]] or [[#Far]]\n- [x] done\n- [X] upper\n\
+         - [/] doing\n> - [ ] quoted\n\n{filler}## Far\n"
     )
 }
 
 /// The preview beside its note, the caret at the note's end: each box clicked, its line printed
 /// with whether the page stayed where it was read and the pointer over the box, then one Undo,
-/// after which the note is as it was. A drag across a box and a click on the link in a task's
-/// text change nothing, the link opening its note. Then an org note's preview alone in its pane:
+/// after which the note is as it was. A drag across a box changes nothing, nor do clicks on the
+/// links in a task's text: one to a heading of the note brings the page there, the other opens
+/// its note. Then an org note's preview alone in its pane:
 /// each checkbox clicked, saved; and presented, where a click changes nothing.
 pub(super) async fn run(app: &Rc<App>) {
     let root = app.root();
@@ -93,6 +94,18 @@ pub(super) async fn run(app: &Rc<App>) {
         let (from, to) = (screen((x - 20.0, y)), screen((x + 60.0, y)));
         xtest(&format!("drag {from} {to}")).await;
         println!("bench tasks drag changed={}", tab.text() != before);
+    }
+    if let Some(at) = with(&|p| p.point_of("Far")) {
+        let top = (rendered.preview().as_ref()).map_or(0.0, |p| p.scroll_y());
+        xtest(&format!("move {}; down; up", screen(at))).await;
+        let moved = (rendered.preview().as_ref()).map_or(0.0, |p| p.scroll_y()) - top;
+        println!(
+            "bench tasks heading moved={} changed={}",
+            moved > 100.0,
+            tab.text() != before
+        );
+        rendered.scroll_to_line(1);
+        glib::timeout_future(Duration::from_millis(400)).await;
     }
     if let Some(at) = with(&|p| p.point_of("tasks-other")) {
         xtest(&format!("move {}; down; up", screen(at))).await;
