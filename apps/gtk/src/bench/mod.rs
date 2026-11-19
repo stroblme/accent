@@ -7,6 +7,7 @@ mod animation;
 mod answer;
 mod attach;
 mod chrome;
+mod coast;
 mod compare;
 mod complete;
 mod corpus;
@@ -237,6 +238,9 @@ use user_commands::bench_commands;
 ///   timer stopped where hidden (`animation::bench_animation`).
 /// - `ACCENT_BENCH_PREVIEW=render`: the preview's page of a note it writes, against `preview.expected`; `saved`: a saved search's rows as the vault changes and a link to a search's results followed into the Search pane (a scratch vault); `time:<rel>`: its render, patch and scroll
 ///   costs (`native::bench_preview`).
+/// - `ACCENT_BENCH_COAST=1`: a zoom while the scrolled window coasts from a fling, in a diagram,
+///   an image, a notebook, a note and its preview, by pinch, Ctrl+wheel and chord
+///   (`coast::bench_coast`). Writes `coast.*` into a scratch vault.
 /// - `ACCENT_BENCH_TERM=1`: shell titles and saved terminal sessions.
 ///   `--terminal` uses a vault-less window; a vault launch opens a shell tab.
 ///   Use scratch `TMPDIR` so it cannot join the user's running holder.
@@ -495,6 +499,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     }
     if std::env::var_os("ACCENT_BENCH_DANGLING").is_some() {
         return dangling::bench_dangling(app);
+    }
+    if std::env::var_os("ACCENT_BENCH_COAST").is_some() {
+        return coast::bench_coast(app);
     }
     if std::env::var_os("ACCENT_BENCH_RETYPE").is_some() {
         scratch_only(app, "ACCENT_BENCH_RETYPE");

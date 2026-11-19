@@ -145,6 +145,10 @@ impl NotebookTab {
         Some(adjustment.value() + adjustment.page_size() - bottom)
     }
 
+    pub fn bench_scroller(&self) -> gtk::ScrolledWindow {
+        self.scroller.clone()
+    }
+
     pub fn bench_scrolled(&self) -> f64 {
         self.scroller.vadjustment().value()
     }

@@ -600,6 +600,19 @@ drill_outline_hover() {
 		'bench outline hover hover.md away thumb=None row="Short" drawn=Some(false) left_matched=Some(true)'
 }
 
+# A zoom while the view still coasts from a fling, whose offset GTK writes every frame in the pixels
+# of the zoom it began at: each kept what it keeps, by a pinch, Ctrl+wheel and the chord alike
+# (DESIGN.md, Zoom).
+drill_coast() {
+	launch 120 ACCENT_BENCH_COAST=1 >"$dir/coast"
+	for case in 'diagram pinch' 'diagram wheel' 'diagram chord' 'image pinch' 'image wheel' \
+		'image chord' 'notebook wheel' 'notebook chord' 'note wheel' 'note chord' 'preview wheel' \
+		'preview chord'; do
+		grep -q "^bench coast $case coasting=true zoomed=true kept=true " "$dir/coast" ||
+			{ cat "$dir/coast"; return 1; }
+	done
+}
+
 # The vault's root in each sort, with a folder left open staying open. Each file's creation time
 # is the order it was written in, c, a then B, apart by more than a coarse clock's tick.
 # Presentation's laser pointer over a presented diagram, PDF and note, put up and away by a real

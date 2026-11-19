@@ -576,6 +576,9 @@ impl Page {
     /// The zoom, and the font and margins at it: a page of its own installs its font rule and
     /// takes the editor's margins, while an inline page's owner sets both.
     fn set_zoom(&self, zoom: f64) {
+        if let Some(frame) = &self.frame {
+            crate::widgets::stop_coasting(&frame.scroller);
+        }
         self.zoom.set(zoom);
         let font = self.prose_font.borrow().clone();
         let font = font.unwrap_or_else(crate::platform::document_font);

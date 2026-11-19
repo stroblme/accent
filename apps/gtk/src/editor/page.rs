@@ -475,6 +475,7 @@ impl Tab {
     /// `font` of `None` follows the GNOME document font that `main` installs for every editor;
     /// `zoom` scales whichever of the two applies, and only this tab's document.
     pub fn set_font(self: &Rc<Self>, font: Option<&str>, zoom: f64) {
+        crate::widgets::stop_coasting(&self.scroller);
         self.set_page(zoom);
         install_font(
             &self.font,

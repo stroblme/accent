@@ -1348,6 +1348,12 @@ impl DiagramTab {
         self.view.set_zoom(Zoom::Scale(scale));
     }
 
+    /// A pinch reaching `zoom` with the fingers at `at` on the canvas, for a drill.
+    #[cfg(feature = "bench")]
+    pub fn pinched(&self, zoom: f64, at: (f64, f64)) {
+        self.view.pinched(zoom, at);
+    }
+
     /// Scroll the canvas by `(dx, dy)` pixels, for a drill.
     #[cfg(feature = "bench")]
     pub fn scroll_by(&self, dx: f64, dy: f64) {

@@ -126,6 +126,23 @@ pub(crate) fn smooth_wheel(scroller: &gtk::ScrolledWindow) -> Wheel {
     wheel
 }
 
+/// Stop the scrolled window `widget` scrolls in, or is, coasting, after a fling or back off an
+/// edge, ahead of a zoom. GTK coasts in the pixels of the layout it began in and writes them back
+/// every frame over any value of ours, so a zoom made during it lands at the old offset at the new
+/// scale, somewhere else in the document. A touchpad's pinch can begin with one: libinput may take
+/// up to its first 300 ms for a two-finger scroll, whose end sets GTK coasting. Turning kinetic
+/// scrolling off is the only public way to stop it, and it goes straight back on.
+pub(crate) fn stop_coasting(widget: &impl IsA<gtk::Widget>) {
+    if let Some(scroller) = widget
+        .ancestor(gtk::ScrolledWindow::static_type())
+        .and_downcast::<gtk::ScrolledWindow>()
+        && scroller.is_kinetic_scrolling()
+    {
+        scroller.set_kinetic_scrolling(false);
+        scroller.set_kinetic_scrolling(true);
+    }
+}
+
 /// [`smooth_wheel`] on every scroller under `root`, for a libadwaita dialog that builds its own:
 /// Preferences, Keyboard Shortcuts and About.
 pub(crate) fn smooth_wheels(root: &gtk::Widget) {

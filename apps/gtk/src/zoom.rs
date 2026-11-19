@@ -47,6 +47,7 @@ impl App {
                 f64::from(scroller.width()) / 2.0,
                 f64::from(scroller.height()) / 2.0,
             );
+            crate::widgets::stop_coasting(&scroller);
             keep_under(&scroller, size, at.unwrap_or(middle));
         }
         self.refresh_zoom();

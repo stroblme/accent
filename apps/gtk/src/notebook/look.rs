@@ -44,6 +44,7 @@ impl NotebookTab {
         // they still have the old ones.
         let at = self.zoom_at.take();
         if zoom != self.zoom.get() {
+            crate::widgets::stop_coasting(&self.scroller);
             let anchor = self.zoom_anchor_at(at);
             self.zoom_anchor.replace(anchor);
         }

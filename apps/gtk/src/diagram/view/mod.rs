@@ -242,6 +242,7 @@ impl DiagramView {
         match zoom {
             Zoom::Scale(_) => self.zoom_around(zoom, Some((w / 2.0, h / 2.0))),
             _ => {
+                crate::widgets::stop_coasting(self);
                 self.imp().zoom.set(zoom);
                 self.relayout();
                 self.centre_page();
@@ -257,9 +258,19 @@ impl DiagramView {
         self.zoom_around(Zoom::Scale(to), at);
     }
 
+    /// Zoom to `zoom`, the multiple of the page's size a pinch has reached, keeping what is under
+    /// `at`, between the fingers, where it is.
+    pub fn pinched(&self, zoom: f64, at: (f64, f64)) {
+        let zoom = Zoom::Scale(crate::zoom::clamp_scale(zoom));
+        if self.zoom() != zoom {
+            self.zoom_around(zoom, Some(at));
+        }
+    }
+
     fn zoom_around(&self, zoom: Zoom, at: Option<(f64, f64)>) {
         let (w, h) = (f64::from(self.width()), f64::from(self.height()));
         let (x, y) = at.unwrap_or((w / 2.0, h / 2.0));
+        crate::widgets::stop_coasting(self);
         let under = self.page_at(x, y);
         self.imp().zoom.set(zoom);
         self.relayout();
@@ -679,12 +690,7 @@ mod imp {
                 glib::clone!(
                     #[weak]
                     obj,
-                    move |zoom, at| {
-                        let zoom = Zoom::Scale(crate::zoom::clamp_scale(zoom));
-                        if obj.zoom() != zoom {
-                            obj.zoom_around(zoom, Some(at));
-                        }
-                    }
+                    move |zoom, at| obj.pinched(zoom, at)
                 ),
             );
 

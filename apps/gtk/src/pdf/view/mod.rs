@@ -130,7 +130,7 @@ impl PdfView {
         if self.imp().zoom.get() == zoom {
             return;
         }
-        self.stop_coasting();
+        crate::widgets::stop_coasting(self);
         self.imp().zoom.set(zoom);
         self.relayout();
         self.zoomed();
