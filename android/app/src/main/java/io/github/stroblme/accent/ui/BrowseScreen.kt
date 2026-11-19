@@ -19,12 +19,14 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.github.stroblme.accent.Corpus
+import io.github.stroblme.accent.R
 import io.github.stroblme.accent.Recents
 import io.github.stroblme.accent.Sorts
 import io.github.stroblme.accent.VaultModel
@@ -680,34 +682,49 @@ private fun LazyListScope.rows(
     for (row in here) {
         item(key = row.relPath) {
             val open = row.relPath in expanded
+            val name = File(row.relPath).name
+            val mark = markOf(row)
+            val muted = MaterialTheme.colorScheme.onSurfaceVariant
             ListItem(
                 headlineContent = {
                     Text(
-                        File(row.relPath).name,
+                        name,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         fontWeight = if (row.kind == FileKind.DIR) FontWeight.Medium else null,
+                        // Dimmed as the desktop's tree dims them, search reaching neither.
+                        color = if (mark == RowMark.None) Color.Unspecified else muted,
                     )
                 },
                 leadingContent = {
-                    Text(
-                        when {
-                            row.kind == FileKind.DIR && open -> "▾"
-                            row.kind == FileKind.DIR -> "▸"
-                            row.kind == FileKind.PDF -> "◆"
-                            else -> "·"
-                        },
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    if (mark == RowMark.Dangling) {
+                        MarkIcon(R.drawable.ic_link_off, "Link to a missing file")
+                    } else {
+                        Text(
+                            when {
+                                row.kind == FileKind.DIR && open -> "▾"
+                                row.kind == FileKind.DIR -> "▸"
+                                row.kind == FileKind.PDF -> "◆"
+                                else -> "·"
+                            },
+                            color = muted,
+                        )
+                    }
+                },
+                trailingContent = if (mark == RowMark.Alias) {
+                    { MarkIcon(R.drawable.ic_link, "Link") }
+                } else {
+                    null
                 },
                 colors = flatRow(),
                 modifier = Modifier
                     .padding(start = (depth * 12).dp)
                     .row {
-                        if (row.kind == FileKind.DIR) {
-                            model.toggle(row.relPath)
-                        } else {
-                            onOpen(row.relPath, null)
+                        when {
+                            mark == RowMark.Dangling ->
+                                model.said("Cannot open $name: the file it links to is missing")
+                            row.kind == FileKind.DIR -> model.toggle(row.relPath)
+                            else -> onOpen(row.relPath, null)
                         }
                     },
             )
@@ -717,6 +734,30 @@ private fun LazyListScope.rows(
         }
     }
 }
+
+/** How the tree marks a row beside its kind, as the desktop's does (DESIGN.md, Files). */
+internal enum class RowMark {
+    None,
+    /** A symlink whose file is missing, which nothing opens. */
+    Dangling,
+    /** A second path to a file another row holds, which opens that file. */
+    Alias,
+}
+
+internal fun markOf(row: FileRow): RowMark = when {
+    row.dangling -> RowMark.Dangling
+    row.alias -> RowMark.Alias
+    else -> RowMark.None
+}
+
+/** A row's mark, at the size of the glyphs beside it and in their muted colour. */
+@Composable
+private fun MarkIcon(icon: Int, description: String) = Icon(
+    painterResource(icon),
+    contentDescription = description,
+    modifier = Modifier.size(16.dp),
+    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+)
 
 /** What the palette can do here. Everything a phone has no place for is simply not in the list. */
 class Command(val label: String, val run: (VaultModel) -> Unit)
