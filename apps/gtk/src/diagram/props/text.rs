@@ -2,14 +2,14 @@
 //! placed as draw.io's menu places it, word wrap and draw.io's Vertical, and the label's
 //! background, border, opacity and spacing.
 
-use std::cell::Cell;
 use std::rc::Rc;
 
 use accent_drawio::{Color, Resolved};
 use adw::prelude::*;
 
 use super::{
-    Change, ColourRow, Props, Shades, choose, colour, combo, found, owned, pick, spin, style,
+    Cells, Change, Check, ColourRow, Props, Read, Styles, choose, colour, combo, owned, pick,
+    pick_shown, show, spin, style,
 };
 
 /// draw.io's fonts (`Menus.defaultFonts`).
@@ -50,18 +50,16 @@ pub(super) struct Text {
     italic: gtk::ToggleButton,
     underline: gtk::ToggleButton,
     /// draw.io's Vertical: the label across the height (`horizontal=0`).
-    vertical: adw::SwitchRow,
+    vertical: Check,
     align: adw::ComboRow,
     valign: adw::ComboRow,
     label_position: adw::ComboRow,
-    wrap: adw::SwitchRow,
+    wrap: Check,
     label_background: Rc<ColourRow>,
     label_border: Rc<ColourRow>,
     text_opacity: adw::SpinRow,
     /// `spacing` and its four sides, draw.io's Text Spacing.
     spacing: [adw::SpinRow; 5],
-    /// The font style bits the cell had when the pane was filled, which a toggle flips one of.
-    font_bits: Cell<u32>,
 }
 
 impl Text {
@@ -87,11 +85,11 @@ impl Text {
         }
         let style_row = adw::ActionRow::builder().title("Style").build();
         style_row.add_suffix(&styles);
-        let vertical = adw::SwitchRow::builder().title("Vertical Text").build();
+        let vertical = Check::new("Vertical Text");
         let align = combo("Alignment", &ALIGN.map(|(_, l)| l));
         let valign = combo("Vertical Alignment", &VALIGN.map(|(_, l)| l));
         let label_position = combo("Position", &POSITIONS.map(|(l, _)| l));
-        let wrap = adw::SwitchRow::builder().title("Word Wrap").build();
+        let wrap = Check::new("Word Wrap");
         let label_background = Rc::new(ColourRow::new("Label Background", Color::WHITE));
         let label_border = Rc::new(ColourRow::new("Label Border", Color::BLACK));
         let text_opacity = spin("Text Opacity", (0.0, 100.0, 5.0));
@@ -105,11 +103,11 @@ impl Text {
         group.add(&font_size);
         group.add(&font_colour.row);
         group.add(&style_row);
-        group.add(&vertical);
+        group.add(&vertical.row);
         group.add(&align);
         group.add(&valign);
         group.add(&label_position);
-        group.add(&wrap);
+        group.add(&wrap.row);
         group.add(&label_background.row);
         group.add(&label_border.row);
         group.add(&text_opacity);
@@ -131,66 +129,51 @@ impl Text {
             label_border,
             text_opacity,
             spacing,
-            font_bits: Cell::new(0),
         }
     }
 
     /// Send each row's change; `send` drops what the pane's own filling sets.
     pub(super) fn wire(&self, props: &Rc<Props>, send: Rc<dyn Fn(Change)>) {
-        colour(&self.font_colour, &props.filling, &send, "fontColor");
-        colour(
-            &self.label_background,
-            &props.filling,
-            &send,
-            "labelBackgroundColor",
-        );
-        colour(
-            &self.label_border,
-            &props.filling,
-            &send,
-            "labelBorderColor",
-        );
-        let set = style(&send, "whiteSpace");
+        for (row, key) in [
+            (&self.font_colour, "fontColor"),
+            (&self.label_background, "labelBackgroundColor"),
+            (&self.label_border, "labelBorderColor"),
+        ] {
+            colour(row, &props.filling, &send, Cells::All, key);
+        }
+        let set = style(&send, Cells::Shapes, "whiteSpace");
         self.wrap
-            .connect_active_notify(move |row| set(row.is_active().then(|| "wrap".to_string())));
+            .connect(move |on| set(on.then(|| "wrap".to_string())));
         // draw.io's Vertical toggles `horizontal`, writing 1 when it goes off.
-        let set = style(&send, "horizontal");
-        self.vertical.connect_active_notify(move |row| {
-            set(Some(if row.is_active() { "0" } else { "1" }.into()))
-        });
+        let set = style(&send, Cells::Shapes, "horizontal");
+        self.vertical
+            .connect(move |on| set(Some(if on { "0" } else { "1" }.into())));
         let [global, top, left, bottom, right] = &self.spacing;
         props.spins(
             &send,
             &[
-                (&self.font_size, "fontSize", None, false),
-                (&self.text_opacity, "textOpacity", Some(100.0), false),
-                (global, "spacing", None, false),
-                (top, "spacingTop", None, false),
-                (left, "spacingLeft", None, false),
-                (bottom, "spacingBottom", None, false),
-                (right, "spacingRight", None, false),
+                (&self.font_size, "fontSize", None, Cells::All),
+                (&self.text_opacity, "textOpacity", Some(100.0), Cells::All),
+                (global, "spacing", None, Cells::All),
+                (top, "spacingTop", None, Cells::All),
+                (left, "spacingLeft", None, Cells::All),
+                (bottom, "spacingBottom", None, Cells::All),
+                (right, "spacingRight", None, Cells::All),
             ],
         );
+        // Each cell keeps its other bits, as draw.io's Bold does (`mxGraph.setCellStyleFlags`).
         for (button, bit) in [(&self.bold, 1), (&self.italic, 2), (&self.underline, 4)] {
-            let (me, set) = (Rc::downgrade(props), style(&send, "fontStyle"));
+            let send = send.clone();
             button.connect_toggled(move |button| {
-                let Some(me) = me.upgrade() else { return };
-                let bits = match button.is_active() {
-                    true => me.text.font_bits.get() | bit,
-                    false => me.text.font_bits.get() & !bit,
-                };
-                me.text.font_bits.set(bits);
-                set(Some(bits.to_string()));
+                button.unset_state_flags(gtk::StateFlags::INCONSISTENT);
+                send(Change::FontStyle(bit, button.is_active()));
             });
         }
-        pick(&self.font, &send, "fontFamily", FONTS.to_vec());
-        pick(&self.align, &send, "align", ALIGN.map(|(v, _)| v).to_vec());
-        pick(
-            &self.valign,
-            &send,
-            "verticalAlign",
-            VALIGN.map(|(v, _)| v).to_vec(),
-        );
+        pick(&self.font, &send, Cells::All, "fontFamily", FONTS.to_vec());
+        let align = ALIGN.map(|(v, _)| v).to_vec();
+        pick(&self.align, &send, Cells::All, "align", align);
+        let valign = VALIGN.map(|(v, _)| v).to_vec();
+        pick(&self.valign, &send, Cells::All, "verticalAlign", valign);
         choose(
             &self.label_position,
             &send,
@@ -203,23 +186,29 @@ impl Text {
                     "verticalAlign",
                 ];
                 let pairs: Vec<_> = keys.into_iter().zip(values.map(Some)).collect();
-                Some(Change::Style(owned(&pairs)))
+                Some(Change::Style(Cells::Shapes, owned(&pairs)))
             }),
         );
     }
 
-    /// Show the first cell's `style`, the colours as `shades` has them, and a shape's own rows
-    /// where `vertices` are selected.
-    pub(super) fn fill(&self, style: &Resolved, shades: &Shades, vertices: bool) {
+    /// Show each row over the cells it reads in `styles`, and a shape's own rows where
+    /// `vertices` are selected.
+    pub(super) fn fill(&self, styles: &Styles, vertices: bool) {
         // An arrow's label sits on its line, at no size to wrap to or turn across.
         self.label_position.set_visible(vertices);
-        self.wrap.set_visible(vertices);
-        self.vertical.set_visible(vertices);
-        self.font_size.set_value(style.num("fontSize", 12.0));
-        self.font_colour.fill(shades.font);
-        self.label_background.fill(shades.label_background);
-        self.label_border.fill(shades.label_border);
-        self.text_opacity.set_value(style.num("textOpacity", 100.0));
+        self.wrap.row.set_visible(vertices);
+        self.vertical.row.set_visible(vertices);
+        let read = |key, default| styles.read(Cells::All, |s| s.num(key, default));
+        show(&self.font_size, read("fontSize", 12.0));
+        let colours = [
+            (&self.font_colour, "fontColor"),
+            (&self.label_background, "labelBackgroundColor"),
+            (&self.label_border, "labelBorderColor"),
+        ];
+        for (row, key) in colours {
+            row.fill(styles.read(Cells::All, |s| s.color(key)));
+        }
+        show(&self.text_opacity, read("textOpacity", 100.0));
         let sides = [
             "spacing",
             "spacingTop",
@@ -228,43 +217,75 @@ impl Text {
             "spacingRight",
         ];
         for (row, key) in self.spacing.iter().zip(sides) {
-            row.set_value(style.num(key, if key == "spacing" { 2.0 } else { 0.0 }));
+            show(row, read(key, if key == "spacing" { 2.0 } else { 0.0 }));
         }
-        self.vertical.set_active(!style.flag("horizontal", true));
+        self.vertical
+            .fill(styles.read(Cells::Shapes, |s| !s.flag("horizontal", true)));
         self.wrap
-            .set_active(style.get("whiteSpace") == Some("wrap"));
-        let bits = style.num("fontStyle", 0.0) as u32;
-        self.font_bits.set(bits);
-        self.bold.set_active(bits & 1 != 0);
-        self.italic.set_active(bits & 2 != 0);
-        self.underline.set_active(bits & 4 != 0);
+            .fill(styles.read(Cells::Shapes, |s| s.get("whiteSpace") == Some("wrap")));
+        // A bit some cells have and others not shows the toggle out with the hatch Mixed has,
+        // and a click sets it on them all.
+        for (button, bit) in [(&self.bold, 1), (&self.italic, 2), (&self.underline, 4)] {
+            let on = styles.read(Cells::All, |s| s.num("fontStyle", 0.0) as u32 & bit != 0);
+            button.set_active(on.value && !on.mixed);
+            match on.mixed {
+                true => button.set_state_flags(gtk::StateFlags::INCONSISTENT, false),
+                false => button.unset_state_flags(gtk::StateFlags::INCONSISTENT),
+            }
+            let pressed = match (on.mixed, on.value) {
+                (true, _) => gtk::AccessibleTristate::Mixed,
+                (false, true) => gtk::AccessibleTristate::True,
+                (false, false) => gtk::AccessibleTristate::False,
+            };
+            button.update_state(&[gtk::accessible::State::Pressed(pressed)]);
+        }
         // A font draw.io's list does not have is an entry of its own, as draw.io's menu
-        // names whatever font the cell has.
-        let family = style.get("fontFamily").unwrap_or(FONTS[0]);
-        let own: &[&str] = if FONTS.contains(&family) {
-            &[]
-        } else {
-            &[family]
+        // names whatever font the cell has, the first cell's where they differ.
+        let family = styles.read(Cells::All, |s| {
+            s.get("fontFamily").unwrap_or(FONTS[0]).to_string()
+        });
+        let own: &[&str] = match FONTS.contains(&family.value.as_str()) {
+            true => &[],
+            false => &[family.value.as_str()],
         };
         if let Some(fonts) = self.font.model().and_downcast::<gtk::StringList>() {
             let n = FONTS.len() as u32;
             fonts.splice(n, fonts.n_items() - n, own);
         }
-        let font = FONTS.iter().position(|f| *f == family);
-        self.font.set_selected(font.unwrap_or(FONTS.len()) as u32);
-        self.align
-            .set_selected(found(&ALIGN.map(|(v, _)| v), style.get("align")));
-        // As draw.io reads it: a side named with no corner is its middle.
-        let side = style.get("labelPosition").unwrap_or("center");
-        let height = style.get("verticalLabelPosition").unwrap_or("middle");
-        let placed = |height: &str| {
-            POSITIONS
-                .iter()
-                .position(|(_, [s, h, ..])| *s == side && *h == height)
+        let font = FONTS.iter().position(|f| *f == family.value);
+        let font = Read {
+            value: Some(font.unwrap_or(FONTS.len())),
+            mixed: family.mixed,
         };
-        let position = placed(height).or_else(|| placed("middle")).unwrap_or(4);
-        self.label_position.set_selected(position as u32);
-        self.valign
-            .set_selected(found(&VALIGN.map(|(v, _)| v), style.get("verticalAlign")));
+        pick_shown(&self.font, font);
+        // Centred and in the middle where the style says nothing, as mxGraph aligns a label.
+        let at = |values: &[&str], v: &str| values.iter().position(|x| *x == v);
+        let aligns = ALIGN.map(|(v, _)| v);
+        pick_shown(
+            &self.align,
+            styles.read(Cells::All, |s| {
+                at(&aligns, s.get("align").unwrap_or("center"))
+            }),
+        );
+        let valigns = VALIGN.map(|(v, _)| v);
+        let valign = |s: &Resolved| at(&valigns, s.get("verticalAlign").unwrap_or("middle"));
+        pick_shown(&self.valign, styles.read(Cells::All, valign));
+        pick_shown(
+            &self.label_position,
+            styles.read(Cells::Shapes, |s| Some(position_of(s))),
+        );
     }
+}
+
+/// Where in the Position row `style`'s label is, as draw.io reads it: a side named with no
+/// corner is its middle.
+fn position_of(style: &Resolved) -> usize {
+    let side = style.get("labelPosition").unwrap_or("center");
+    let height = style.get("verticalLabelPosition").unwrap_or("middle");
+    let placed = |height: &str| {
+        POSITIONS
+            .iter()
+            .position(|(_, [s, h, ..])| *s == side && *h == height)
+    };
+    placed(height).or_else(|| placed("middle")).unwrap_or(4)
 }

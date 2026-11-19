@@ -29,8 +29,8 @@ pub enum Target {
     Cells {
         style: Resolved,
         raw: String,
-        /// What the colour rows show, each over the cells it applies to.
-        shades: Shades,
+        /// The selected cells, which each row reads over those it applies to.
+        styles: Styles,
         count: usize,
         vertices: bool,
         edges: bool,
@@ -54,68 +54,108 @@ pub enum Target {
     },
 }
 
-/// One colour row's look over the cells it applies to: the first one's colour, and whether
-/// another one's differs from it, `none` included.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Shade {
-    pub colour: Option<Color>,
+/// One selected cell as the rows read it.
+pub struct Seen {
+    pub style: Resolved,
+    pub vertex: bool,
+    pub edge: bool,
+}
+
+impl Seen {
+    pub fn of(cell: &accent_drawio::Cell) -> Seen {
+        Seen {
+            style: cell.style.resolve(cell.edge),
+            vertex: cell.vertex,
+            edge: cell.edge,
+        }
+    }
+
+    /// Whether it is one of `cells`.
+    pub fn is(&self, cells: Cells) -> bool {
+        match cells {
+            Cells::All => true,
+            Cells::Shapes => self.vertex,
+            Cells::Arrows => self.edge,
+            Cells::Fills => self.vertex || (self.edge && self.style.shape() == "flexArrow"),
+        }
+    }
+}
+
+/// Which of the selected cells a row reads and writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cells {
+    All,
+    /// Shapes, whose corners, turn, perimeter and label placement an arrow reads otherwise or
+    /// not at all.
+    Shapes,
+    /// Arrows, as draw.io's arrow rows set them (`ss.edges`).
+    Arrows,
+    /// What takes a fill: a shape, or a flex arrow (`Graph.isFillState`).
+    Fills,
+}
+
+/// What a row shows over the cells it reads: the first one's value, and whether another one's
+/// differs from it.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Read<T> {
+    pub value: T,
     pub mixed: bool,
 }
 
-/// What each colour row shows.
-#[derive(Debug, Default)]
-pub struct Shades {
-    pub fill: Shade,
-    pub gradient: Shade,
-    pub stroke: Shade,
-    pub font: Shade,
-    pub label_background: Shade,
-    pub label_border: Shade,
+impl<T: PartialEq> Read<T> {
+    /// The first of `values`, mixed where another differs, or `None` for none.
+    pub fn of(mut values: impl Iterator<Item = T>) -> Option<Read<T>> {
+        let value = values.next()?;
+        let mixed = values.any(|v| v != value);
+        Some(Read { value, mixed })
+    }
 }
 
-impl Shades {
-    /// Over `cells`: the fill over those that take one and the gradient over those of them that
-    /// are no picture, whose fill and line are its background and border, as draw.io's panel has
-    /// them (`edit::set_styles` writes them so), and the line and the label's colours over every
-    /// cell.
-    pub fn of(cells: &[&accent_drawio::Cell]) -> Shades {
-        let styles: Vec<(Resolved, bool)> = (cells.iter())
-            .map(|c| (c.style.resolve(c.edge), c.takes_fill()))
-            .collect();
-        // The key each cell reads, by whether it takes a fill and is a picture.
-        let shade = |key: fn(bool, bool) -> Option<&'static str>| {
-            let mut colours = styles.iter().filter_map(|(style, fills)| {
-                Some(style.color(key(*fills, style.shape() == "image")?))
-            });
-            let Some(colour) = colours.next() else {
-                return Shade::default();
-            };
-            let mixed = colours.any(|c| c != colour);
-            Shade { colour, mixed }
-        };
-        Shades {
-            fill: shade(|fills, picture| match picture {
-                true => fills.then_some("imageBackground"),
-                false => fills.then_some("fillColor"),
-            }),
-            gradient: shade(|fills, picture| (fills && !picture).then_some("gradientColor")),
-            stroke: shade(|_, picture| match picture {
-                true => Some("imageBorder"),
-                false => Some("strokeColor"),
-            }),
-            font: shade(|_, _| Some("fontColor")),
-            label_background: shade(|_, _| Some("labelBackgroundColor")),
-            label_border: shade(|_, _| Some("labelBorderColor")),
-        }
+/// The selected cells as the rows read them, in the order selected.
+#[derive(Default)]
+pub struct Styles(pub Vec<Seen>);
+
+impl Styles {
+    pub fn of(cells: &[&accent_drawio::Cell]) -> Styles {
+        Styles(cells.iter().map(|c| Seen::of(c)).collect())
+    }
+
+    /// What `value` makes of each of `cells`.
+    pub fn read<T: PartialEq + Default>(
+        &self,
+        cells: Cells,
+        value: impl Fn(&Resolved) -> T,
+    ) -> Read<T> {
+        self.read_where(|c| c.is(cells).then(|| value(&c.style)))
+    }
+
+    /// What `value` makes of each cell it reads, a row's own few: a swimlane's divider, a flex
+    /// arrow's widths.
+    pub fn read_where<T: PartialEq + Default>(
+        &self,
+        value: impl Fn(&Seen) -> Option<T>,
+    ) -> Read<T> {
+        Read::of(self.0.iter().filter_map(value)).unwrap_or_default()
+    }
+}
+
+/// The key a picture's fill or line is written under, its background and its border, as draw.io's
+/// panel has them (`edit::set_styles` writes them so).
+fn picture_key(style: &Resolved, key: &'static str) -> &'static str {
+    match (style.shape() == "image", key) {
+        (true, "fillColor") => "imageBackground",
+        (true, "strokeColor") => "imageBorder",
+        _ => key,
     }
 }
 
 /// One change the pane asks for.
 pub enum Change {
-    /// Style keys on every selected cell, as one step.
-    Style(Vec<(&'static str, Option<String>)>),
-    /// Style keys on the selected arrows alone, as draw.io's arrow rows set them (`ss.edges`).
-    EdgeStyle(Vec<(&'static str, Option<String>)>),
+    /// Style keys on the selected cells of a kind, as one step.
+    Style(Cells, Vec<(&'static str, Option<String>)>),
+    /// draw.io's Bold, Italic or Underline, a bit of `fontStyle`, on or off on every selected
+    /// cell, its other bits as each cell has them.
+    FontStyle(u32, bool),
     /// The whole style string of the one selected cell.
     Raw(String),
     /// The one selected cell's style as its tool's Default Style, or the default cleared where
@@ -263,11 +303,11 @@ impl ColourRow {
     /// Show `shade`: its colour, or where the cells differ a hatched swatch with no colour and
     /// the tooltip Mixed, as GTK's check button shows an inconsistent state, the switch on since
     /// some cell has a colour (user decision 2026-11-18).
-    fn fill(&self, shade: Shade) {
-        let on = shade.colour.is_some() || shade.mixed;
+    fn fill(&self, shade: Read<Option<Color>>) {
+        let on = shade.value.is_some() || shade.mixed;
         self.switch.set_active(on);
         self.button
-            .set_rgba(&super::paint::rgba(shade.colour.unwrap_or(self.blank)));
+            .set_rgba(&super::paint::rgba(shade.value.unwrap_or(self.blank)));
         self.button.set_visible(on && !shade.mixed);
         // The keyboard stays on the row as a colour picked from Mixed takes the swatch's place.
         if self.mixed.is_focus() && !shade.mixed {
@@ -322,6 +362,135 @@ impl ColourRow {
     }
 }
 
+/// A row with a check button where a switch would do, since only a check button shows GTK's
+/// mixed state, which the HIG gives a setting of several items (Checkboxes; user decision
+/// 2026-11-19).
+pub(super) struct Check {
+    pub(super) row: adw::ActionRow,
+    check: gtk::CheckButton,
+}
+
+impl Check {
+    pub(super) fn new(title: &str) -> Check {
+        let check = gtk::CheckButton::builder()
+            .valign(gtk::Align::Center)
+            .build();
+        let row = adw::ActionRow::builder()
+            .title(title)
+            .activatable_widget(&check)
+            .build();
+        row.add_suffix(&check);
+        Check { row, check }
+    }
+
+    /// Show `read`, where the cells differ GTK's mixed state, off underneath it so that a click
+    /// turns it on for them all.
+    pub(super) fn fill(&self, read: Read<bool>) {
+        self.check.set_active(read.value && !read.mixed);
+        self.check.set_inconsistent(read.mixed);
+    }
+
+    /// Whether it is on, or mixed and so on for some cell.
+    pub(super) fn is_on(&self) -> bool {
+        self.check.is_active() || self.check.is_inconsistent()
+    }
+
+    /// Call `f` with whether it is on now each time it is flipped, from mixed too.
+    pub(super) fn connect(&self, f: impl Fn(bool) + 'static) {
+        self.check.connect_active_notify(move |check| {
+            check.set_inconsistent(false);
+            f(check.is_active())
+        });
+    }
+
+    /// What says it flipped, for the rows that show with it.
+    pub(super) fn notifier(&self) -> &glib::Object {
+        self.check.upcast_ref()
+    }
+}
+
+/// Tell a screen reader and the pointer that `widget` stands for cells that differ, or no
+/// longer.
+fn say_mixed(widget: &impl IsA<gtk::Widget>, mixed: bool) {
+    let widget = widget.upcast_ref::<gtk::Widget>();
+    widget.set_tooltip_text(mixed.then_some("Mixed"));
+    match mixed {
+        true => widget.update_property(&[gtk::accessible::Property::Description("Mixed")]),
+        false => widget.reset_property(gtk::AccessibleProperty::Description),
+    }
+}
+
+/// The first part of `root` that is a `T`.
+fn part<T: IsA<gtk::Widget>>(root: &impl IsA<gtk::Widget>) -> Option<T> {
+    let mut todo = vec![root.clone().upcast::<gtk::Widget>()];
+    while let Some(widget) = todo.pop() {
+        if let Ok(found) = widget.clone().downcast::<T>() {
+            return Some(found);
+        }
+        let mut child = widget.first_child();
+        while let Some(c) = child {
+            child = c.next_sibling();
+            todo.push(c);
+        }
+    }
+    None
+}
+
+/// Show `read` in a spin row: its value, or where the cells differ an empty field with a dash
+/// in it, which [`spin`] keeps empty until a number is stepped to or typed.
+fn show(row: &adw::SpinRow, read: Read<f64>) {
+    set_mixed(row, false);
+    row.set_value(read.value);
+    if read.mixed {
+        set_mixed(row, true);
+        row.set_text("");
+    }
+}
+
+/// Mark a spin row as standing for cells that differ, or no longer: GTK's inconsistent state on
+/// the row, a dash where its empty field would show nothing, and Mixed for a screen reader.
+fn set_mixed(row: &adw::SpinRow, mixed: bool) {
+    match mixed {
+        true => row.set_state_flags(gtk::StateFlags::INCONSISTENT, false),
+        false => row.unset_state_flags(gtk::StateFlags::INCONSISTENT),
+    }
+    if let Some(text) = part::<gtk::Text>(row) {
+        text.set_placeholder_text(mixed.then_some("—"));
+    }
+    if let Some(spin) = part::<gtk::SpinButton>(row) {
+        say_mixed(&spin, mixed);
+    }
+}
+
+/// Whether a spin row stands for cells that differ ([`show`]).
+fn mixed(row: &adw::SpinRow) -> bool {
+    row.state_flags().contains(gtk::StateFlags::INCONSISTENT)
+}
+
+/// The entry a combo row ends with while the cells differ ([`pick_shown`]).
+const MIXED: &str = "Mixed";
+
+/// Show `read` in a combo row: its entry, or where the cells differ an entry Mixed at the end of
+/// its list, as Nautilus's menus show `---`, since a combo row always has an entry picked. Mixed
+/// picked writes nothing, being none of the values the row's entries stand for.
+fn pick_shown(row: &adw::ComboRow, read: Read<Option<usize>>) {
+    let Some(list) = row.model().and_downcast::<gtk::StringList>() else {
+        return;
+    };
+    let last = list.n_items().saturating_sub(1);
+    let marked = list.string(last).as_deref() == Some(MIXED);
+    match (read.mixed, marked) {
+        (true, false) => list.append(MIXED),
+        (false, true) => list.remove(last),
+        _ => {}
+    }
+    row.set_selected(match read.mixed {
+        true => list.n_items() - 1,
+        false => listed(read.value),
+    });
+    say_mixed(row, read.mixed);
+}
+
 pub struct Props {
     root: gtk::ScrolledWindow,
     filling: Rc<Cell<bool>>,
@@ -349,12 +518,12 @@ pub struct Props {
     direction: adw::ComboRow,
     /// The fill's own opacity (`fillOpacity`), which leaves the line and the label as they are.
     fill_opacity: adw::SpinRow,
-    rounded: adw::SwitchRow,
+    rounded: Check,
     arc_size: adw::SpinRow,
     effects: effects::Effects,
     /// A swimlane's divider under its title (`swimlaneLine`).
-    divider: adw::SwitchRow,
-    shadow: adw::SwitchRow,
+    divider: Check,
+    shadow: Check,
     rotation: adw::SpinRow,
     flip: [gtk::Button; 2],
     /// Constrain Proportions (`aspect=fixed`).
@@ -410,9 +579,41 @@ fn combo(title: &str, labels: &[&str]) -> adw::ComboRow {
         .build()
 }
 
+/// A spin row, which while the cells differ ([`show`]) stays empty: the keyboard leaving it or a
+/// step would otherwise read the emptiness as 0 and write that to them all. A step or a number
+/// typed ends it, the number landing on every cell, even where it is the first one's own value,
+/// which the spin button takes for no change.
 fn spin(title: &str, range: (f64, f64, f64)) -> adw::SpinRow {
     let row = adw::SpinRow::with_range(range.0, range.1, range.2);
     row.set_title(title);
+    row.connect_output(|row| {
+        let empty = mixed(row);
+        if empty {
+            row.set_text("");
+        }
+        empty
+    });
+    row.connect_input(|row| {
+        if !mixed(row) {
+            return None;
+        }
+        let Ok(typed) = row.text().trim().parse::<f64>() else {
+            return Some(Ok(row.value()));
+        };
+        let range = row.adjustment();
+        let typed = typed.clamp(range.lower(), range.upper());
+        set_mixed(row, false);
+        if typed == row.value() {
+            row.notify("value");
+        }
+        Some(Ok(typed))
+    });
+    row.connect_value_notify(|row| {
+        if mixed(row) {
+            set_mixed(row, false);
+            row.set_value(row.value());
+        }
+    });
     row
 }
 
@@ -499,22 +700,22 @@ impl Props {
         let gradient = Rc::new(ColourRow::new("Gradient", Color::WHITE));
         let direction = combo("Gradient Direction", &DIRECTIONS.map(|(_, l)| l));
         let fill_opacity = spin("Fill Opacity", (0.0, 100.0, 5.0));
-        let rounded = adw::SwitchRow::builder().title("Rounded").build();
+        let rounded = Check::new("Rounded");
         let arc_size = coordinate("Arc Size", 0.0);
         let effects = effects::Effects::new();
-        let divider = adw::SwitchRow::builder().title("Divider").build();
-        let shadow = adw::SwitchRow::builder().title("Shadow").build();
+        let divider = Check::new("Divider");
+        let shadow = Check::new("Shadow");
         let rotation = spin("Rotation", (-180.0, 180.0, 1.0));
         shape.add(&fill.row);
         shape.add(&gradient.row);
         shape.add(&direction);
         shape.add(&fill_opacity);
-        shape.add(&rounded);
+        shape.add(&rounded.row);
         shape.add(&arc_size);
         effects.add_fixed(&shape);
-        shape.add(&divider);
-        shape.add(&effects.sketch);
-        shape.add(&shadow);
+        shape.add(&divider.row);
+        shape.add(&effects.sketch.row);
+        shape.add(&shadow.row);
         shape.add(&rotation);
         let flip = [
             icon_button("object-flip-horizontal-symbolic", "Flip Horizontally"),
@@ -656,12 +857,18 @@ impl Props {
                 }
             })
         };
-        colour(&self.fill, &self.filling, &send, "fillColor");
-        colour(&self.gradient, &self.filling, &send, "gradientColor");
+        colour(&self.fill, &self.filling, &send, Cells::Fills, "fillColor");
+        colour(
+            &self.gradient,
+            &self.filling,
+            &send,
+            Cells::Fills,
+            "gradientColor",
+        );
         let toggles: [&glib::Object; 3] = [
             self.fill.switch.upcast_ref(),
             self.gradient.switch.upcast_ref(),
-            self.rounded.upcast_ref(),
+            self.rounded.notifier(),
         ];
         for toggle in toggles {
             let me = Rc::downgrade(self);
@@ -679,24 +886,24 @@ impl Props {
             page_send(Change::PageAttr("background", value));
         });
 
-        let switch = |row: &adw::SwitchRow, key: &'static str, off: Option<&'static str>| {
-            let set = style(&send, key);
-            row.connect_active_notify(move |row| {
-                set(match row.is_active() {
+        let check = |row: &Check, cells: Cells, key: &'static str, off: Option<&'static str>| {
+            let set = style(&send, cells, key);
+            row.connect(move |on| {
+                set(match on {
                     true => Some("1".to_string()),
                     false => off.map(str::to_string),
                 })
             });
         };
-        switch(&self.rounded, "rounded", Some("0"));
-        switch(&self.divider, "swimlaneLine", Some("0"));
-        switch(&self.shadow, "shadow", None);
+        check(&self.rounded, Cells::Shapes, "rounded", Some("0"));
+        check(&self.divider, Cells::Shapes, "swimlaneLine", Some("0"));
+        check(&self.shadow, Cells::All, "shadow", None);
         self.spins(
             &send,
             &[
-                (&self.fill_opacity, "fillOpacity", Some(100.0), false),
-                (&self.arc_size, "arcSize", None, false),
-                (&self.rotation, "rotation", Some(0.0), false),
+                (&self.fill_opacity, "fillOpacity", Some(100.0), Cells::Fills),
+                (&self.arc_size, "arcSize", None, Cells::Shapes),
+                (&self.rotation, "rotation", Some(0.0), Cells::Shapes),
             ],
         );
         // Degrees typed into Rotation show on the canvas as they are typed, and land as the
@@ -709,7 +916,10 @@ impl Props {
             let Some(degrees) = typed(row) else { return };
             let send = rotation_send.clone();
             me.keep("rotation", move || {
-                send(Change::Style(vec![("rotation", rotation(degrees))]))
+                send(Change::Style(
+                    Cells::Shapes,
+                    vec![("rotation", rotation(degrees))],
+                ))
             });
             me.held(Placed::Turn(degrees));
         });
@@ -775,7 +985,7 @@ impl Props {
             });
         }
         self.ends.wire(self, send.clone());
-        let set = style(&send, "aspect");
+        let set = style(&send, Cells::Shapes, "aspect");
         self.aspect
             .connect_active_notify(move |row| set(row.is_active().then(|| "fixed".to_string())));
         for (button, across) in self.flip.iter().zip([true, false]) {
@@ -790,6 +1000,7 @@ impl Props {
         pick(
             &self.direction,
             &send,
+            Cells::Fills,
             "gradientDirection",
             DIRECTIONS.map(|(v, _)| v).to_vec(),
         );
@@ -840,17 +1051,16 @@ impl Props {
         row.add_controller(focus);
     }
 
-    /// Send each spin row's value as its key's once its burst settles, onto the arrows alone
-    /// where the row says so: spin rows step once per arrow press, and a burst of them is one
-    /// change. A default is where the key is left out, as draw.io leaves out an opacity of 100;
-    /// a key a named style can give (`spacingLeft`) or whose default depends on another
-    /// (`arcSize`) is always written.
+    /// Send each spin row's value as its key's once its burst settles, onto the cells the row
+    /// says: spin rows step once per arrow press, and a burst of them is one change. A default is
+    /// where the key is left out, as draw.io leaves out an opacity of 100; a key a named style can
+    /// give (`spacingLeft`) or whose default depends on another (`arcSize`) is always written.
     fn spins(
         self: &Rc<Self>,
         send: &Rc<dyn Fn(Change)>,
-        rows: &[(&adw::SpinRow, &'static str, Option<f64>, bool)],
+        rows: &[(&adw::SpinRow, &'static str, Option<f64>, Cells)],
     ) {
-        for &(row, key, default, edges) in rows {
+        for &(row, key, default, cells) in rows {
             let (me, send) = (Rc::downgrade(self), send.clone());
             row.connect_value_notify(move |row| {
                 let Some(me) = me.upgrade() else { return };
@@ -860,10 +1070,7 @@ impl Props {
                 let (value, send) = (row.value(), send.clone());
                 me.hold(key, move || {
                     let pairs = vec![(key, (Some(value) != default).then(|| number(value)))];
-                    send(match edges {
-                        true => Change::EdgeStyle(pairs),
-                        false => Change::Style(pairs),
-                    })
+                    send(Change::Style(cells, pairs))
                 });
                 if key == "rotation" {
                     me.held(Placed::Turn(value));
@@ -889,7 +1096,7 @@ impl Props {
             Target::Cells {
                 style,
                 raw,
-                shades,
+                styles,
                 count,
                 vertices,
                 edges,
@@ -917,53 +1124,68 @@ impl Props {
                         _ => paste.set_visible(!geometry.is_some_and(|(_, pinned)| pinned)),
                     }
                 }
-                // A picture's fill and line are its background and border ([`Shades::of`]), with
-                // no gradient.
-                let picture = style.shape() == "image";
                 // An arrow's line is drawn from the same keys as a shape's outline, so every cell
                 // shows the line's colour, width and dash; the fill only where a cell takes one,
                 // the corners and the turn for shapes (an arrow's corners are its line style),
                 // the route and the heads for arrows. draw.io offers a shape's perimeter only
-                // with shapes alone selected, and a swimlane's divider with one among them.
+                // with shapes alone selected, and a swimlane's divider with one among them. Each
+                // row reads the cells it writes, and shows them mixed where they differ (user
+                // decision 2026-11-19).
                 self.fill.row.set_visible(*fills);
                 self.fill_opacity.set_visible(*fills);
-                self.takes_gradient.set(*fills && !picture);
-                self.rounded.set_visible(*vertices);
-                self.divider.set_visible(*swimlane);
+                // A picture's fill and line are its background and border, with no gradient.
+                let gradients = |c: &Seen| c.is(Cells::Fills) && c.style.shape() != "image";
+                self.takes_gradient.set(styles.0.iter().any(gradients));
+                self.rounded.row.set_visible(*vertices);
+                self.divider.row.set_visible(*swimlane);
                 self.rotation.set_visible(*vertices);
-                self.line.fill(style, shades, *vertices, *edges);
-                self.text.fill(style, shades, *vertices);
-                self.fill.fill(shades.fill);
-                self.gradient.fill(shades.gradient);
-                self.fill_opacity.set_value(style.num("fillOpacity", 100.0));
-                self.rounded.set_active(style.flag("rounded", false));
-                // The corner as the first cell's shape reads `arcSize`: a folder's a share of its
-                // shorter side, 0.1 when the style gives none and stepped by hundredths, or with
-                // `absoluteArcSize` its radius (`FolderShape`); any other's mxGraph's, 15 % of the
-                // shorter side (`RECTANGLE_ROUNDING_FACTOR`) or 20 units (`LINE_ARCSIZE`). The
-                // digits take the hundredth of a step the row shows (`coordinate`), which the
-                // spin button would otherwise refuse as text.
-                let fixed = style.flag("absoluteArcSize", false);
-                let (arc, step, digits) = match (style.shape() == "folder", fixed) {
-                    (true, false) => (0.1, 0.01, 4),
-                    (true, true) => (0.1, 1.0, 2),
-                    (false, true) => (20.0, 1.0, 2),
-                    (false, false) => (15.0, 1.0, 2),
-                };
+                self.line.fill(style, styles, *vertices, *edges);
+                self.text.fill(styles, *vertices);
+                self.fill
+                    .fill(styles.read(Cells::Fills, |s| s.color(picture_key(s, "fillColor"))));
+                self.gradient.fill(
+                    styles.read_where(|c| gradients(c).then(|| c.style.color("gradientColor"))),
+                );
+                show(
+                    &self.fill_opacity,
+                    styles.read(Cells::Fills, |s| s.num("fillOpacity", 100.0)),
+                );
+                self.rounded
+                    .fill(styles.read(Cells::Shapes, |s| s.flag("rounded", false)));
+                // The digits take the hundredth of a step the row shows (`coordinate`), which the
+                // spin button would otherwise refuse as text; the first cell's shape decides.
+                let (_, step, digits) = arc_of(style);
                 let steps = self.arc_size.adjustment();
                 steps.set_step_increment(step);
                 steps.set_page_increment(10.0 * step);
                 self.arc_size.set_digits(digits);
-                self.arc_size.set_value(style.num("arcSize", arc));
-                self.effects.fill(style, effects);
-                self.divider.set_active(style.flag("swimlaneLine", true));
-                self.shadow.set_active(style.flag("shadow", false));
+                show(
+                    &self.arc_size,
+                    styles.read(Cells::Shapes, |s| s.num("arcSize", arc_of(s).0)),
+                );
+                self.effects.fill(effects);
+                self.divider.fill(styles.read_where(|c| {
+                    let lane = c.vertex && c.style.shape() == "swimlane";
+                    lane.then(|| c.style.flag("swimlaneLine", true))
+                }));
+                self.shadow
+                    .fill(styles.read(Cells::All, |s| s.flag("shadow", false)));
                 // draw.io keeps any turn it was given; the row shows it within a half turn.
-                let turn = (style.num("rotation", 0.0) + 180.0).rem_euclid(360.0) - 180.0;
-                self.rotation.set_value(turn);
-                let direction = style.get("gradientDirection").unwrap_or("south");
-                self.direction
-                    .set_selected(found(&DIRECTIONS.map(|(v, _)| v), Some(direction)));
+                show(
+                    &self.rotation,
+                    styles.read(Cells::Shapes, |s| {
+                        (s.num("rotation", 0.0) + 180.0).rem_euclid(360.0) - 180.0
+                    }),
+                );
+                let directions = DIRECTIONS.map(|(v, _)| v);
+                pick_shown(
+                    &self.direction,
+                    styles.read_where(|c| {
+                        let direction = c.style.get("gradientDirection").unwrap_or("south");
+                        let at = directions.iter().position(|d| *d == direction);
+                        gradients(c).then_some(at)
+                    }),
+                );
                 // A style string is one cell's: with several selected there is none to show.
                 self.raw.set_visible(*count == 1);
                 self.raw.set_text(if *count == 1 { raw } else { "" });
@@ -995,8 +1217,8 @@ impl Props {
                 self.size.set_visible(false);
                 self.default_style.set_visible(false);
                 self.page_name.set_text(name);
-                self.background.fill(Shade {
-                    colour: *background,
+                self.background.fill(Read {
+                    value: *background,
                     mixed: false,
                 });
                 self.page_width.set_value(size.0);
@@ -1096,9 +1318,25 @@ impl Props {
         self.gradient.row.set_visible(gradient);
         self.direction
             .set_visible(gradient && self.gradient.switch.is_active());
-        let rounded = self.rounded.is_visible() && self.rounded.is_active();
+        let rounded = self.rounded.row.is_visible() && self.rounded.is_on();
         self.arc_size.set_visible(rounded);
         self.effects.sync(rounded);
+    }
+}
+
+/// The `arcSize` a shape is drawn with where its style gives none, and the step and the digits
+/// its row takes: a folder's is a share of its shorter side, 0.1, stepped by hundredths, or with
+/// `absoluteArcSize` its radius (`FolderShape`); any other's mxGraph's, 15 % of the shorter side
+/// (`RECTANGLE_ROUNDING_FACTOR`) or 20 units (`LINE_ARCSIZE`).
+fn arc_of(style: &Resolved) -> (f64, f64, u32) {
+    match (
+        style.shape() == "folder",
+        style.flag("absoluteArcSize", false),
+    ) {
+        (true, false) => (0.1, 0.01, 4),
+        (true, true) => (0.1, 1.0, 2),
+        (false, true) => (20.0, 1.0, 2),
+        (false, false) => (15.0, 1.0, 2),
     }
 }
 
@@ -1151,31 +1389,37 @@ fn hex(c: gtk::gdk::RGBA) -> String {
     Color::rgb(r, g, b).hex()
 }
 
-/// What sets `key` on every selected cell, as one step.
-fn style(send: &Rc<dyn Fn(Change)>, key: &'static str) -> impl Fn(Option<String>) + 'static {
+/// What sets `key` on the selected `cells`, as one step.
+fn style(
+    send: &Rc<dyn Fn(Change)>,
+    cells: Cells,
+    key: &'static str,
+) -> impl Fn(Option<String>) + 'static {
     let send = send.clone();
-    move |value: Option<String>| send(Change::Style(vec![(key, value)]))
+    move |value: Option<String>| send(Change::Style(cells, vec![(key, value)]))
 }
 
-/// Set `key` to what colour row `row` says whenever either half changes.
+/// Set `key` on `cells` to what colour row `row` says whenever either half changes.
 fn colour(
     row: &Rc<ColourRow>,
     filling: &Rc<Cell<bool>>,
     send: &Rc<dyn Fn(Change)>,
+    cells: Cells,
     key: &'static str,
 ) {
-    let set = style(send, key);
+    let set = style(send, cells, key);
     row.connect(filling, move |value| set(Some(value)));
 }
 
-/// Set `key` to the value of the entry picked in `row`, from `values`.
+/// Set `key` on `cells` to the value of the entry picked in `row`, from `values`.
 fn pick(
     row: &adw::ComboRow,
     send: &Rc<dyn Fn(Change)>,
+    cells: Cells,
     key: &'static str,
     values: Vec<&'static str>,
 ) {
-    let set = style(send, key);
+    let set = style(send, cells, key);
     row.connect_selected_notify(move |row| {
         if let Some(v) = values.get(row.selected() as usize) {
             set(Some(v.to_string()));
@@ -1195,11 +1439,6 @@ fn choose(
             send(change);
         }
     });
-}
-
-/// A combo row's position for value `v` among `values`, none when it is not one of them.
-fn found(values: &[&str], v: Option<&str>) -> u32 {
-    listed(v.and_then(|v| values.iter().position(|x| *x == v)))
 }
 
 #[cfg(test)]

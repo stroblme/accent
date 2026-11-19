@@ -282,6 +282,18 @@ impl Editor {
         self.edit(page, |p, _| set_styles(p, ids, pairs))
     }
 
+    /// [`set_style_flags`] on page `page`, as one step.
+    pub fn set_style_flags(
+        &mut self,
+        page: usize,
+        ids: &[CellId],
+        key: &str,
+        flags: u32,
+        on: bool,
+    ) -> Result<(), Error> {
+        self.edit(page, |p, _| set_style_flags(p, ids, key, flags, on))
+    }
+
     /// [`flip`] on page `page`, as one step.
     pub fn flip(
         &mut self,
@@ -1345,6 +1357,28 @@ pub fn set_styles(
             };
             cell.style.set(key, *value);
         }
+    }
+    Ok(())
+}
+
+/// Set (`on`) or clear the bits `flags` of the number `key` on each of `ids`, its other bits as
+/// that cell has them, as mxGraph's `setCellStyleFlags` does for draw.io's Bold, Italic and
+/// Underline.
+pub fn set_style_flags(
+    page: &mut Page,
+    ids: &[CellId],
+    key: &str,
+    flags: u32,
+    on: bool,
+) -> Result<(), Error> {
+    for id in ids {
+        let cell = cell_mut(page, id)?;
+        let bits = cell.style.resolve(cell.edge).num(key, 0.0) as u32;
+        let bits = match on {
+            true => bits | flags,
+            false => bits & !flags,
+        };
+        cell.style.set(key, Some(&bits.to_string()));
     }
     Ok(())
 }

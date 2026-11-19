@@ -1600,6 +1600,11 @@ fn install_chrome_css() {
                  color-mix(in srgb, var(--view-fg-color) 40%, transparent) 0, \
                  color-mix(in srgb, var(--view-fg-color) 40%, transparent) 1.5px, \
                  transparent 1.5px, transparent 5px); }} \
+             button.toggle:indeterminate {{ background-image: \
+               repeating-linear-gradient(-45deg, \
+                 color-mix(in srgb, currentColor 25%, transparent) 0, \
+                 color-mix(in srgb, currentColor 25%, transparent) 1.5px, \
+                 transparent 1.5px, transparent 5px); }} \
              .accent-section > box > title {{ min-height: 36px; padding: 0 6px; margin: 2px 6px; \
                border-radius: 9px; }} \
              .accent-section > box > title:hover {{ \

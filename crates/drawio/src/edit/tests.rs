@@ -209,6 +209,30 @@ fn a_pasted_style_gives_its_look_and_keeps_the_shape() {
 }
 
 #[test]
+fn bold_sets_its_bit_on_each_cell_and_keeps_the_others() {
+    let cell = |id, style| Cell::new_vertex(id, "1", Rect::default(), style, "");
+    let mut e = open([cell("i", "fontStyle=2;"), cell("p", "html=1;")]);
+    let bits = |e: &Editor| {
+        ["i", "p"].map(|id| {
+            e.page(0)
+                .unwrap()
+                .cell(id)
+                .unwrap()
+                .style
+                .get("fontStyle")
+                .map(str::to_string)
+        })
+    };
+    e.set_style_flags(0, &list(&["i", "p"]), "fontStyle", 1, true)
+        .unwrap();
+    assert_eq!(bits(&e), [Some("3".into()), Some("1".into())]);
+    e.set_style_flags(0, &list(&["i", "p"]), "fontStyle", 1, false)
+        .unwrap();
+    assert_eq!(bits(&e), [Some("2".into()), Some("0".into())]);
+    assert_eq!(e.undo.len(), 2, "one step each");
+}
+
+#[test]
 fn fixed_corners_keep_each_shape_s_corner_and_then_share_one_size() {
     let cell = |id, w, h, style| Cell::new_vertex(id, "1", Rect::new(0.0, 0.0, w, h), style, "");
     let mut e = open([

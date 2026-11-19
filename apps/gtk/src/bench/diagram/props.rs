@@ -59,15 +59,19 @@ pub(super) fn props(app: &Rc<App>, rel: &str) {
         // Mixed, in the colour button's place and as large, while a shape's and an arrow's fill is
         // the shape's alone (user decision 2026-11-18). A colour picked there reaches every cell,
         // the first one's own colour too, as the dialog hands it over, and one Undo takes it back.
-        let swatch_row = |title: &str| {
+        let titled = |title: &str| {
             find_widget(&pane, &|w| {
                 w.downcast_ref::<adw::PreferencesRow>()
                     .is_some_and(|r| r.title() == title)
             })
         };
+        let check_of = |title: &str| {
+            find_widget(&titled(title)?, &|w| w.is::<gtk::CheckButton>())
+                .and_downcast::<gtk::CheckButton>()
+        };
         let swatches = || {
             ["Fill", "Line Colour", "Font Colour"].map(|title| {
-                let row = swatch_row(title)?;
+                let row = titled(title)?;
                 let colour = find_widget(&row, &|w| w.is::<gtk::ColorDialogButton>())?;
                 let mixed = find_widget(&row, &|w| w.tooltip_text().as_deref() == Some("Mixed"))?;
                 // The size of the swatch shown, GTK's or the hatched one, the same either way.
@@ -109,7 +113,7 @@ pub(super) fn props(app: &Rc<App>, rel: &str) {
             settings.value("custom-colors").to_string()
         };
         let before = custom();
-        let opener = swatch_row("Fill").and_then(|row| {
+        let opener = titled("Fill").and_then(|row| {
             find_widget(&row, &|w| {
                 w.is::<gtk::Button>() && w.has_css_class("color") && w.is_mapped()
             })
@@ -146,6 +150,159 @@ pub(super) fn props(app: &Rc<App>, rel: &str) {
         );
         tab.select(vec!["a".to_string(), "e".to_string()]);
         println!("bench diagram props swatches a+e {:?}", swatches());
+
+        // The other rows show cells that differ mixed, the GNOME way: a spin row empty with a
+        // dash, a check GTK's mixed state, a menu nothing picked, a toggle out and hatched (user
+        // decision 2026-11-19). b given a size, a dash and Bold Italic of its own, the keyboard
+        // passing through Font Size writes nothing; the size a has typed there, a click on
+        // Rounded, Dotted picked and a click on Bold each reach both, Bold keeping b's Italic, as
+        // one step one Undo takes back.
+        let both = vec!["a".to_string(), "b".to_string()];
+        let b = vec!["b".to_string()];
+        let own = [
+            ("fontSize", Some("16")),
+            ("dashed", Some("1")),
+            ("fontStyle", Some("3")),
+        ];
+        tab.edit(|e, page| e.set_styles(page, &b, &own));
+        tab.select(both.clone());
+        let flagged = |w: &gtk::Widget| w.state_flags().contains(gtk::StateFlags::INCONSISTENT);
+        let size = || titled("Font Size").and_downcast::<adw::SpinRow>();
+        let rows_shown = || {
+            let size = size().map(|r| (r.text().to_string(), flagged(r.upcast_ref())));
+            let rounded = check_of("Rounded").map(|c| (c.is_active(), c.is_inconsistent()));
+            let pattern = titled("Pattern").and_downcast::<adw::ComboRow>();
+            let pattern = pattern.and_then(|c| c.selected_item());
+            let pattern = pattern
+                .and_downcast::<gtk::StringObject>()
+                .map(|s| s.string());
+            let bold = find_widget(&pane, &|w| {
+                w.is::<gtk::ToggleButton>() && w.tooltip_text().as_deref() == Some("Bold")
+            });
+            let bold = bold.map(|b| flagged(&b));
+            format!("size={size:?} rounded={rounded:?} pattern={pattern:?} bold={bold:?}")
+        };
+        let keys = |key: &str| {
+            let file = tab.file();
+            let value = |id| file.pages[0].cell(id)?.style.get(key).map(str::to_string);
+            ["a", "b", "e"].map(value)
+        };
+        println!("bench diagram props mixed rows {}", rows_shown());
+        if let (Ok(path), Some(content)) = (std::env::var("ACCENT_BENCH_DIAGRAM_SHOT"), &content) {
+            use accent_core::config::Theme;
+            if let Some(spacing) = titled("Spacing").and_downcast::<adw::ExpanderRow>() {
+                spacing.set_expanded(true);
+            }
+            for (name, theme) in [("light", Theme::Light), ("dark", Theme::Dark)] {
+                crate::theme::apply(theme);
+                glib::timeout_future(Duration::from_millis(400)).await;
+                let path = Path::new(&path).with_extension(format!("rows-{name}.png"));
+                println!(
+                    "bench diagram props shot rows-{name} {}",
+                    shoot(content, &path)
+                );
+            }
+            crate::theme::apply(Theme::Light);
+            if let Some(spacing) = titled("Spacing").and_downcast::<adw::ExpanderRow>() {
+                spacing.set_expanded(false);
+            }
+        }
+        let page = || tab.file().pages[0].clone();
+        let untouched = page();
+        // Font Size's field, brought into the pane's view, on the screen.
+        let field = size().and_then(|row| {
+            let scroller = row.ancestor(gtk::ScrolledWindow::static_type())?;
+            let scroller = scroller.downcast_ref::<gtk::ScrolledWindow>()?;
+            let top = row.compute_point(&scroller.child()?, &graphene::Point::zero())?;
+            let scroll = scroller.vadjustment();
+            scroll.set_value(scroll.value() + f64::from(top.y()) - 100.0);
+            find_widget(row.upcast_ref(), &|w| w.is::<gtk::Text>())
+        });
+        glib::timeout_future(Duration::from_millis(300)).await;
+        if let Some(at) = field.and_then(|text| middle_on_screen(&app, &text)) {
+            super::super::git::xtest(&format!("move {at}; focus; down; up; key Tab")).await;
+            glib::timeout_future(Duration::from_millis(600)).await;
+            println!(
+                "bench diagram props mixed passed unchanged={} {}",
+                page() == untouched,
+                rows_shown()
+            );
+            super::super::git::xtest(&format!(
+                "move {at}; down; up; key ctrl+a; type 12; key Return"
+            ))
+            .await;
+            glib::timeout_future(Duration::from_millis(600)).await;
+            println!(
+                "bench diagram props mixed typed fontSize={:?}",
+                keys("fontSize")
+            );
+            tab.undo();
+            println!(
+                "bench diagram props mixed typed undone={}",
+                page() == untouched
+            );
+        }
+        tab.key_target().grab_focus();
+        if let Some(rounded) = check_of("Rounded") {
+            rounded.activate();
+        }
+        println!(
+            "bench diagram props mixed checked rounded={:?}",
+            keys("rounded")
+        );
+        tab.undo();
+        println!(
+            "bench diagram props mixed checked undone={}",
+            page() == untouched
+        );
+        if let Some(combo) = titled("Pattern").and_downcast::<adw::ComboRow>() {
+            combo.set_selected(5);
+        }
+        println!(
+            "bench diagram props mixed picked dashPattern={:?}",
+            keys("dashPattern")
+        );
+        tab.undo();
+        println!(
+            "bench diagram props mixed picked undone={}",
+            page() == untouched
+        );
+        let bold = find_widget(&pane, &|w| {
+            w.is::<gtk::ToggleButton>() && w.tooltip_text().as_deref() == Some("Bold")
+        });
+        if let Some(bold) = bold.and_downcast::<gtk::ToggleButton>() {
+            bold.emit_clicked();
+        }
+        println!(
+            "bench diagram props mixed bold fontStyle={:?}",
+            keys("fontStyle")
+        );
+        tab.undo();
+        println!(
+            "bench diagram props mixed bold undone={}",
+            page() == untouched
+        );
+        // A row reads and writes the cells it applies to: Rounded a's alone beside the arrow e,
+        // whose `rounded` is its Line Style's.
+        tab.select(vec!["a".to_string(), "e".to_string()]);
+        let rounded = || check_of("Rounded").map(|c| (c.is_active(), c.is_inconsistent()));
+        let before = rounded();
+        for _ in 0..2 {
+            if let Some(check) = check_of("Rounded") {
+                check.activate();
+            }
+        }
+        println!(
+            "bench diagram props mixed shapes shown={before:?} rounded={:?}",
+            keys("rounded")
+        );
+        tab.undo();
+        tab.undo();
+        tab.undo();
+        println!(
+            "bench diagram props mixed done b={:?}",
+            tab.file().pages[0].cell("b").map(|c| c.style.to_string())
+        );
 
         tab.select(vec!["a".to_string()]);
         println!("bench diagram props a rows={:?}", rows());
@@ -522,7 +679,7 @@ pub(super) fn props(app: &Rc<App>, rel: &str) {
         tab.select(vec!["a".to_string()]);
         choose("Font", "Georgia");
         choose("Position", "Top");
-        if let Some(wrap) = row("Word Wrap").and_downcast::<adw::SwitchRow>() {
+        if let Some(wrap) = check_of("Word Wrap") {
             wrap.set_active(false);
         }
         if let Some(border) = switch_of("Label Border") {
@@ -613,7 +770,7 @@ pub(super) fn props(app: &Rc<App>, rel: &str) {
         set("Arc Size", 30.0);
         set("Text Opacity", 60.0);
         set("Top", 5.0);
-        if let Some(vertical) = row("Vertical Text").and_downcast::<adw::SwitchRow>() {
+        if let Some(vertical) = check_of("Vertical Text") {
             vertical.set_active(true);
         }
         let ids = vec!["a".to_string()];
@@ -630,7 +787,7 @@ pub(super) fn props(app: &Rc<App>, rel: &str) {
         pane_shot("shape");
         // Fixed Corner Size writes the corner a is drawn with as a size of its own, and back.
         for on in [true, false] {
-            if let Some(fixed) = row("Fixed Corner Size").and_downcast::<adw::SwitchRow>() {
+            if let Some(fixed) = check_of("Fixed Corner Size") {
                 fixed.set_active(on);
             }
             let arc = row("Arc Size").and_downcast::<adw::SpinRow>();
@@ -664,7 +821,7 @@ pub(super) fn props(app: &Rc<App>, rel: &str) {
             style(&folder)
         );
         for on in [true, false] {
-            if let Some(fixed) = row("Fixed Corner Size").and_downcast::<adw::SwitchRow>() {
+            if let Some(fixed) = check_of("Fixed Corner Size") {
                 fixed.set_active(on);
             }
             println!(
@@ -678,7 +835,7 @@ pub(super) fn props(app: &Rc<App>, rel: &str) {
         let ids = vec![folder.clone()];
         let fixed = [("absoluteArcSize", Some("1")), ("arcSize", Some("6.5"))];
         tab.edit(|e, page| e.set_styles(page, &ids, &fixed));
-        if let Some(fixed) = row("Fixed Corner Size").and_downcast::<adw::SwitchRow>() {
+        if let Some(fixed) = check_of("Fixed Corner Size") {
             fixed.set_active(false);
         }
         println!(
@@ -702,7 +859,7 @@ pub(super) fn props(app: &Rc<App>, rel: &str) {
         tab.select(vec!["a".to_string()]);
         // Sketch writes draw.io's comic drawing onto a and takes it, and `comic`, off again.
         for on in [true, false] {
-            if let Some(sketch) = row("Sketch").and_downcast::<adw::SwitchRow>() {
+            if let Some(sketch) = check_of("Sketch") {
                 sketch.set_active(on);
             }
             println!("bench diagram props sketch on={on} a={:?}", style("a"));
@@ -875,7 +1032,7 @@ pub(super) fn props(app: &Rc<App>, rel: &str) {
         );
         tab.select(vec![lane.clone()]);
         println!("bench diagram props lane shown={:?}", showing());
-        if let Some(divider) = row("Divider").and_downcast::<adw::SwitchRow>() {
+        if let Some(divider) = check_of("Divider") {
             divider.set_active(false);
         }
         glib::timeout_future(Duration::from_millis(400)).await;
@@ -962,7 +1119,7 @@ pub(super) fn props(app: &Rc<App>, rel: &str) {
         let hexagon = tab.file().pages[0].cells.last().map(|c| c.id.clone());
         tab.select(hexagon.iter().cloned().collect());
         for on in [true, false] {
-            if let Some(sized) = row("Fixed Size").and_downcast::<adw::SwitchRow>() {
+            if let Some(sized) = check_of("Fixed Size") {
                 sized.set_active(on);
             }
             println!(

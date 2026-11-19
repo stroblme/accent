@@ -7,7 +7,7 @@ use accent_drawio::CellId;
 use adw::prelude::*;
 use gtk::glib;
 
-use super::{Change, Clip, Placed, Shades, Target, effects, ends, number};
+use super::{Change, Clip, Placed, Seen, Styles, Target, effects, ends, number};
 use crate::diagram::view::Edit;
 use crate::diagram::{DiagramTab, Tool};
 
@@ -61,7 +61,7 @@ impl DiagramTab {
                 Some(first) => Target::Cells {
                     style: first.style.resolve(first.edge),
                     raw: first.style.to_string(),
-                    shades: Shades::of(&cells),
+                    styles: Styles::of(&cells),
                     count: cells.len(),
                     vertices: cells.iter().any(|c| c.vertex),
                     edges: cells.iter().any(|c| c.edge),
@@ -98,23 +98,26 @@ impl DiagramTab {
         self.view.show_held(None);
         let ids = self.selection();
         match change {
-            Change::Style(pairs) if !ids.is_empty() => {
-                let pairs: Vec<(&str, Option<&str>)> =
-                    pairs.iter().map(|(k, v)| (*k, v.as_deref())).collect();
-                self.edit(|e, page| e.set_styles(page, &ids, &pairs));
-            }
-            Change::EdgeStyle(pairs) => {
-                let edges: Vec<CellId> = {
+            // Onto the cells the row reads, a shape's rows leaving an arrow alone and an arrow's
+            // a shape.
+            Change::Style(cells, pairs) => {
+                let ids: Vec<CellId> = {
                     let editor = self.editor.borrow();
                     let page = editor.page(self.page_index.get()).ok();
-                    let edge = |id: &CellId| page.and_then(|p| p.cell(id)).is_some_and(|c| c.edge);
-                    ids.into_iter().filter(edge).collect()
+                    let one = |id: &CellId| {
+                        let cell = page.and_then(|p| p.cell(id));
+                        cell.is_some_and(|c| Seen::of(c).is(cells))
+                    };
+                    ids.into_iter().filter(one).collect()
                 };
                 let pairs: Vec<(&str, Option<&str>)> =
                     pairs.iter().map(|(k, v)| (*k, v.as_deref())).collect();
-                if !edges.is_empty() {
-                    self.edit(|e, page| e.set_styles(page, &edges, &pairs));
+                if !ids.is_empty() {
+                    self.edit(|e, page| e.set_styles(page, &ids, &pairs));
                 }
+            }
+            Change::FontStyle(bit, on) if !ids.is_empty() => {
+                self.edit(|e, page| e.set_style_flags(page, &ids, "fontStyle", bit, on))
             }
             Change::Raw(style) => {
                 if let [id] = ids.as_slice() {

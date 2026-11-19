@@ -9,7 +9,8 @@ use accent_drawio::{Color, Resolved};
 use adw::prelude::*;
 
 use super::{
-    Change, ColourRow, Props, Shades, choose, colour, combo, entry_row, listed, owned, spin,
+    Cells, Change, ColourRow, Props, Read, Seen, Styles, choose, colour, combo, entry_row, owned,
+    pick_shown, picture_key, show, spin,
 };
 
 /// draw.io's arrow heads (`Format.addLineMarkerItems`): the style value, whether the head is
@@ -233,27 +234,43 @@ impl Line {
 
     /// Send each row's change; `send` drops what the pane's own filling sets.
     pub(super) fn wire(&self, props: &Rc<Props>, send: Rc<dyn Fn(Change)>) {
-        colour(&self.stroke, &props.filling, &send, "strokeColor");
+        colour(
+            &self.stroke,
+            &props.filling,
+            &send,
+            Cells::All,
+            "strokeColor",
+        );
         // The last ones are an arrow's alone, at mxGraph's defaults: 6 a head's size
         // (`mxConstants.DEFAULT_MARKERSIZE`), 10 a flex arrow's band and 20 its heads' width.
         props.spins(
             &send,
             &[
-                (&self.opacity, "strokeOpacity", Some(100.0), false),
-                (&self.stroke_width, "strokeWidth", None, false),
-                (&self.perimeter, "perimeterSpacing", Some(0.0), false),
-                (&self.start_size, "startSize", Some(6.0), true),
-                (&self.end_size, "endSize", Some(6.0), true),
+                (&self.opacity, "strokeOpacity", Some(100.0), Cells::All),
+                (&self.stroke_width, "strokeWidth", None, Cells::All),
+                (
+                    &self.perimeter,
+                    "perimeterSpacing",
+                    Some(0.0),
+                    Cells::Shapes,
+                ),
+                (&self.start_size, "startSize", Some(6.0), Cells::Arrows),
+                (&self.end_size, "endSize", Some(6.0), Cells::Arrows),
                 (
                     &self.start_spacing,
                     "sourcePerimeterSpacing",
                     Some(0.0),
-                    true,
+                    Cells::Arrows,
                 ),
-                (&self.end_spacing, "targetPerimeterSpacing", Some(0.0), true),
-                (&self.arrow_width, "width", Some(10.0), true),
-                (&self.start_width, "startWidth", Some(20.0), true),
-                (&self.end_width, "endWidth", Some(20.0), true),
+                (
+                    &self.end_spacing,
+                    "targetPerimeterSpacing",
+                    Some(0.0),
+                    Cells::Arrows,
+                ),
+                (&self.arrow_width, "width", Some(10.0), Cells::Arrows),
+                (&self.start_width, "startWidth", Some(20.0), Cells::Arrows),
+                (&self.end_width, "endWidth", Some(20.0), Cells::Arrows),
             ],
         );
         choose(
@@ -262,7 +279,7 @@ impl Line {
             Box::new(|i| {
                 let (dashed, pattern, _) = PATTERNS.get(i)?;
                 let pairs = [("dashed", *dashed), ("dashPattern", *pattern)];
-                Some(Change::Style(owned(&pairs)))
+                Some(Change::Style(Cells::All, owned(&pairs)))
             }),
         );
         // Custom writes nothing until its numbers are applied, as draw.io's prompt.
@@ -279,10 +296,10 @@ impl Line {
         props.typed(&self.dash_pattern, "dash pattern", move |text| {
             let numbers = text.split_whitespace().collect::<Vec<_>>().join(" ");
             let pattern = (!numbers.is_empty()).then_some(numbers);
-            dash_send(Change::Style(vec![
-                ("dashed", Some("1".to_string())),
-                ("dashPattern", pattern),
-            ]))
+            dash_send(Change::Style(
+                Cells::All,
+                vec![("dashed", Some("1".to_string())), ("dashPattern", pattern)],
+            ))
         });
         for (row, start) in [(&self.start, true), (&self.end, false)] {
             let [arrow, fill, _] = head_keys(start);
@@ -300,7 +317,7 @@ impl Line {
                             owned(&[(arrow, Some(*kind)), (fill, Some(filled))])
                         }
                     };
-                    Some(Change::EdgeStyle(pairs))
+                    Some(Change::Style(Cells::Arrows, pairs))
                 }),
             );
         }
@@ -310,7 +327,8 @@ impl Line {
             Box::new(|i| {
                 let (_, pairs) = WAYPOINTS.get(i)?;
                 let clear = [("noEdgeStyle", None), ("libavoidRouting", None)];
-                Some(Change::EdgeStyle(owned(&[*pairs, &clear].concat())))
+                let pairs = owned(&[*pairs, &clear].concat());
+                Some(Change::Style(Cells::Arrows, pairs))
             }),
         );
         choose(
@@ -319,14 +337,15 @@ impl Line {
             Box::new(|i| {
                 let (rounded, curved, _) = LINE_STYLES.get(i)?;
                 let pairs = [("rounded", Some(*rounded)), ("curved", Some(*curved))];
-                Some(Change::EdgeStyle(owned(&pairs)))
+                Some(Change::Style(Cells::Arrows, owned(&pairs)))
             }),
         );
     }
 
-    /// Show the first cell's `style`, the line's colour as `shades` has it, the route and the
-    /// heads where `edges` are selected and the perimeter where `vertices` are alone.
-    pub(super) fn fill(&self, style: &Resolved, shades: &Shades, vertices: bool, edges: bool) {
+    /// Show each row over the cells it reads in `styles`, the route and the heads where `edges`
+    /// are selected and the perimeter where `vertices` are alone, the first cell's `style`
+    /// deciding whether the heads are a flex arrow's.
+    pub(super) fn fill(&self, style: &Resolved, styles: &Styles, vertices: bool, edges: bool) {
         self.perimeter.set_visible(vertices && !edges);
         let arrow: [&gtk::Widget; 8] = [
             self.waypoints.upcast_ref(),
@@ -347,67 +366,135 @@ impl Line {
             row.set_visible(flex);
         }
         if self.flex.replace(flex) != flex {
-            let heads = match flex {
-                true => gtk::StringList::new(&FLEX_HEADS),
-                false => gtk::StringList::new(&HEADS.map(|(.., l)| l)),
-            };
+            // A list each, since a row marks its own Mixed in it.
             for row in [&self.start, &self.end] {
+                let heads = match flex {
+                    true => gtk::StringList::new(&FLEX_HEADS),
+                    false => gtk::StringList::new(&HEADS.map(|(.., l)| l)),
+                };
                 row.set_model(Some(&heads));
             }
         }
-        self.arrow_width.set_value(style.num("width", 10.0));
-        self.start_width.set_value(style.num("startWidth", 20.0));
-        self.end_width.set_value(style.num("endWidth", 20.0));
-        self.perimeter.set_value(style.num("perimeterSpacing", 0.0));
-        self.start_spacing
-            .set_value(style.num("sourcePerimeterSpacing", 0.0));
-        self.end_spacing
-            .set_value(style.num("targetPerimeterSpacing", 0.0));
-        self.stroke.fill(shades.stroke);
-        self.opacity.set_value(style.num("strokeOpacity", 100.0));
-        self.stroke_width.set_value(style.num("strokeWidth", 1.0));
+        let flex_arrow = |c: &Seen| c.edge && c.style.shape() == "flexArrow";
+        let widths = [
+            (&self.arrow_width, "width", 10.0),
+            (&self.start_width, "startWidth", 20.0),
+            (&self.end_width, "endWidth", 20.0),
+        ];
+        for (row, key, default) in widths {
+            show(
+                row,
+                styles.read_where(|c| flex_arrow(c).then(|| c.style.num(key, default))),
+            );
+        }
+        let read = |cells, key, default| styles.read(cells, |s| s.num(key, default));
+        show(
+            &self.perimeter,
+            read(Cells::Shapes, "perimeterSpacing", 0.0),
+        );
+        let spacing = read(Cells::Arrows, "sourcePerimeterSpacing", 0.0);
+        show(&self.start_spacing, spacing);
+        let spacing = read(Cells::Arrows, "targetPerimeterSpacing", 0.0);
+        show(&self.end_spacing, spacing);
+        self.stroke
+            .fill(styles.read(Cells::All, |s| s.color(picture_key(s, "strokeColor"))));
+        show(&self.opacity, read(Cells::All, "strokeOpacity", 100.0));
+        show(&self.stroke_width, read(Cells::All, "strokeWidth", 1.0));
         // A pattern draw.io's menu does not list is Custom, its numbers in the row below.
-        let numbers = style
-            .get("dashPattern")
-            .map(|p| p.split_whitespace().collect::<Vec<_>>().join(" "));
-        let pattern = match style.flag("dashed", false) {
-            false => 0,
-            true => (1..PATTERNS.len())
-                .find(|&i| PATTERNS[i].1.map(str::to_string) == numbers)
-                .unwrap_or(PATTERNS.len()),
-        };
+        let pattern = styles.read(Cells::All, pattern_of);
+        let (at, numbers) = &pattern.value;
         self.dash_pattern
             .set_text(numbers.as_deref().unwrap_or(CUSTOM_PATTERN));
-        self.pattern.set_selected(pattern as u32);
-        self.dash_pattern.set_visible(pattern == PATTERNS.len());
+        let picked = Read {
+            value: Some(*at),
+            mixed: pattern.mixed,
+        };
+        pick_shown(&self.pattern, picked);
+        self.dash_pattern
+            .set_visible(!pattern.mixed && *at == PATTERNS.len());
         let heads = [
             (&self.start, &self.start_size, true),
             (&self.end, &self.end_size, false),
         ];
         for (row, size, start) in heads {
-            let [arrow, fill, size_key] = head_keys(start);
-            let kind = style.get(arrow).unwrap_or("none");
-            row.set_selected(match flex {
-                true => u32::from(kind != "none"),
-                false => listed(head_at(kind, style.flag(fill, true), start)),
-            });
-            size.set_value(style.num(size_key, 6.0));
+            pick_shown(row, styles.read(Cells::Arrows, |s| head_of(s, start, flex)));
+            show(size, read(Cells::Arrows, head_keys(start)[2], 6.0));
         }
-        // An edge style draw.io's menu does not offer shows no row picked.
-        let curved = style.flag("curved", false);
-        let route = (style.get("edgeStyle"), style.get("elbow"), curved);
-        self.waypoints.set_selected(listed(match route {
-            (None, ..) => Some(0),
-            (Some("orthogonalEdgeStyle"), _, false) => Some(1),
-            (Some("elbowEdgeStyle"), Some("vertical"), _) => Some(2),
-            (Some("elbowEdgeStyle"), ..) => Some(3),
-            (Some("orthogonalEdgeStyle"), _, true) => Some(4),
-            _ => None,
-        }));
-        let corners = match (curved, style.flag("rounded", false)) {
-            (true, _) => 2,
-            (false, rounded) => u32::from(rounded),
+        pick_shown(&self.waypoints, styles.read(Cells::Arrows, route_of));
+        let corners = styles.read(Cells::Arrows, |s| Some(corners_of(s)));
+        pick_shown(&self.line_style, corners);
+    }
+}
+
+/// Where in the Pattern row `style`'s line is, and its numbers: Solid, an entry of draw.io's
+/// menu, or Custom for any other.
+fn pattern_of(style: &Resolved) -> (usize, Option<String>) {
+    let numbers = style
+        .get("dashPattern")
+        .map(|p| p.split_whitespace().collect::<Vec<_>>().join(" "));
+    let at = match style.flag("dashed", false) {
+        false => 0,
+        true => (1..PATTERNS.len())
+            .find(|&i| PATTERNS[i].1.map(str::to_string) == numbers)
+            .unwrap_or(PATTERNS.len()),
+    };
+    (at, numbers)
+}
+
+/// Where in the Start (else End) row `style`'s head is, among a flex arrow's heads with `flex`.
+fn head_of(style: &Resolved, start: bool, flex: bool) -> Option<usize> {
+    let [arrow, fill, _] = head_keys(start);
+    let kind = style.get(arrow).unwrap_or("none");
+    match flex {
+        true => Some(usize::from(kind != "none")),
+        false => head_at(kind, style.flag(fill, true), start),
+    }
+}
+
+/// Where in the Waypoints row `style`'s route is, none for an edge style draw.io's menu does
+/// not offer.
+fn route_of(style: &Resolved) -> Option<usize> {
+    let curved = style.flag("curved", false);
+    match (style.get("edgeStyle"), style.get("elbow"), curved) {
+        (None, ..) => Some(0),
+        (Some("orthogonalEdgeStyle"), _, false) => Some(1),
+        (Some("elbowEdgeStyle"), Some("vertical"), _) => Some(2),
+        (Some("elbowEdgeStyle"), ..) => Some(3),
+        (Some("orthogonalEdgeStyle"), _, true) => Some(4),
+        _ => None,
+    }
+}
+
+/// Where in the Line Style row `style`'s corners are: sharp, rounded or curved.
+fn corners_of(style: &Resolved) -> usize {
+    match (style.flag("curved", false), style.flag("rounded", false)) {
+        (true, _) => 2,
+        (false, rounded) => usize::from(rounded),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{Cells, Seen, Styles};
+
+    /// Two arrows read alike where their patterns are one entry of the menu, written apart, and
+    /// mixed where their heads differ.
+    #[test]
+    fn rows_read_what_each_cell_shows() {
+        let seen = |style: &str| Seen {
+            style: accent_drawio::Style::parse(style).resolve(true),
+            vertex: false,
+            edge: true,
         };
-        self.line_style.set_selected(corners);
+        let styles = Styles(vec![
+            seen("dashed=1;dashPattern=8 8;endArrow=block;"),
+            seen("dashed=1;dashPattern= 8  8 ;endArrow=open;"),
+        ]);
+        let pattern = styles.read(Cells::All, super::pattern_of);
+        assert_eq!((pattern.value.0, pattern.mixed), (2, false));
+        let heads = styles.read(Cells::Arrows, |s| super::head_of(s, false, false));
+        assert!(heads.mixed);
+        let shapes = styles.read(Cells::Shapes, |s| s.num("arcSize", 15.0));
+        assert_eq!((shapes.value, shapes.mixed), (0.0, false));
     }
 }
