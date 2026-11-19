@@ -72,6 +72,11 @@ impl Content {
         self.op(&[c1.0, c1.1, c2.0, c2.1, end.0, end.1], "c")
     }
 
+    /// `re`: a rectangle from its corner `(x, y)`, `w` across and `h` up.
+    pub fn rect(&mut self, (x, y): (f32, f32), w: f32, h: f32) -> &mut Self {
+        self.op(&[x, y, w, h], "re")
+    }
+
     /// `h`: close the subpath.
     pub fn close(&mut self) -> &mut Self {
         self.op(&[], "h")
@@ -119,6 +124,11 @@ impl Content {
         self.op(&[size], "Tf")
     }
 
+    /// `Tm`: the text matrix, and the line matrix, made `m`.
+    pub fn text_matrix(&mut self, m: [f32; 6]) -> &mut Self {
+        self.op(&m, "Tm")
+    }
+
     /// `Td`: the next line starts this far from where the last one did.
     pub fn next_line(&mut self, (x, y): (f32, f32)) -> &mut Self {
         self.op(&[x, y], "Td")
@@ -128,6 +138,19 @@ impl Content {
     pub fn show(&mut self, text: &[u8]) -> &mut Self {
         string(&mut self.0, text);
         self.op(&[], " Tj")
+    }
+
+    /// `BMC`: marked content tagged `tag` begins, as a field's variable text is (`Tx`, ISO
+    /// 32000-1 §12.7.3.3).
+    pub fn marked(&mut self, tag: &[u8]) -> &mut Self {
+        self.0.push(b'/');
+        self.0.extend(tag);
+        self.op(&[], " BMC")
+    }
+
+    /// `EMC`: the marked content ends.
+    pub fn end_marked(&mut self) -> &mut Self {
+        self.op(&[], "EMC")
     }
 
     pub fn finish(&mut self) -> Vec<u8> {

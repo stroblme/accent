@@ -43,6 +43,16 @@ pub enum Look {
     /// at the text's size on screen, `ink` on `paper`, its lines and the room round them as the
     /// page sets them (`accent_core::pdf::LEADING`, `PADDING`). The box grows with the text.
     Plain { ink: [u8; 3], paper: [u8; 3] },
+    /// A PDF form's text field filled in: plain, in the same face at the field's size on screen,
+    /// `ink` on `paper`, over the field's box, which it keeps, its text set across as the field
+    /// sets it, on one line or wrapped over several, and at most `max_len` characters long.
+    Field {
+        ink: [u8; 3],
+        paper: [u8; 3],
+        align: gtk::Justification,
+        multiline: bool,
+        max_len: Option<usize>,
+    },
 }
 
 /// The editor of one piece of text, `target` naming what it edits: a diagram's cell, or a PDF's
@@ -119,7 +129,7 @@ impl<T: 'static> LabelEditor<T> {
                 (view, buffer, Some(paste))
             }
             false => {
-                let (view, buffer) = plain_view(text);
+                let (view, buffer) = plain_view(text, &look);
                 (view, buffer, None)
             }
         };
@@ -180,6 +190,18 @@ impl<T: 'static> LabelEditor<T> {
             press: RefCell::new(None),
             paste,
         });
+        if let Look::Field {
+            align, multiline, ..
+        } = editor.look
+        {
+            editor.buffer.place_cursor(&editor.buffer.end_iter());
+            editor.view.set_justification(align);
+            editor.view.set_wrap_mode(match multiline {
+                true => gtk::WrapMode::WordChar,
+                false => gtk::WrapMode::None,
+            });
+            return editor;
+        }
         if !note {
             editor.buffer.place_cursor(&editor.buffer.end_iter());
             // Weak: the buffer is the editor's.
@@ -231,9 +253,9 @@ impl<T: 'static> LabelEditor<T> {
     /// corner, never smaller than `at`, so none of the text it is typing again shows round it.
     pub fn place_at(&self, at: Rect, px: f64) {
         let plain = matches!(self.look, Look::Plain { .. });
-        let (x, y, w, h) = match plain {
-            false => box_at(at, px),
-            true => (at.x, at.y, at.w, at.h),
+        let (x, y, w, h) = match self.look {
+            Look::Note { .. } => box_at(at, px),
+            _ => (at.x, at.y, at.w, at.h),
         };
         self.frame.set_size_request(w as i32, h as i32);
         self.layer.move_(&self.frame, x, y);
@@ -245,6 +267,25 @@ impl<T: 'static> LabelEditor<T> {
         if plain {
             self.fit();
         }
+        if let Look::Field { multiline, .. } = self.look {
+            self.pad_field(at, px, multiline);
+        }
+    }
+
+    /// A field's text as the page sets it in its box: 2 pt in from either side and, on one line,
+    /// down the middle, on several from 1 pt below the top (`accent_core::pdf`'s appearances).
+    fn pad_field(&self, at: Rect, px: f64, multiline: bool) {
+        let scale = px / self.font_size.max(1.0);
+        let across = (2.0 * scale).round() as i32;
+        self.view.set_left_margin(across);
+        self.view.set_right_margin(across);
+        let line = f64::from(self.view.create_pango_layout(Some("Ag")).pixel_size().1);
+        let top = match multiline {
+            true => scale,
+            false => ((at.h - line) / 2.0).max(0.0),
+        };
+        self.view.set_top_margin(top.round() as i32);
+        self.view.set_bottom_margin(0);
     }
 
     /// Typed text's box: its widest line across, as it is shown, and never smaller than the text
@@ -293,6 +334,7 @@ impl<T: 'static> LabelEditor<T> {
                 return;
             }
             Look::Plain { ink, paper } => (*ink, *paper),
+            Look::Field { ink, paper, .. } => return self.field_font(px, *ink, *paper),
         };
         use accent_core::pdf::{BASELINE, LEADING, PADDING};
         let (pad, leading) = (f64::from(PADDING) * px, f64::from(LEADING) * px);
@@ -342,6 +384,32 @@ impl<T: 'static> LabelEditor<T> {
         editor::refont(&self.view);
     }
 
+    /// A field's face at `px`, `ink` on `paper`, its lines as the face lays them out.
+    fn field_font(&self, px: f64, ink: [u8; 3], paper: [u8; 3]) {
+        let Some(display) = gdk::Display::default() else {
+            return;
+        };
+        if let Some(old) = self.font.take() {
+            gtk::style_context_remove_provider_for_display(&display, &old);
+        }
+        let rgb = |[r, g, b]: [u8; 3]| format!("rgb({r}, {g}, {b})");
+        let name = self.view.widget_name();
+        let provider = gtk::CssProvider::new();
+        provider.load_from_string(&format!(
+            "#{name} {{ font-family: {FACE}; font-size: {px}px; color: {}; }} \
+             #{name} > text {{ background-color: {}; }}",
+            rgb(ink),
+            rgb(paper)
+        ));
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+        self.font.replace(Some(provider));
+        editor::refont(&self.view);
+    }
+
     /// The text typed, or `None` when it is what the editor opened with; typed text's without
     /// the space and lines it ends in, which a page has no use for.
     pub fn changed(&self) -> Option<String> {
@@ -350,7 +418,7 @@ impl<T: 'static> LabelEditor<T> {
             .text(&self.buffer.start_iter(), &self.buffer.end_iter(), false)
             .to_string();
         let text = match self.look {
-            Look::Note { .. } => text,
+            Look::Note { .. } | Look::Field { .. } => text,
             Look::Plain { .. } => text.trim_end().to_string(),
         };
         (text != self.original).then_some(text)
@@ -433,9 +501,10 @@ fn align_lines(view: &sourceview5::View, align: Align, valign: VAlign) {
     });
 }
 
-/// A plain view of `text` that takes only what Helvetica can set: a paste of anything else keeps
+/// A plain view of `text` that takes only what `look` sets: typed text what Helvetica can set,
+/// a field no line break on one line and no more than its length. A paste of anything else keeps
 /// the rest of it.
-fn plain_view(text: &str) -> (sourceview5::View, sourceview5::Buffer) {
+fn plain_view(text: &str, look: &Look) -> (sourceview5::View, sourceview5::Buffer) {
     use accent_core::pdf::typeable;
     use sourceview5::prelude::BufferExt;
     let buffer = sourceview5::Buffer::new(None);
@@ -443,12 +512,24 @@ fn plain_view(text: &str) -> (sourceview5::View, sourceview5::Buffer) {
     buffer.set_style_scheme(None);
     buffer.set_highlight_matching_brackets(false);
     buffer.set_text(text);
-    buffer.connect_insert_text(|buffer, at, text| {
-        if text.chars().all(typeable) {
+    let (keep, max): (fn(char) -> bool, Option<usize>) = match *look {
+        Look::Field {
+            multiline: false,
+            max_len,
+            ..
+        } => (|c| !matches!(c, '\n' | '\r'), max_len),
+        Look::Field { max_len, .. } => (|c| c != '\r', max_len),
+        _ => (typeable, None),
+    };
+    buffer.connect_insert_text(move |buffer, at, text| {
+        let room = max.map_or(usize::MAX, |max| {
+            max.saturating_sub(buffer.char_count().max(0) as usize)
+        });
+        if text.chars().all(keep) && text.chars().count() <= room {
             return;
         }
         buffer.stop_signal_emission_by_name("insert-text");
-        let kept: String = text.chars().filter(|&c| typeable(c)).collect();
+        let kept: String = text.chars().filter(|&c| keep(c)).take(room).collect();
         if !kept.is_empty() {
             buffer.insert(at, &kept);
         }

@@ -2,7 +2,9 @@
 //! as `form-drill.pdf`, the fields of its first page as the tab reads them, and through XTEST the
 //! pointer over each with the tooltip a reader is shown, the page pictured as `form.png` under
 //! `ACCENT_BENCH_SHOTS=<dir>`; then a check box ticked and a radio button picked by real clicks,
-//! and the pick undone, each against the file. Takes the file away again.
+//! and the pick undone, each against the file; then a text field typed into, its editor over the
+//! field at 100 % and 200 %, finished by a click away, left by Escape and undone, pictured as
+//! `form-typing.png`. Takes the file away again.
 
 use super::pdf::{opened, written};
 use super::*;
@@ -132,9 +134,62 @@ pub(super) fn bench_pdf_form(app: &Rc<App>) {
         click(&small).await;
         save().await;
         println!("bench form picked {}", filed(&path));
-        let _ = WidgetExt::activate_action(&app.window, "win.pdf-undo", None);
-        save().await;
+        let undo = async || {
+            let _ = WidgetExt::activate_action(&app.window, "win.pdf-undo", None);
+            save().await;
+        };
+        undo().await;
         println!("bench form undone {}", filed(&path));
+
+        let Some(name) = named("name") else {
+            return quit(&app, &path);
+        };
+        let overlay = view.parent().and_then(|scroller| scroller.parent());
+        // Where the editor stands against the field it is over, both in the overlay's
+        // coordinates, and the size its text is at in points.
+        let editing = || {
+            let Some((at, px, focus)) = pdf.filling_at() else {
+                return "closed".to_string();
+            };
+            let (r, overlay) = (reader.widget_rect(0, &name.rect), overlay.as_ref());
+            let over = r.zip(overlay).and_then(|(r, overlay)| {
+                let p = graphene::Point::new(r.x() as f32, r.y() as f32);
+                let p = view.compute_point(overlay, &p)?;
+                let near = |a: f64, b: f32| (a - f64::from(b)).abs() <= 1.0;
+                Some(
+                    near(at.x, p.x())
+                        && near(at.y, p.y())
+                        && near(at.w, r.width() as f32)
+                        && near(at.h, r.height() as f32),
+                )
+            });
+            let size = px / f64::from(reader.pixels_per_point());
+            format!("open over={over:?} size={size:.1} focus={focus}")
+        };
+        let away = || {
+            let p = accent_core::pdf::Rect::from_corners((350.0, 150.0), (351.0, 151.0));
+            let r = reader.widget_rect(0, &p)?;
+            Some(on_screen((f64::from(r.x()), f64::from(r.y()))))
+        };
+        click(&name).await;
+        println!("bench form editing {}", editing());
+        super::git::xtest("key End; key space; type Lovelace").await;
+        shot(&view, "form-typing.png");
+        if let Some((x, y)) = away() {
+            super::git::xtest(&format!("move {x:.0} {y:.0}; down; up; sleep 0.3")).await;
+        }
+        save().await;
+        println!("bench form typed {} {}", editing(), filed(&path));
+        pdf.set_zoom(pdfview::PdfZoom::Scale(2.0));
+        glib::timeout_future(Duration::from_secs(1)).await;
+        click(&name).await;
+        println!("bench form zoomed {}", editing());
+        super::git::xtest("type x; key Escape").await;
+        save().await;
+        println!("bench form escaped {} {}", editing(), filed(&path));
+        undo().await;
+        println!("bench form typed_undone {}", filed(&path));
+
         quit(&app, &path);
     });
 }

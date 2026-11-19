@@ -27,7 +27,7 @@ pub mod fixtures;
 
 pub use content::{Content, form};
 pub use document::{Bookmark, Dest, Document, Elsewhere, Info, Link, Remote, Target};
-pub use font::{helvetica_width, winansi};
+pub use font::{SimpleFont, helvetica_width, winansi};
 pub use form::{Form, Widget};
 pub use pdf::{Pdf, read};
 pub use source::Source;

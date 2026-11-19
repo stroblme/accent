@@ -241,8 +241,9 @@ drill_pdf_loupe() {
 	test "$(sel end 3)" = "$kept" && test "$(sel start 3)" = "$kept" || { cat "$dir/loupe"; return 1; }
 }
 
-# The fixture form's fields as the tab reads them, the pointer and the tooltip over each, and its
-# check box and radio buttons clicked and undone, against the file (DESIGN.md, PDF Forms).
+# The fixture form's fields as the tab reads them, the pointer and the tooltip over each, its check
+# box and radio buttons clicked and undone, and a text field typed into at 100 % and 200 %, left by
+# Escape and undone, against the file (DESIGN.md, PDF Forms).
 drill_pdf_form() {
 	test -e "$pdfium" || { echo "SKIPPED the PDF form drill: no libpdfium"; return 0; }
 	launch 90 ACCENT_BENCH_PDF=form >"$dir/form"
@@ -252,7 +253,12 @@ drill_pdf_form() {
 		'bench form tips name="Your name" secret="Accent does not store passwords"' \
 		'bench form ticked name="Ada" agree=true size=false size=true amount="12.50"' \
 		'bench form picked name="Ada" agree=true size=true size=false amount="12.50"' \
-		'bench form undone name="Ada" agree=true size=false size=true amount="12.50"'
+		'bench form undone name="Ada" agree=true size=false size=true amount="12.50"' \
+		'bench form editing open over=Some(true) size=12.0 focus=true' \
+		'bench form typed closed name="Ada Lovelace" agree=true size=false size=true amount="12.50"' \
+		'bench form zoomed open over=Some(true) size=12.0 focus=true' \
+		'bench form escaped closed name="Ada Lovelace" agree=true size=false size=true amount="12.50"' \
+		'bench form typed_undone name="Ada" agree=true size=false size=true amount="12.50"'
 }
 
 # Its shells are real, so under a scratch HOME, running `true`, `false`, `pwd` and `sleep`.

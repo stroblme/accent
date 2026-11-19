@@ -1,9 +1,10 @@
 //! Form fields (ISO 32000-1 §12.7) as a reader fills them in: each widget of a page with the
 //! field it shows, read by `accent_pdf`, and what kind of field that is.
 
-use accent_pdf::{Dict, Object, Ref, Widget, text_string};
+use accent_pdf::{Dict, Object, Ref, SimpleFont, Widget, form, text_string};
 
-use super::cos::{Objects, name};
+use super::appearance::{self, Setting};
+use super::cos::{Objects, dict, helvetica as helvetica_dict, name, reals, text};
 use super::{PdfDoc, Rect};
 use crate::{Error, Result};
 
@@ -19,6 +20,9 @@ const EDIT: u32 = 1 << 18;
 const FILE_SELECT: u32 = 1 << 20;
 const MULTI_SELECT: u32 = 1 << 21;
 const COMB: u32 = 1 << 24;
+
+/// What accent's own Helvetica is called in an appearance's resources.
+const HELV: &[u8] = b"Helv";
 
 /// One widget of a page and the field it shows: what a reader fills in there.
 #[derive(Debug, Clone, PartialEq)]
@@ -74,6 +78,27 @@ pub enum FieldKind {
     Signature,
 }
 
+impl FormField {
+    /// The size a text field's editor shows its text at, in points, as pdf.js's does: its
+    /// `/DA`'s, 9 for one fitted to the box, and never taller than the box, less a 1 pt border
+    /// round it, has room for a line of, or on several lines for the lines that size leaves it
+    /// (`_setTextStyle`).
+    pub fn editor_size(&self) -> f32 {
+        let (size, multiline) = match &self.kind {
+            FieldKind::Text { da, multiline, .. } if da.size > 0.0 => (da.size, *multiline),
+            FieldKind::Text { multiline, .. } => (9.0, *multiline),
+            _ => return 9.0,
+        };
+        let one_place = |v: f32| (v * 10.0).round() / 10.0;
+        let height = (self.rect.height() - 2.0).abs();
+        let line = match multiline {
+            true => height / ((height / (1.35 * size)).round().max(1.0)),
+            false => height,
+        };
+        size.min(one_place(line / 1.35))
+    }
+}
+
 /// A default appearance (`/DA`, ISO 32000-1 §12.7.3.3): the font the resources name, its size,
 /// 0 for one fitted to the box, and the colour text is filled in.
 #[derive(Debug, Clone, PartialEq)]
@@ -119,6 +144,8 @@ impl Da {
 pub enum FieldValue {
     /// A check box or a radio button on, in the state named, or off.
     On(Option<Vec<u8>>),
+    /// What a text field says.
+    Text(String),
 }
 
 /// What a fill wrote: each object it changed as it was before, which its Undo puts back, and each
@@ -146,10 +173,24 @@ impl PdfDoc {
         let widgets = self.cos.widgets_of(field)?;
         let kept = match value {
             FieldValue::On(on) => self.cos.put_state(field, &widgets, on.as_deref())?,
+            FieldValue::Text(text) => {
+                let (read, need) = self.widgets_read(&widgets)?;
+                self.cos.put_text_value(field, &read, text, need)?
+            }
         };
         let areas = self.areas_of(&widgets)?;
         self.reopen()?;
         Ok(Filled { kept, areas })
+    }
+
+    /// `widgets` as `accent_pdf` reads them, and whether the form says `NeedAppearances`.
+    fn widgets_read(&self, widgets: &[Ref]) -> Result<(Vec<Widget>, bool)> {
+        let mut read = Vec::new();
+        for &at in widgets {
+            read.extend(self.reading(|doc| doc.widget_at(at))?);
+        }
+        let form = self.reading(|doc| doc.form())?;
+        Ok((read, form.is_some_and(|form| form.need_appearances)))
     }
 
     /// The objects `kept` holds put back as they are there, each taking in its place what it
@@ -249,6 +290,191 @@ impl Objects {
             edits.edit(self, widget, |d| d.set(b"AS", state.clone()))?;
         }
         Ok(edits.write(self))
+    }
+}
+
+impl Objects {
+    /// The text field `field`, shown by `widgets`, made to say `value`, as pdf.js saves one: its
+    /// `/V`, without the rich text an editor may have added, and each widget an appearance of
+    /// ours. What each object was before.
+    fn put_text_value(
+        &mut self,
+        field: Ref,
+        widgets: &[Widget],
+        value: &str,
+        need: bool,
+    ) -> Result<Vec<(Ref, Object)>> {
+        let mut edits = Edits::default();
+        edits.edit(self, field, |d| {
+            d.set(b"V", text(value));
+            d.remove(b"RV");
+        })?;
+        let made = (widgets.iter())
+            .map(|w| match need {
+                true => Ok(None),
+                false => self.text_appearance(w, value),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        self.put_appearances(&mut edits, widgets, need, made)?;
+        Ok(edits.write(self))
+    }
+
+    /// Each of `widgets` given its appearance in `made`. In a form that says `NeedAppearances`,
+    /// whose readers draw the fields from their values, the widgets' appearances go instead; and
+    /// where `made` holds none, no font having a code for a character of the value, the form is
+    /// made to say so (user decision 2).
+    fn put_appearances(
+        &mut self,
+        edits: &mut Edits,
+        widgets: &[Widget],
+        need: bool,
+        made: Vec<Option<accent_pdf::Stream>>,
+    ) -> Result<()> {
+        let mut unset = false;
+        for (w, stream) in widgets.iter().zip(made) {
+            match stream {
+                Some(stream) => {
+                    let at = self.update.add(Object::Stream(stream));
+                    let ap = Object::Dict(dict([(b"N", Object::Ref(at))]));
+                    edits.edit(self, w.widget, |d| d.set(b"AP", ap))?;
+                }
+                None => {
+                    edits.edit(self, w.widget, |d| d.remove(b"AP"))?;
+                    unset |= !need;
+                }
+            }
+        }
+        if unset {
+            self.need_appearances(edits)?;
+        }
+        Ok(())
+    }
+
+    /// `w`'s appearance saying `value`: one line or several, or a comb's cells.
+    fn text_appearance(&self, w: &Widget, value: &str) -> Result<Option<accent_pdf::Stream>> {
+        let flag = |bit: u32| w.flags & bit != 0;
+        let multiline = flag(MULTILINE);
+        let comb = (w.max_len.filter(|n| *n > 0))
+            .filter(|_| flag(COMB) && !multiline && !flag(PASSWORD) && !flag(FILE_SELECT))
+            .map(|n| n as usize);
+        self.appearance(w, |set| appearance::text(w, value, set, multiline, comb))
+    }
+
+    /// `w`'s appearance as `draw` sets it: in its `/DA`'s font where that has a code for each
+    /// character it sets, else in Helvetica, which every reader has; `None` where neither does.
+    fn appearance(
+        &self,
+        w: &Widget,
+        draw: impl Fn(&Setting) -> Option<Vec<u8>>,
+    ) -> Result<Option<accent_pdf::Stream>> {
+        let da = Da::parse(&w.da).unwrap_or(Da {
+            font: HELV.to_vec(),
+            size: 0.0,
+            rgb: [0; 3],
+        });
+        let found = self.field_font(w.widget, &da.font)?;
+        let own = (found.as_ref()).and_then(|(_, font)| {
+            SimpleFont::of(font, |o| match o {
+                Some(o) => self.resolve(o).unwrap_or(Object::Null),
+                None => Object::Null,
+            })
+        });
+        let helvetica = SimpleFont::helvetica();
+        let choices = [
+            own.as_ref()
+                .zip(found.as_ref())
+                .map(|(font, (entry, _))| (&da.font[..], font, entry.clone())),
+            Some((HELV, &helvetica, Object::Dict(helvetica_dict()))),
+        ];
+        for (name, font, entry) in choices.into_iter().flatten() {
+            let set = Setting {
+                name,
+                font,
+                size: da.size,
+                rgb: da.rgb,
+            };
+            let Some(content) = draw(&set) else {
+                continue;
+            };
+            let fonts = Object::Dict(Dict(vec![(name.to_vec(), entry)]));
+            let mut stream = form(appearance::bbox(w), content, dict([(b"Font", fonts)]));
+            if let Some(m) = appearance::turned(w) {
+                stream.dict.set(b"Matrix", reals(m));
+            }
+            return Ok(Some(stream));
+        }
+        Ok(None)
+    }
+
+    /// The font the resources call `name` where a field's appearance finds it: in the widget's
+    /// own `/DR`, the resources of the appearance it has, or the form's `/DR`, as pdf.js looks
+    /// for it. What names it there, and its dictionary.
+    fn field_font(&self, widget: Ref, name: &[u8]) -> Result<Option<(Object, Dict)>> {
+        let annot = self.dict(widget)?;
+        let follow = |d: &Dict, key: &[u8]| -> Result<Object> {
+            match d.get(key) {
+                Some(o) => self.resolve(o),
+                None => Ok(Object::Null),
+            }
+        };
+        let mut places = vec![follow(&annot, b"DR")?];
+        if let Some(ap) = follow(&annot, b"AP")?.as_dict() {
+            let normal = follow(ap, b"N")?;
+            if let Some(n) = normal.as_dict() {
+                places.push(follow(n, b"Resources")?);
+            }
+        }
+        if let Some(form) = self.acro_form()?.1 {
+            places.push(follow(&form, b"DR")?);
+        }
+        for resources in places {
+            let Some(resources) = resources.as_dict() else {
+                continue;
+            };
+            let fonts = follow(resources, b"Font")?;
+            let Some(entry) = fonts.as_dict().and_then(|f| f.get(name)) else {
+                continue;
+            };
+            if let Some(font) = self.resolve(entry)?.as_dict() {
+                return Ok(Some((entry.clone(), font.clone())));
+            }
+        }
+        Ok(None)
+    }
+
+    /// The form dictionary: the object it is, `None` where the catalog holds it, and what it
+    /// says; nothing for a document without one.
+    fn acro_form(&self) -> Result<(Option<Ref>, Option<Dict>)> {
+        let Some(root) = self.pdf.trailer().get(b"Root").and_then(Object::reference) else {
+            return Ok((None, None));
+        };
+        match self.dict(root)?.get(b"AcroForm") {
+            Some(&Object::Ref(at)) => Ok((Some(at), self.dict(at).ok())),
+            Some(Object::Dict(d)) => Ok((None, Some(d.clone()))),
+            _ => Ok((None, None)),
+        }
+    }
+
+    /// The form made to say `NeedAppearances`, in its own object or in the catalog holding it.
+    fn need_appearances(&self, edits: &mut Edits) -> Result<()> {
+        let set = |d: &mut Dict| d.set(b"NeedAppearances", Object::Bool(true));
+        match self.acro_form()? {
+            (Some(at), _) => edits.edit(self, at, set),
+            (None, Some(_)) => {
+                let root = self.pdf.trailer().get(b"Root").and_then(Object::reference);
+                let root = root.ok_or_else(|| Error::Pdf("no catalog".to_string()))?;
+                edits.edit(self, root, |catalog| {
+                    if let Some(Object::Dict(form)) = catalog
+                        .0
+                        .iter_mut()
+                        .find_map(|(k, v)| (k == b"AcroForm").then_some(v))
+                    {
+                        set(form);
+                    }
+                })
+            }
+            (None, None) => Ok(()),
+        }
     }
 }
 

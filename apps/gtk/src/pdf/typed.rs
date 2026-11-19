@@ -155,10 +155,10 @@ impl PdfTab {
 
     /// Keep a finished editor until a tile of its page lands after the page's change is heard,
     /// or a second at most; one kept from before goes now.
-    fn settle(self: &Rc<Self>, editor: Rc<LabelEditor<Typing>>) {
+    pub(super) fn settle(self: &Rc<Self>, editor: Rc<dyn Kept>) {
         let kept = Rc::downgrade(&editor);
         if let Some((before, _)) = self.settling.replace(Some((editor, false))) {
-            before.close(&self.overlay);
+            before.shut(&self.overlay);
         }
         let tab = Rc::downgrade(self);
         glib::timeout_add_local_once(Duration::from_secs(1), move || {
@@ -171,7 +171,7 @@ impl PdfTab {
     /// `page` changed: the next tile of it carries what the kept editor typed.
     pub(super) fn page_heard(&self, page: usize) {
         if let Some((editor, heard)) = self.settling.borrow_mut().as_mut()
-            && editor.target.page == page
+            && editor.page() == page
         {
             *heard = true;
         }
@@ -179,14 +179,14 @@ impl PdfTab {
 
     /// A tile of `page` landed: the kept editor goes, once its page's change has been heard.
     pub(super) fn tile_landed(&self, page: usize) {
-        let shown = matches!(&*self.settling.borrow(), Some((e, true)) if e.target.page == page);
+        let shown = matches!(&*self.settling.borrow(), Some((e, true)) if e.page() == page);
         if shown {
             self.settled(None);
         }
     }
 
     /// Close the kept editor, or nothing if `only` names one that has gone already.
-    fn settled(&self, only: Option<&Weak<LabelEditor<Typing>>>) {
+    fn settled(&self, only: Option<&Weak<dyn Kept>>) {
         let kept = self
             .settling
             .borrow()
@@ -196,18 +196,35 @@ impl PdfTab {
             return;
         }
         if let Some((editor, _)) = self.settling.take() {
-            editor.close(&self.overlay);
+            editor.shut(&self.overlay);
         }
     }
 
-    /// `Ctrl+Return` in the editor, which the window's accelerator took first: finish the text.
-    /// `false` when no text is being typed here.
+    /// `Ctrl+Return` in the editor, which the window's accelerator took first: finish the text,
+    /// or the field being filled in. `false` when neither is being typed here.
     pub fn commit_text(self: &Rc<Self>) -> bool {
         let typing = self.typing.borrow().as_ref().is_some_and(|e| e.has_focus());
         if typing {
             self.finish_text();
         }
-        typing
+        typing || self.commit_field()
+    }
+}
+
+/// An editor finished and kept over its page until a tile shows what it wrote: a text's or a
+/// form field's.
+pub(super) trait Kept {
+    fn page(&self) -> usize;
+    fn shut(&self, overlay: &gtk::Overlay);
+}
+
+impl Kept for LabelEditor<Typing> {
+    fn page(&self) -> usize {
+        self.target.page
+    }
+
+    fn shut(&self, overlay: &gtk::Overlay) {
+        self.close(overlay);
     }
 }
 

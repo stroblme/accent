@@ -456,7 +456,7 @@ fn file_name(bytes: Vec<u8>) -> String {
     }
 }
 
-fn number(o: &Object) -> Option<f32> {
+pub(crate) fn number(o: &Object) -> Option<f32> {
     match *o {
         Object::Int(i) => Some(i as f32),
         Object::Real(r) => Some(r as f32),

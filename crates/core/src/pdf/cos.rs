@@ -177,6 +177,17 @@ pub(super) fn dict<const N: usize>(entries: [(&[u8], Object); N]) -> Dict {
     accent_pdf::Dict(entries.map(|(k, v)| (k.to_vec(), v)).into())
 }
 
+/// Helvetica in WinAnsiEncoding, as accent's own text names it without embedding it: one of the
+/// fonts every reader has.
+pub(super) fn helvetica() -> Dict {
+    dict([
+        (b"Type", name(b"Font")),
+        (b"Subtype", name(b"Type1")),
+        (b"BaseFont", name(b"Helvetica")),
+        (b"Encoding", name(b"WinAnsiEncoding")),
+    ])
+}
+
 /// A text string as PDF reads one (ISO 32000-1 §7.9.2.2): plain bytes for ASCII, else UTF-16BE
 /// after its byte order mark.
 pub(super) fn text(s: &str) -> Object {

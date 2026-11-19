@@ -47,6 +47,12 @@ pub struct Widget {
     /// `/AS`, the one drawn.
     pub states: Vec<Vec<u8>>,
     pub state: Option<Vec<u8>>,
+    /// How the widget draws its box (`/MK`, `/BS`): turned by `/R`, a multiple of 90°, filled in
+    /// `/BG` and outlined in `/BC`, each as RGB and `None` for none, by a border this wide.
+    pub rotation: u16,
+    pub background: Option<[f32; 3]>,
+    pub border: Option<[f32; 3]>,
+    pub border_width: f32,
 }
 
 /// What the form as a whole says (`/AcroForm`).
@@ -100,6 +106,35 @@ impl Document<'_> {
             }
         }
         Ok(out)
+    }
+
+    /// The widget annotation `at` and its field, `None` for anything else.
+    pub fn widget_at(&self, at: Ref) -> Result<Option<Widget>> {
+        let form = match self.resolve(self.root()?.get(b"AcroForm"))? {
+            Object::Dict(form) => form,
+            _ => Dict::default(),
+        };
+        match self.get(at)? {
+            Object::Dict(annot) => self.widget(at, &annot, &form),
+            _ => Ok(None),
+        }
+    }
+
+    /// A colour of `/MK` as RGB: none for an empty array, grey, RGB or CMYK by its length.
+    fn colour(&self, mk: &Dict, key: &[u8]) -> Result<Option<[f32; 3]>> {
+        let Object::Array(c) = self.resolve(mk.get(key))? else {
+            return Ok(None);
+        };
+        let mut v = Vec::new();
+        for n in &c {
+            v.extend(crate::document::number(&self.resolve(Some(n))?));
+        }
+        Ok(match v[..] {
+            [g] => Some([g; 3]),
+            [r, g, b] => Some([r, g, b]),
+            [c, m, y, k] => Some([c, m, y].map(|v| (1.0 - v) * (1.0 - k))),
+            _ => None,
+        })
     }
 
     /// The widget `at`, whose dictionary is `annot`, and its field; `None` for one of no field.
@@ -181,6 +216,17 @@ impl Document<'_> {
             .filter(|name| name != b"Off")
             .collect();
         let flags = int(self.resolve(annot.get(b"F"))?).unwrap_or(0);
+        let mk = self.dict(annot, b"MK")?;
+        let rotation = int(self.resolve(mk.get(b"R"))?)
+            .unwrap_or(0)
+            .rem_euclid(360);
+        let border_width = match self.dict(annot, b"BS")?.get(b"W") {
+            Some(w) => crate::document::number(&self.resolve(Some(w))?),
+            None => match self.resolve(annot.get(b"Border"))? {
+                Object::Array(b) => crate::document::number(&self.resolve(b.get(2))?),
+                _ => None,
+            },
+        };
         Ok(Some(Widget {
             widget: at,
             field: chain[field].0,
@@ -205,6 +251,10 @@ impl Document<'_> {
                 .resolve(annot.get(b"AS"))?
                 .as_name()
                 .map(<[u8]>::to_vec),
+            rotation: u16::try_from(rotation - rotation % 90).unwrap_or(0),
+            background: self.colour(&mk, b"BG")?,
+            border: self.colour(&mk, b"BC")?,
+            border_width: border_width.unwrap_or(1.0),
         }))
     }
 }

@@ -6,7 +6,7 @@ use accent_pdf::{Content, Object, Ref, form, helvetica_width, winansi};
 use serde::{Deserialize, Serialize};
 
 use super::annot::{OURS, PRINT};
-use super::cos::{Objects, decoded, dict, name, reals, text};
+use super::cos::{Objects, decoded, dict, helvetica, name, reals, text};
 use super::form::Da;
 use super::{PdfDoc, Rect};
 use crate::{Error, Result};
@@ -187,12 +187,7 @@ impl Objects {
             drawing.show(&line.chars().filter_map(winansi).collect::<Vec<u8>>());
         }
         drawing.end_text().restore();
-        let font = dict([
-            (b"Type", name(b"Font")),
-            (b"Subtype", name(b"Type1")),
-            (b"BaseFont", name(b"Helvetica")),
-            (b"Encoding", name(b"WinAnsiEncoding")),
-        ]);
+        let font = helvetica();
         let resources = dict([(b"Font", Object::Dict(dict([(FONT, Object::Dict(font))])))]);
         let appearance = form(rect, drawing.finish(), resources);
         let appearance = self.update.add(Object::Stream(appearance));

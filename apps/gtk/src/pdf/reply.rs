@@ -191,6 +191,8 @@ impl PdfTab {
 
     /// The pages were put in, taken out or moved: everything kept of a page follows it.
     fn repaged(self: &Rc<Self>, sizes: Vec<(f32, f32)>, edit: pdf::PageEdit, step: u32) {
+        // Its editor is over a page the edit may move.
+        self.finish_field();
         let anchor = self.view.anchor();
         let map = |page| edit.map(page);
         // One cache for both views, so it moves once; each view moves what it is still
@@ -299,6 +301,7 @@ impl PdfTab {
         // file stopped opening, the pages having gone since.
         let anchor = self.resume.take().unwrap_or_else(|| self.view.anchor());
         let anchor = anchor.clamped(sizes.len());
+        self.drop_field();
         self.view.forget_textures();
         self.thumbs.forget_textures();
         self.organize.unpick();

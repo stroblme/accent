@@ -88,7 +88,9 @@ pub struct PdfTab {
     pub(super) typing: RefCell<Option<Rc<TextEditor>>>,
     /// The editor of a text just finished, kept until the page shows it, and whether the page's
     /// change has been heard (`PdfTab::settle`).
-    pub(super) settling: RefCell<Option<(Rc<TextEditor>, bool)>>,
+    pub(super) settling: RefCell<Option<(Rc<dyn super::typed::Kept>, bool)>>,
+    /// The editor of the form field being filled in.
+    pub(super) filling: RefCell<Option<Rc<super::field::FieldEditor>>>,
     /// The thumbnail scroller with the page buttons and the drop bar floating over it, which is
     /// what the Outline pane is handed. Built once to preserve its parent; rebuilding around the
     /// same widget would trigger a GTK reparenting critical.
@@ -313,6 +315,7 @@ pub fn open(
         overlay: overlay.clone(),
         typing: RefCell::default(),
         settling: RefCell::default(),
+        filling: RefCell::default(),
         organize: crate::organize::Organize::new(
             &thumb_strip,
             &thumbs,
@@ -406,6 +409,7 @@ pub fn open(
         tab,
         move || {
             tab.place_text();
+            tab.place_field();
             // Ctrl+scroll is a zoom with Ctrl held: a preview would point at where the link was,
             // drawn at the zoom it was.
             tab.hide_preview();
@@ -417,7 +421,10 @@ pub fn open(
         adjustment.connect_value_changed(glib::clone!(
             #[weak]
             tab,
-            move |_| tab.place_text()
+            move |_| {
+                tab.place_text();
+                tab.place_field();
+            }
         ));
     }
     tab.wire_strip(&thumbs);
@@ -754,6 +761,8 @@ impl PdfTab {
     /// `color`, written to `dest`; the file itself is left as it is. The receiver hears once how
     /// that went, or finds its sender gone when there is no document to copy.
     pub fn copy_to(&self, dest: PathBuf, color: [u8; 3]) -> Receiver<Result<(), String>> {
+        // A field being filled in goes in first, the copy coming after its fill.
+        self.fill_now();
         let (done, answer) = channel();
         let links = self.notes.borrow().clone();
         self.ask(Request::Copy {
@@ -823,10 +832,12 @@ impl PdfTab {
 
     /// Only the reading view: the thumbnail strip is a list of buttons, never a canvas.
     pub fn set_mode(self: &Rc<Self>, mode: pdfview::Mode) {
-        // A text being typed is typed before the Text tool goes.
+        // A text being typed is typed before the Text tool goes, and a field filled in before
+        // any tool comes.
         if mode != pdfview::Mode::Text {
             self.finish_text();
         }
+        self.finish_field();
         // The ring is told whatever the window decided, even when the mode did not change: it may
         // be a freshly built one that has never been told anything.
         self.ring.set_tool(mode);

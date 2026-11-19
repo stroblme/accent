@@ -7,6 +7,7 @@
 //! write.
 
 mod annot;
+mod appearance;
 mod clip;
 mod cos;
 mod doc;

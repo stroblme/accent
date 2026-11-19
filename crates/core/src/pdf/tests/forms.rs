@@ -359,3 +359,235 @@ fn an_encrypted_check_box_is_filled_in() {
     assert_eq!(memchr::memmem::find(&saved, b"agreement"), None);
     assert_eq!(on(&super::reopen(&dir, &doc), 0, "agreement"), [true]);
 }
+
+/// The text field `name`'s value as the document now reads, by accent and by pdfium.
+fn said(doc: &PdfDoc, page: usize, name: &str) -> (String, Option<String>) {
+    let fields = doc.fields(page).unwrap();
+    let ours = match &field(&fields, name).kind {
+        FieldKind::Text { value, .. } => value.clone(),
+        other => panic!("{other:?}"),
+    };
+    let _guard = lock();
+    let p = doc.doc().pages().get(page as PdfPageIndex).unwrap();
+    let theirs = (p.annotations().iter()).find_map(|a| {
+        let f = a.as_form_field()?;
+        (f.name()? == name).then(|| f.as_text_field()?.value())?
+    });
+    (ours, theirs)
+}
+
+/// The content of the widget `num`'s appearance, as the session has it.
+fn appearance_of(doc: &PdfDoc, num: u32) -> Option<String> {
+    let widget = doc
+        .cos
+        .dict(accent_pdf::Ref { num, generation: 0 })
+        .unwrap();
+    let ap = doc.cos.resolve(widget.get(b"AP")?).unwrap();
+    let n = doc.cos.resolve(ap.as_dict()?.get(b"N")?).unwrap();
+    match n {
+        Object::Stream(s) => Some(String::from_utf8_lossy(&s.raw).into_owned()),
+        _ => None,
+    }
+}
+
+fn blue(px: [u8; 4]) -> bool {
+    px[2] > 150 && px[0] < 120 && px[1] < 120
+}
+
+fn dark(px: [u8; 4]) -> bool {
+    px[0] < 128 && px[1] < 128 && px[2] < 128
+}
+
+/// A text field filled in says so in the file, as accent and pdfium read it back after a save,
+/// and draws its value in its `/DA`'s colour in an appearance of ours inside `/Tx BMC`, which
+/// Undo takes back to the one it had and Redo brings again.
+#[test]
+fn a_text_field_is_written_drawn_and_walked_back() {
+    let Some((dir, mut doc)) = open_pdf(&form_pdf(|o| o)) else {
+        return;
+    };
+    let mut ink = Ink::default();
+    let name = field(&doc.fields(0).unwrap(), "name").clone();
+    let before = doc.cos.dict(name.widget).unwrap().get(b"AP").cloned();
+    ink.fill(
+        &mut doc,
+        name.field,
+        &FieldValue::Text("Grace Hopper".into()),
+    )
+    .unwrap();
+    let text = appearance_of(&doc, 9).unwrap();
+    assert!(text.starts_with("/Tx BMC\nq\n"), "{text}");
+    assert!(text.contains("/Helv 12 Tf\n0 0 1 rg\n") && text.contains("(Grace Hopper) Tj"));
+    assert!(text.contains("re\nf\n"), "the box's background: {text}");
+    assert!(painted(&doc, 0, name.rect, blue));
+    let back = super::reopen(&dir, &doc);
+    let grace = ("Grace Hopper".to_string(), Some("Grace Hopper".to_string()));
+    assert_eq!(said(&back, 0, "name"), grace);
+    ink.walk(&mut doc, false);
+    assert_eq!(said(&doc, 0, "name").0, "Ada");
+    assert_eq!(
+        doc.cos.dict(name.widget).unwrap().get(b"AP").cloned(),
+        before
+    );
+    ink.walk(&mut doc, true);
+    assert_eq!(said(&doc, 0, "name"), grace);
+}
+
+/// A multi-line field wraps and sets each line lower; a comb a character a cell; a right-aligned
+/// field ends at its right edge; and a size of 0 fits the box.
+#[test]
+fn text_fields_lay_their_values_out_as_pdf_js_does() {
+    let Some((_dir, mut doc)) = open_pdf(&form_pdf(|o| o)) else {
+        return;
+    };
+    let fields = doc.fields(0).unwrap();
+    let fill = |doc: &mut PdfDoc, name: &str, text: &str| {
+        let f = field(&doc.fields(0).unwrap(), name).clone();
+        doc.fill(f.field, &FieldValue::Text(text.to_string()))
+            .unwrap();
+        f
+    };
+    let address = fill(&mut doc, "address", "First line\nSecond line");
+    let text = appearance_of(&doc, 11).unwrap();
+    assert_eq!(text.matches(" Tj").count(), 2, "{text}");
+    let r = address.rect;
+    let half = |top: bool| {
+        let mid = (r.top + r.bottom) / 2.0;
+        match top {
+            true => Rect { bottom: mid, ..r },
+            false => Rect { top: mid, ..r },
+        }
+    };
+    assert!(painted(&doc, 0, half(true), dark) && painted(&doc, 0, half(false), dark));
+    assert!(
+        appearance_of(&doc, 12).is_some(),
+        "its widget on the second page too"
+    );
+
+    let code = fill(&mut doc, "code", "12345");
+    let text = appearance_of(&doc, 23).unwrap();
+    assert_eq!(text.matches(" Tj").count(), 5, "{text}");
+    let cell = code.rect.width() / 5.0;
+    for i in 0..5 {
+        let left = code.rect.left + i as f32 * cell;
+        let one = Rect {
+            left,
+            right: left + cell,
+            ..code.rect
+        };
+        assert!(painted(&doc, 0, one, dark), "cell {i}");
+    }
+
+    let email = fill(&mut doc, "person.email", "ada@example.org");
+    let r = email.rect;
+    let (left, right) = (
+        Rect {
+            right: r.left + 30.0,
+            ..r
+        },
+        Rect {
+            left: r.right - 30.0,
+            ..r
+        },
+    );
+    assert!(painted(&doc, 0, right, dark) && !painted(&doc, 0, left, dark));
+    let FieldKind::Text { da, .. } = &field(&fields, "address").kind else {
+        panic!()
+    };
+    assert_eq!(da.size, 0.0);
+    let size = |text: &str| -> f32 {
+        let at = text.find(" Tf").unwrap();
+        text[..at].rsplit(' ').next().unwrap().parse().unwrap()
+    };
+    let sized = size(&appearance_of(&doc, 11).unwrap());
+    assert!(
+        sized > 4.0 && 2.0 * sized * 1.35 <= address.rect.height(),
+        "{sized}"
+    );
+}
+
+/// A value the field's font cannot set is written as UTF-16, the widgets' appearances taken
+/// off and the form made to say `NeedAppearances` (user decision 2): the value reads back, and
+/// pdfium draws the field from it without the characters it has no glyph for. Undo puts the
+/// form back as it was.
+#[test]
+fn a_value_no_font_sets_asks_readers_to_draw_it() {
+    let Some((_dir, mut doc)) = open_pdf(&form_pdf(|o| o)) else {
+        return;
+    };
+    let mut ink = Ink::default();
+    let name = field(&doc.fields(0).unwrap(), "name").clone();
+    ink.fill(&mut doc, name.field, &FieldValue::Text("Ada αβγ".into()))
+        .unwrap();
+    assert_eq!(appearance_of(&doc, 9), None);
+    let form = |doc: &PdfDoc| {
+        let d = doc
+            .cos
+            .dict(accent_pdf::Ref {
+                num: 3,
+                generation: 0,
+            })
+            .unwrap();
+        d.get(b"NeedAppearances").cloned()
+    };
+    assert_eq!(form(&doc), Some(Object::Bool(true)));
+    let read = ("Ada αβγ".to_string(), Some("Ada αβγ".to_string()));
+    assert_eq!(said(&doc, 0, "name"), read);
+    assert!(painted(&doc, 0, name.rect, blue), "Ada is drawn");
+    // From now on the form's readers draw every field from its value, as pdf.js leaves it.
+    let address = field(&doc.fields(0).unwrap(), "address").clone();
+    ink.fill(&mut doc, address.field, &FieldValue::Text("Grüße".into()))
+        .unwrap();
+    assert_eq!(said(&doc, 0, "address").0, "Grüße");
+    assert_eq!(
+        (appearance_of(&doc, 11), appearance_of(&doc, 12)),
+        (None, None)
+    );
+    ink.walk(&mut doc, false);
+    ink.walk(&mut doc, false);
+    assert_eq!(form(&doc), None);
+    assert_eq!(said(&doc, 0, "name").0, "Ada");
+}
+
+/// A text field of an encrypted document is filled in through its handler: its value and its
+/// appearance never in the clear, and read back from the saved file.
+#[test]
+fn an_encrypted_text_field_is_filled_in() {
+    use super::super::cos::{dict, helvetica, name, reals};
+    let base = accent_pdf::fixtures::encrypted_document(4);
+    let pdf = accent_pdf::Pdf::open(std::sync::Arc::new(base.clone())).unwrap();
+    let mut update = accent_pdf::Update::new(&pdf);
+    let font = update.add(Object::Dict(helvetica()));
+    let widget = update.add(Object::Dict(dict([
+        (b"Type", name(b"Annot")),
+        (b"Subtype", name(b"Widget")),
+        (b"FT", name(b"Tx")),
+        (b"T", Object::String(b"secret".to_vec())),
+        (b"DA", Object::String(b"/Helv 12 Tf 0 0 1 rg".to_vec())),
+        (b"F", Object::Int(4)),
+        (b"Rect", reals([10.0, 40.0, 190.0, 70.0])),
+    ])));
+    let r = |num| accent_pdf::Ref { num, generation: 0 };
+    let mut page = pdf.get(r(3)).unwrap().as_dict().cloned().unwrap();
+    page.set(b"Annots", Object::Array(vec![Object::Ref(widget)]));
+    update.set(r(3), Object::Dict(page));
+    let mut catalog = pdf.get(r(1)).unwrap().as_dict().cloned().unwrap();
+    let fonts = Object::Dict(dict([(b"Helv", Object::Ref(font))]));
+    let form = dict([
+        (b"Fields", Object::Array(vec![Object::Ref(widget)])),
+        (b"DR", Object::Dict(dict([(b"Font", fonts)]))),
+    ]);
+    catalog.set(b"AcroForm", Object::Dict(form));
+    update.set(r(1), Object::Dict(catalog));
+    let Some((dir, mut doc)) = open_pdf(&[base, update.section()].concat()) else {
+        return;
+    };
+    let secret = field(&doc.fields(0).unwrap(), "secret").clone();
+    doc.fill(secret.field, &FieldValue::Text("Hidden words".into()))
+        .unwrap();
+    assert!(painted(&doc, 0, secret.rect, blue));
+    let saved = doc.save().unwrap();
+    assert_eq!(memchr::memmem::find(&saved, b"Hidden words"), None);
+    let back = super::reopen(&dir, &doc);
+    assert_eq!(said(&back, 0, "secret").0, "Hidden words");
+}
