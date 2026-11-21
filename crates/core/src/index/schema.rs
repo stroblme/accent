@@ -1,7 +1,7 @@
 //! The tables, and the knobs that shape how they are filled.
 
 /// Bump on any schema change: `Index::open_or_rebuild` then deletes the cache and starts a new one.
-pub(super) const SCHEMA_VERSION: i64 = 21;
+pub(super) const SCHEMA_VERSION: i64 = 22;
 
 /// Maximum indexed body size for non-markdown files. Stricter than [`crate::fs::MAX_TEXT`]
 /// because indexing repeatedly consumes database space and FTS query work, whereas opening a
@@ -40,7 +40,10 @@ CREATE TABLE files(
     -- A PDF's text, read after the walk by a pass of its own (`Index::claim_pdfs`): NULL until it
     -- is read, -1 while a reader has it, then how many pages were read. Back to NULL whenever
     -- the walk writes the row again, the file having changed.
-    text_pages   INTEGER
+    text_pages   INTEGER,
+    -- What an import finds the file by (`code::imports::module_key`), NULL for a folder and a
+    -- conflict copy: `math` for `math.py` and for `math/__init__.py`.
+    module_key   TEXT
 );
 CREATE TABLE aliases(rel_path TEXT PRIMARY KEY, file_id INTEGER NOT NULL);
 -- The files the walk leaves out (a gitignored folder's, a dependency tree's) or search excludes
@@ -87,6 +90,19 @@ CREATE TABLE symbols(
     end_line   INTEGER NOT NULL,
     signature  TEXT NOT NULL,
     test       INTEGER NOT NULL
+);
+-- What each code file imports (`code::imports`), and the file it resolves to (`imports.rs`'s
+-- `BEST_IMPORT`), NULL while nothing in the vault answers. Not a `links` kind: backlinks, dangling
+-- links and missing notes, the rewrites a move makes and a PDF's highlights all read `links`, and
+-- none of them is about imports. `near` says `target` is a path any folder may end in; `up_key`
+-- is the key of the module above, where the last name may be an item of it.
+CREATE TABLE imports(
+    src_file      INTEGER NOT NULL,
+    target        TEXT NOT NULL,
+    near          INTEGER NOT NULL,
+    key           TEXT NOT NULL,
+    up_key        TEXT,
+    resolved_file INTEGER
 );
 
 -- `body` stays column 0 so `snippet(notes_fts, 0, ...)` keeps quoting the note text, and so the
@@ -188,6 +204,11 @@ CREATE INDEX idx_files_kind_mt  ON files(kind, mtime_ns DESC);
 CREATE INDEX idx_symbols_name   ON symbols(name COLLATE NOCASE);
 CREATE INDEX idx_symbols_file   ON symbols(file_id);
 CREATE INDEX idx_aliases_file   ON aliases(file_id);
+CREATE INDEX idx_files_module   ON files(module_key);
+CREATE INDEX idx_imports_src    ON imports(src_file);
+CREATE INDEX idx_imports_key    ON imports(key);
+CREATE INDEX idx_imports_up     ON imports(up_key);
+CREATE INDEX idx_imports_resolved ON imports(resolved_file);
 -- The PDFs whose text is still to be read, newest first: a claim is a lookup rather than a pass
 -- over every PDF already read, which `idx_files_kind_mt` would be, and the planner picks that one
 -- unless told (`INDEXED BY`). `2` is `FileKind::Pdf`, written out because SQLite uses a partial

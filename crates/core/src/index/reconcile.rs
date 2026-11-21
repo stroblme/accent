@@ -1,8 +1,10 @@
 //! Disk to rows: the full walk and the watcher's single-file path share one `upsert`.
 
+use super::imports::{BEST_IMPORT, resolve_imports_of};
 use super::links::{BEST_FILE, resolve_links_of};
 use super::schema::{BATCH, MAX_INDEXED_BODY, OPENED_CAP};
 use super::{Change, Index, Phase, Progress, ReconcileStats};
+use crate::code::imports::{Import, module_key};
 use crate::note::Syntax;
 use crate::query::Doc;
 use crate::walk::{self, FileKind, ScanOptions};
@@ -279,6 +281,7 @@ impl Index {
                     if !cold {
                         for rel in changed {
                             resolve_links_of(&tx, rel)?;
+                            resolve_imports_of(&tx, rel)?;
                         }
                     }
                     tx.commit()?;
@@ -327,6 +330,7 @@ impl Index {
         // resolved their own.
         if cold {
             self.resolve_links()?;
+            self.resolve_imports()?;
             on_progress(
                 self,
                 Progress {
@@ -573,6 +577,7 @@ impl Index {
         // transaction, or a reader in between sees the note link to nothing: a page edit asking
         // for the backlinks of a PDF right after the last one rewrote a note would skip it.
         resolve_links_of(&tx, rel)?;
+        resolve_imports_of(&tx, rel)?;
         tx.commit()?;
         Ok(match existing_id {
             Some(_) => Change::Updated(meta.kind),
@@ -735,6 +740,7 @@ struct Content {
     text: Option<String>,
     analysis: Option<markdown::Analysis>,
     symbols: Vec<crate::code::Decl>,
+    imports: Vec<Import>,
     /// What `kind:` calls the file, `files.doc`.
     doc: Option<Doc>,
 }
@@ -806,12 +812,12 @@ fn read_content(f: &walk::FileMeta) -> Content {
         true => text.as_deref().map(|t| Syntax::of(&f.rel_path).analyze(t)),
         false => None,
     };
-    // A code file's declarations, read from the text its body is.
-    let symbols = match (f.kind, text.as_deref()) {
+    // A code file's declarations and imports, read from the text its body is.
+    let (symbols, imports) = match (f.kind, text.as_deref()) {
         (FileKind::Other, Some(text)) => crate::code::lang_of(&f.rel_path)
-            .map(|lang| crate::code::symbols(lang, text))
+            .map(|lang| crate::code::read(lang, &f.rel_path, text))
             .unwrap_or_default(),
-        _ => Vec::new(),
+        _ => Default::default(),
     };
     // A `.py` is a notebook where its text makes marimo's app, an `.xml` a diagram where its
     // first element is draw.io's; anything else is what its name says.
@@ -831,6 +837,7 @@ fn read_content(f: &walk::FileMeta) -> Content {
         text,
         analysis,
         symbols,
+        imports,
         doc,
     }
 }
@@ -851,6 +858,7 @@ fn upsert(
         text,
         analysis,
         symbols,
+        imports,
         doc,
     } = content;
     // The row it replaces, as this transaction sees it rather than as the caller's diff did:
@@ -907,15 +915,15 @@ fn upsert(
     // its files shallowest first, so a directory is always upserted before its children.
     let id: i64 = tx
         .prepare_cached(
-            "INSERT INTO files(rel_path, parent_dir, canonical, dev, ino, mtime_ns, size, kind, title, content_hash, doc, git_ignored)
+            "INSERT INTO files(rel_path, parent_dir, canonical, dev, ino, mtime_ns, size, kind, title, content_hash, doc, git_ignored, module_key)
              VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,
-                    COALESCE((SELECT git_ignored FROM files WHERE rel_path = ?2), 0))
+                    COALESCE((SELECT git_ignored FROM files WHERE rel_path = ?2), 0), ?12)
              ON CONFLICT(rel_path) DO UPDATE SET
                 parent_dir=excluded.parent_dir,
                 canonical=excluded.canonical, dev=excluded.dev, ino=excluded.ino,
                 mtime_ns=excluded.mtime_ns, size=excluded.size, kind=excluded.kind,
                 title=excluded.title, content_hash=excluded.content_hash, doc=excluded.doc,
-                text_pages=NULL
+                text_pages=NULL, module_key=excluded.module_key
              RETURNING id",
         )?
         .query_row(
@@ -931,6 +939,10 @@ fn upsert(
                 title,
                 hash.as_ref().map(|h| h.as_bytes().to_vec()),
                 doc.map_or(0, Doc::as_i64),
+                match f.kind {
+                    FileKind::Dir | FileKind::Conflict => None,
+                    _ => module_key(&f.rel_path),
+                },
             ],
             |r| r.get(0),
         )?;
@@ -1017,6 +1029,12 @@ fn upsert(
             ])?;
         }
     }
+    for i in imports {
+        tx.prepare_cached(
+            "INSERT INTO imports(src_file, target, near, key, up_key) VALUES(?1,?2,?3,?4,?5)",
+        )?
+        .execute(params![id, i.target, i.near, i.key, i.up_key])?;
+    }
     // Set aside for [`write_bodies`], which the caller runs before it commits.
     if let Some(body) = text.as_ref() {
         tx.prepare_cached(
@@ -1083,6 +1101,8 @@ fn clear_derived(tx: &rusqlite::Transaction<'_>, id: i64) -> Result<()> {
     tx.prepare_cached("DELETE FROM headings WHERE file_id = ?1")?
         .execute([id])?;
     tx.prepare_cached("DELETE FROM symbols WHERE file_id = ?1")?
+        .execute([id])?;
+    tx.prepare_cached("DELETE FROM imports WHERE src_file = ?1")?
         .execute([id])?;
     tx.prepare_cached("DELETE FROM note_aliases WHERE file_id = ?1")?
         .execute([id])?;
@@ -1158,6 +1178,13 @@ pub(super) fn delete_file_rows(tx: &rusqlite::Transaction<'_>, id: i64) -> Resul
         .execute([id])?;
     tx.prepare_cached(&format!(
         "UPDATE links SET resolved_file = {BEST_FILE} WHERE resolved_file = ?1"
+    ))?
+    .execute([id])?;
+    // Its module key goes first, so the imports it answered find the next file or none.
+    tx.prepare_cached("UPDATE files SET module_key = NULL WHERE id = ?1")?
+        .execute([id])?;
+    tx.prepare_cached(&format!(
+        "UPDATE imports SET resolved_file = {BEST_IMPORT} WHERE resolved_file = ?1"
     ))?
     .execute([id])?;
     tx.prepare_cached(

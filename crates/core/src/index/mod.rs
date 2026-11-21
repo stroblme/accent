@@ -8,6 +8,7 @@
 mod files;
 mod filter;
 mod graph;
+mod imports;
 mod links;
 mod pdf_text;
 mod reconcile;
@@ -408,6 +409,24 @@ impl Index {
                 | FunctionFlags::SQLITE_DETERMINISTIC
                 | FunctionFlags::SQLITE_INNOCUOUS,
             |ctx| Ok(fold(ctx.get_raw(0).as_str()?)),
+        )?;
+        // How well a file answers an import (`index::imports`), by the languages' rules, which
+        // are Rust's to know. Deterministic and innocuous, as the ones above.
+        conn.create_scalar_function(
+            "import_rank",
+            5,
+            FunctionFlags::SQLITE_UTF8
+                | FunctionFlags::SQLITE_DETERMINISTIC
+                | FunctionFlags::SQLITE_INNOCUOUS,
+            |ctx| {
+                Ok(crate::code::imports::rank(
+                    ctx.get_raw(0).as_str()?,
+                    ctx.get_raw(1).as_str()?,
+                    ctx.get(2)?,
+                    ctx.get(3)?,
+                    ctx.get_raw(4).as_str()?,
+                ))
+            },
         )?;
 
         // A new file gets the schema. An index an older build wrote is never migrated in place:
