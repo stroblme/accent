@@ -1,5 +1,7 @@
 //! The graph's canvas (DESIGN.md, Graph): the links and nodes as the layout's thread drew them,
-//! the names on top, and the input that moves round it.
+//! the names on top, and the input that moves round it, the keyboard's included: the arrows move
+//! it from node to node, Enter opens the node it is on, and typing starts the pane's find bar on
+//! the nodes' names.
 //!
 //! The canvas owns the [`Graph`] and where each of its nodes is. Every change to what it shows
 //! goes through [`GraphView::apply`], into the graph and the layout's [`Worker`] together, so the
@@ -18,7 +20,7 @@ use adw::prelude::*;
 use gtk::subclass::prelude::*;
 use gtk::{gdk, glib, graphene, gsk, pango};
 
-use super::camera::{self, Camera};
+use super::camera::{self, Arrow, Camera};
 use super::model::{self, Changes, Graph, Paint};
 use super::raster::{self, Colours, Rgba};
 use super::worker::{Cmd, Picture, Worker};
@@ -53,6 +55,9 @@ struct Drag {
 /// What a press on a node asks of the tab: open its file, and keep it for a double click.
 type Open = dyn Fn(usize, bool);
 
+/// What a key typed over the canvas asks of the tab: the find bar opened, the key forwarded to it.
+type Typed = dyn Fn(&gtk::EventControllerKey);
+
 mod imp {
     use super::*;
 
@@ -67,6 +72,8 @@ mod imp {
         /// The file in front of the window, drawn in the accent, by key: it is no node until the
         /// answer holding it lands.
         pub front: RefCell<Option<String>>,
+        /// The node the keyboard is on, by key, ringed while the canvas has the keyboard.
+        pub current: RefCell<Option<String>>,
         /// Counts the changes sent to the layout, so only places of what is shown land.
         pub generation: Cell<u64>,
         pub worker: RefCell<Option<Worker>>,
@@ -90,6 +97,7 @@ mod imp {
         pub easing: Cell<([f64; 2], [f64; 2])>,
         pub wheel: RefCell<Option<adw::TimedAnimation>>,
         pub open: RefCell<Option<Rc<Open>>>,
+        pub typed: RefCell<Option<Rc<Typed>>>,
         pub zoomed: RefCell<Option<Rc<dyn Fn()>>>,
         /// How many of the layout's frames have landed since the last change, for the drill.
         #[cfg(feature = "bench")]
@@ -139,6 +147,7 @@ impl GraphView {
         view.update_property(&[gtk::accessible::Property::Label("Graph")]);
         view.wire_pointer();
         view.wire_wheel();
+        view.wire_keys();
         view
     }
 
@@ -153,6 +162,11 @@ impl GraphView {
     /// What a press on a node does: `keep` for the second press of a double click.
     pub fn connect_open(&self, f: impl Fn(usize, bool) + 'static) {
         self.imp().open.replace(Some(Rc::new(f)));
+    }
+
+    /// What a key that types text does: the find bar takes it.
+    pub fn connect_typed(&self, f: impl Fn(&gtk::EventControllerKey) + 'static) {
+        self.imp().typed.replace(Some(Rc::new(f)));
     }
 
     /// Hear a pan or a zoom, for the zoom readout.
@@ -332,8 +346,169 @@ impl GraphView {
     pub fn rename(&self, from: &str, to: &str) {
         let imp = self.imp();
         imp.graph.borrow_mut().rename(from, to);
+        for key in [&imp.current, &imp.front] {
+            let moved = key.borrow().as_deref().map(|k| model::moved(k, from, to));
+            if let Some(Some(moved)) = moved {
+                key.replace(Some(moved));
+            }
+        }
         imp.labels.borrow_mut().clear();
         self.queue_draw();
+    }
+
+    /// The node the keyboard is on, by key.
+    pub fn current(&self) -> Option<String> {
+        self.imp().current.borrow().clone()
+    }
+
+    /// Put the keyboard on node `key`, said to a screen reader as its name and links, and
+    /// `centre` it, as a find bar's step does, or else keep it on the canvas.
+    pub fn set_current(&self, key: &str, centre: bool) {
+        let imp = self.imp();
+        let (i, said) = {
+            let graph = imp.graph.borrow();
+            let Some(i) = graph.index_of(key) else {
+                return;
+            };
+            let links = graph.adjacency[i].len();
+            let label = model::label(&graph.nodes[i]).to_string();
+            (
+                i,
+                match links {
+                    1 => format!("{label}, 1 link"),
+                    n => format!("{label}, {n} links"),
+                },
+            )
+        };
+        imp.current.replace(Some(key.to_string()));
+        self.update_property(&[gtk::accessible::Property::Description(&said)]);
+        let (size, Some(&p)) = (self.size(), imp.at.borrow().get(i)) else {
+            return;
+        };
+        let mut camera = self.camera();
+        let s = camera.to_screen(p);
+        let inside = |v: f64, max: f64| (camera::MARGIN..=max - camera::MARGIN).contains(&v);
+        if centre || !(inside(s[0], size[0]) && inside(s[1], size[1])) {
+            camera.centre(p, size);
+            camera.fitting = false;
+            self.set_camera(camera);
+        }
+        self.queue_draw();
+    }
+
+    /// An arrow from the node the keyboard is on: to the nearest node it links to that way, else
+    /// the nearest node that way at all. The first press puts the keyboard on the file in front.
+    fn arrow(&self, arrow: Arrow) {
+        let imp = self.imp();
+        let next = {
+            let graph = imp.graph.borrow();
+            let at = imp.at.borrow();
+            let current = imp
+                .current
+                .borrow()
+                .as_deref()
+                .and_then(|k| graph.index_of(k));
+            let front = imp
+                .front
+                .borrow()
+                .as_deref()
+                .and_then(|k| graph.index_of(k));
+            let next = match current {
+                None => front.or((!graph.nodes.is_empty()).then_some(0)),
+                Some(i) => {
+                    let near = graph.adjacency[i].iter().map(|&j| (j, at[j]));
+                    camera::step(at[i], arrow, near).or_else(|| {
+                        let all = (0..at.len()).filter(|&j| j != i).map(|j| (j, at[j]));
+                        camera::step(at[i], arrow, all)
+                    })
+                }
+            };
+            next.map(|i| graph.nodes[i].key.clone())
+        };
+        if let Some(key) = next {
+            self.set_current(&key, false);
+        }
+    }
+
+    /// Open the node the keyboard is on, as a single click does.
+    fn open_current(&self) {
+        let i = (self.imp().current.borrow().as_deref()).and_then(|k| self.graph().index_of(k));
+        let open = self.imp().open.borrow().clone();
+        if let (Some(i), Some(open)) = (i, open) {
+            open(i, false);
+        }
+    }
+
+    /// The arrows, Enter, and a key that types text, which opens the find bar on it; every other
+    /// key goes on to the window, Escape to the find bar.
+    fn wire_keys(&self) {
+        let keys = gtk::EventControllerKey::new();
+        keys.connect_key_pressed(glib::clone!(
+            #[weak(rename_to = view)]
+            self,
+            #[upgrade_or]
+            glib::Propagation::Proceed,
+            move |keys, key, _, state| view.key(keys, key, state)
+        ));
+        self.add_controller(keys);
+        // The ring round the node the keyboard is on shows only while the canvas has it.
+        let focus = gtk::EventControllerFocus::new();
+        focus.connect_enter(glib::clone!(
+            #[weak(rename_to = view)]
+            self,
+            move |_| view.queue_draw()
+        ));
+        focus.connect_leave(glib::clone!(
+            #[weak(rename_to = view)]
+            self,
+            move |_| view.queue_draw()
+        ));
+        self.add_controller(focus);
+    }
+
+    fn key(
+        &self,
+        keys: &gtk::EventControllerKey,
+        key: gdk::Key,
+        state: gdk::ModifierType,
+    ) -> glib::Propagation {
+        let held = gdk::ModifierType::CONTROL_MASK
+            | gdk::ModifierType::ALT_MASK
+            | gdk::ModifierType::SUPER_MASK
+            | gdk::ModifierType::META_MASK;
+        if state.intersects(held) {
+            return glib::Propagation::Proceed;
+        }
+        let arrow = match key {
+            gdk::Key::Left | gdk::Key::KP_Left => Some(Arrow::Left),
+            gdk::Key::Right | gdk::Key::KP_Right => Some(Arrow::Right),
+            gdk::Key::Up | gdk::Key::KP_Up => Some(Arrow::Up),
+            gdk::Key::Down | gdk::Key::KP_Down => Some(Arrow::Down),
+            _ => None,
+        };
+        if let Some(arrow) = arrow {
+            self.arrow(arrow);
+            return glib::Propagation::Stop;
+        }
+        if matches!(
+            key,
+            gdk::Key::Return | gdk::Key::KP_Enter | gdk::Key::ISO_Enter
+        ) {
+            self.open_current();
+            return glib::Propagation::Stop;
+        }
+        // A dead key starts a composed letter, which the find bar's entry finishes.
+        use glib::translate::IntoGlib;
+        let dead = (0xfe50..=0xfe8f).contains(&key.into_glib());
+        let text = key.to_unicode().is_some_and(|c| !c.is_control());
+        let typed = self.imp().typed.borrow().clone();
+        match (typed, text || dead) {
+            (Some(typed), true) => {
+                typed(keys);
+                glib::Propagation::Stop
+            }
+            _ => glib::Propagation::Proceed,
+        }
     }
 
     /// The names are laid out again in the new style, and everything drawn in its colours.
@@ -634,6 +809,7 @@ impl GraphView {
                 scale: surface.map_or(f64::from(self.scale_factor()), |s| s.scale()),
                 lit: imp.hover.get(),
                 front: index(&imp.front),
+                current: index(&imp.current).filter(|_| self.has_focus()),
                 colours: Colours {
                     ink: rgba(self.color()),
                     lanes: std::array::from_fn(|k| rgba(crate::highlight::lane_colour(k + 1))),
@@ -704,14 +880,17 @@ impl GraphView {
             .unwrap_or_default();
         let dimmed = |i: usize| lit.is_some() && !near.contains(&i);
         let front = (imp.front.borrow().as_deref()).and_then(|key| graph.index_of(key));
+        let current = (imp.current.borrow().as_deref()).and_then(|key| graph.index_of(key));
         // Every name from LABEL_ZOOM up, below it the lit node's neighbourhood's; the front's
-        // last, over the rest.
+        // and the current node's last, over the rest.
         let mut named: Vec<usize> = (0..screen.len())
             .filter(|&i| on_screen(screen[i]) && Some(i) != front)
             .filter(|i| camera.zoom >= LABEL_ZOOM || near.contains(i))
             .collect();
-        if let Some(i) = front.filter(|&i| on_screen(screen[i])) {
-            named.push(i);
+        for i in [front, current].into_iter().flatten() {
+            if on_screen(screen[i]) && !named.contains(&i) {
+                named.push(i);
+            }
         }
         self.paint_labels(snapshot, &graph, &screen, &named, &radius, &dimmed, ink);
         snapshot.pop();
@@ -767,6 +946,16 @@ fn rgba(colour: gdk::RGBA) -> Rgba {
 
 #[cfg(feature = "bench")]
 impl GraphView {
+    /// A key pressed over the canvas, as the keyboard lands one: the arrows and Enter.
+    pub fn press_key(&self, key: gdk::Key) {
+        self.grab_focus();
+        self.key(
+            &gtk::EventControllerKey::new(),
+            key,
+            gdk::ModifierType::empty(),
+        );
+    }
+
     /// A press on node `i`, as a click lands one.
     pub fn press(&self, i: usize, keep: bool) {
         self.grab_focus();

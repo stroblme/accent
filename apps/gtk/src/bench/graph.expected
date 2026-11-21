@@ -11,7 +11,11 @@ bench graph ghost gone.md dialog=Some("gone.md")
 bench graph all orphans=false nodes=["#topic", "a.md", "b.md?", "bee.md", "c.md", "d.md", "e.md", "f.md", "gone.md?", "main.py", "pic.png", "util.py"]
 bench graph orphans nodes+=["lone.md"]
 bench graph reset all=false roots=["bee.md"] nodes=["bee.md", "c.md"]
-bench graph session restored=true front=bee.md
+bench graph find typed="c.md" current=c.md readout="1 of 1"
+bench graph find closed keyboard=graph current=c.md
+bench graph arrows moved=true
+bench graph enter opened_current=true
+bench graph session restored=true front=c.md
 bench graph saved all=false unresolved=true tags=true images=true orphans=true
 bench graph still roots=["lone.md"] nodes=["lone.md"] settled_at_once=true
 bench graph closed worker_ended=true

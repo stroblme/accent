@@ -78,6 +78,15 @@ pub(super) fn radius(degree: usize) -> f32 {
     (4.0 + 1.5 * (degree as f32).sqrt()).min(12.0)
 }
 
+/// `key` once `from`, a file or a folder, has moved to `to`; `None` for a key it does not hold.
+pub(super) fn moved(key: &str, from: &str, to: &str) -> Option<String> {
+    match key.strip_prefix(from) {
+        Some("") => Some(to.to_string()),
+        Some(rest) if rest.starts_with('/') => Some(format!("{to}{rest}")),
+        _ => None,
+    }
+}
+
 /// What a node is called on the canvas and in find: a file's whole name, `.md` and all, and a
 /// tag as written.
 pub(super) fn label(node: &Node) -> &str {
@@ -176,11 +185,7 @@ impl Graph {
     /// A file or a folder moved from `from` to `to`: its nodes, and the roots, keep their place
     /// under their new keys.
     pub fn rename(&mut self, from: &str, to: &str) {
-        let moved = |key: &str| match key.strip_prefix(from) {
-            Some("") => Some(to.to_string()),
-            Some(rest) if rest.starts_with('/') => Some(format!("{to}{rest}")),
-            _ => None,
-        };
+        let moved = |key: &str| moved(key, from, to);
         for root in &mut self.roots {
             if let Some(new) = moved(root) {
                 *root = new;

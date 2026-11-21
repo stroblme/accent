@@ -2,8 +2,8 @@
 //! moved by the offset, a screen point being `world · zoom + offset`. Pure, so it is tested
 //! without a window.
 
-/// The space kept round what a fit shows, in pixels.
-const MARGIN: f64 = 32.0;
+/// The space kept round what a fit shows, and round the node the keyboard is on, in pixels.
+pub(super) const MARGIN: f64 = 32.0;
 
 /// How far past a node's disc a press or the pointer still finds it, in pixels.
 const SLOP: f64 = 4.0;
@@ -26,6 +26,26 @@ impl Default for Camera {
             offset: [0.0; 2],
             zoom: 1.0,
             fitting: true,
+        }
+    }
+}
+
+/// An arrow key's way across the canvas, `y` growing downwards as the canvas's does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Arrow {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+impl Arrow {
+    fn vector(self) -> [f32; 2] {
+        match self {
+            Arrow::Left => [-1.0, 0.0],
+            Arrow::Right => [1.0, 0.0],
+            Arrow::Up => [0.0, -1.0],
+            Arrow::Down => [0.0, 1.0],
         }
     }
 }
@@ -111,6 +131,28 @@ impl Camera {
     }
 }
 
+/// Of `candidates`, the nearest to `from` within 45° either side of `arrow`, the lower index
+/// where two are as near.
+pub(super) fn step(
+    from: [f32; 2],
+    arrow: Arrow,
+    candidates: impl IntoIterator<Item = (usize, [f32; 2])>,
+) -> Option<usize> {
+    let way = arrow.vector();
+    let mut best = None::<(usize, f32)>;
+    for (i, p) in candidates {
+        let d = [p[0] - from[0], p[1] - from[1]];
+        let along = d[0] * way[0] + d[1] * way[1];
+        let across = (d[0] * way[1] - d[1] * way[0]).abs();
+        let d2 = d[0] * d[0] + d[1] * d[1];
+        let nearer = best.is_none_or(|(b, bd)| d2 < bd || (d2 == bd && i < b));
+        if along > 0.0 && across <= along && nearer {
+            best = Some((i, d2));
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,5 +213,20 @@ mod tests {
             ..camera
         };
         assert_eq!(far.hit([4.0, 0.0], &[[0.0, 0.0]], radius), Some(0));
+    }
+
+    /// An arrow goes to the nearest node in its quarter, never to one beside or behind.
+    #[test]
+    fn an_arrow_steps_to_the_nearest_node_that_way() {
+        let nodes = [
+            (0, [10.0, 0.0]),
+            (1, [30.0, 5.0]),
+            (2, [5.0, 20.0]),
+            (3, [-10.0, 0.0]),
+        ];
+        assert_eq!(step([0.0; 2], Arrow::Right, nodes), Some(0));
+        assert_eq!(step([0.0; 2], Arrow::Left, nodes), Some(3));
+        assert_eq!(step([0.0; 2], Arrow::Down, nodes), Some(2));
+        assert_eq!(step([0.0; 2], Arrow::Up, nodes), None);
     }
 }

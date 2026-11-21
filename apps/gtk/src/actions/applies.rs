@@ -198,7 +198,7 @@ pub fn applies(action: &str, cx: &Context) -> bool {
 
         // What searches, edits and moves about in the document.
         "win.find" | "win.find-next" | "win.find-previous" => {
-            text || pdf || notebook || preview || diagram
+            text || pdf || notebook || preview || diagram || front == Some(Graph)
         }
         "win.replace" => text || notebook,
         // `Ctrl+G` groups a diagram's selection, `Ctrl+D` duplicates it, and `Ctrl+Return`

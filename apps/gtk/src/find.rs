@@ -542,6 +542,16 @@ impl Bar {
         }
     }
 
+    /// Open on a key typed over a document with nothing to type into, the graph: the key goes on
+    /// to the query's text, which takes it as typed there, a composed letter too, as a search
+    /// entry's key capture forwards it (the entry itself would drop it).
+    pub fn open_typed(self: &Rc<Self>, keys: &gtk::EventControllerKey) {
+        self.open(Mode::Find);
+        if let Some(text) = self.query.delegate() {
+            keys.forward(&text);
+        }
+    }
+
     /// Next or previous match. Works with the bar closed too, which is what F3 is for.
     pub fn step(self: &Rc<Self>, forward: bool) {
         self.mark_once();

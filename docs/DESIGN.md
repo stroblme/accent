@@ -1075,7 +1075,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A long PDF's pages are searched in the background, so its count grows ("1 of 3", then "1 of 57").
   A page edit searches the PDF again without moving the reader, and the next step goes from the page being read.
 - Enter steps to the next match and Shift+Enter to the previous, in every bar.
-- The readout says "3 of 12" in the buffer, a notebook, a PDF, a diagram and the rendered preview alike.
+- The readout says "3 of 12" in the buffer, a notebook, a PDF, a diagram, a graph and the rendered preview alike.
 - Beside the query sit the Search pane's Match Case, Match Whole Word and Regular Expression toggles, the same text buttons in the same `.linked` group, and a buffer, a notebook's cells and the rendered preview are matched by the Search pane's own matcher (`accent_core::search`): the whole text at once, a cell at a time in a notebook, so `^` is the start of the note or the cell and a pattern may run across lines, a whole word ends where `\b` says (`_` is a word character), and under Regular Expression a replacement's `$1` names a group, as Replace All in Files writes it.
   Each bar keeps its own toggles, apart from the Search pane's and the other pane's bar.
 - A query that does not compile marks the box as the Search pane marks its own, and the readout says "Invalid pattern".
@@ -1084,6 +1084,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - Over the rendered preview the page's text is searched as a buffer is, a table's cells each alone and counted where the table stands; the matches within a screen of the view are painted and painted again as it scrolls, the current one is the selection, in its cell for a cell's, and a step scrolls an unseen match a third of the way down.
   An edit beside it keeps the match selected.
 - Over a diagram the bar searches its labels, each on the one line Search reads it as, by the Search pane's matcher: a hit is the cell, counted through the pages in document order, and a step selects it and brings it to the middle of the view, or on a presented page, which selects nothing, shows its page.
+- Over a graph the bar searches the nodes' names by the Search pane's matcher, and a step makes the match the node the keyboard is on and brings it to the middle.
 - Over a notebook the bar searches its cells' sources, not their outputs, as Search does: a step selects the match's cell and scrolls the match into view, the keyboard staying in the bar.
   Replace takes one match, one Undo step, and Replace All every match in every cell as one step through the notebook's model (user decision 2026-10-20).
   Go to Line is Go to Cell there ("of 14 cells").
@@ -1690,7 +1691,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A note is drawn in the foreground, code, a PDF, a diagram, a notebook and an image each in one of the five hues after the accent, and a text file or a tag in the foreground at 60 %.
   Links are hairlines in the foreground at a fifth of its strength, without arrows.
 - The pointer over a node lights it, its links and its neighbours, and dims the rest.
-  Names show from 60 % up, and below that only round the lit node and the file in front.
+  Names show from 60 % up, and below that only round the lit node, the file in front and the node the keyboard is on.
 - **The layout is a live force layout** worked out off the main loop (user decision 2026-11-21), so the nodes settle as they are watched, a dragged node pulls its neighbours along and what a click adds slides out of the node clicked.
   The links and nodes are drawn off the main loop too, into a picture the canvas moves and zooms until the next one arrives, and only the names are drawn on the canvas itself (user decision 2026-11-21).
   So the first nodes show as soon as the vault answers, where they were placed and before their links, and the graph pans, zooms and follows the pointer while it settles and while a picture is drawn (user decision 2026-11-21).
@@ -2339,6 +2340,9 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 ### Graph
 
 - The graph's own Show Whole Vault, Show Unresolved Links, Show Tags, Show Images, Show Orphans and Reset Graph (unbound), beside Show Graph `Ctrl+Shift+M` (Views).
+- Typing over the graph opens its pane's find bar on what is typed, which searches the nodes' names as a diagram's bar searches its labels, and the match shown is the node the keyboard is on, brought to the middle.
+  Enter steps there as in every bar, and Escape closes the bar with the keyboard on that node.
+- On the canvas the arrows move the keyboard to the nearest linked node that way, or else the nearest node that way, and Enter opens its file beside the graph as a click does.
 
 ### History
 

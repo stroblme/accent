@@ -547,6 +547,22 @@ impl App {
             }
             return;
         }
+        // The graph finds its nodes' names, a step putting the keyboard on the node found, and
+        // takes the keyboard back as the bar closes, on the node found.
+        if let Some(graph) = self.graph_of(pane) {
+            match op {
+                find::PreviewOp::Find(text, options) => graph.find(&text, options),
+                find::PreviewOp::Next => graph.step_match(true),
+                find::PreviewOp::Previous => graph.step_match(false),
+                find::PreviewOp::Clear => {
+                    graph.find_clear();
+                    graph.key_target().grab_focus();
+                }
+                find::PreviewOp::Line { .. } | find::PreviewOp::Replace { .. } => {}
+            }
+            pane.find.set_matches_text(&graph.matches_label());
+            return;
+        }
         // A notebook is matched as a buffer is, a cell at a time, and goes to cells.
         if let Some(nb) = self.notebook_of(pane) {
             match op {

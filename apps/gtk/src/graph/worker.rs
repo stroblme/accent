@@ -427,6 +427,7 @@ mod tests {
             scale: 2.0,
             lit: None,
             front: Some(0),
+            current: None,
             colours: raster::Colours {
                 ink: [0.0, 0.0, 0.0, 1.0],
                 lanes: [[1.0; 4]; 5],

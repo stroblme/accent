@@ -37,6 +37,8 @@ pub struct View {
     pub lit: Option<usize>,
     /// The file in front, in the accent with a ring.
     pub front: Option<usize>,
+    /// The node the keyboard is on while the canvas has the keyboard, ringed.
+    pub current: Option<usize>,
     pub colours: Colours,
 }
 
@@ -144,6 +146,16 @@ pub fn draw(scene: &Scene, view: &View, camera: Camera) -> Pixels {
         let (p, r) = (screen[i], radius(i));
         px.disc(p, r, colours.accent);
         px.ring(p, r + 3.0 * scale as f32, ring, colours.accent);
+    }
+    if let Some(i) = view.current.filter(|&c| c < n) {
+        let gap = if Some(i) == front { 6.0 } else { 3.0 };
+        let focus = alpha(colours.accent, theme::FOCUS_ALPHA);
+        px.ring(
+            screen[i],
+            radius(i) + gap * scale as f32,
+            2.0 * scale as f32,
+            focus,
+        );
     }
     px
 }

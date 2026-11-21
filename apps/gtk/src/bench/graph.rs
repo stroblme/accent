@@ -13,13 +13,17 @@ use crate::graph::GraphTab;
 /// link to its old name leaves (`rename`). Through the menu's commands it shows tags and images and
 /// prints the nodes each adds (`tags`, `images`); a press on the ghost prints the name New File
 /// offers (`ghost`); it shows the whole vault without its orphans and then with them (`all`,
-/// `orphans`), and prints Reset Graph's roots (`reset`). Then it saves the session and quits.
-/// `restored` prints whether the graph came back with the session, the file it is around
-/// (`session`) and what its menu shows (`saved`); opens `lone.md`, which it does not hold, and with
-/// animations off shows the graph again, printing what it started again around and whether it
-/// showed no places between where the nodes were placed and the settled layout (`still`); then
-/// closes it and prints whether the layout's threads ended with it (`closed`). `drill_graph` writes
-/// the notes into a scratch vault.
+/// `orphans`), and prints Reset Graph's roots (`reset`). It types `c.md` over the canvas with real
+/// keys (XTEST), the first of which opens the pane's find bar, and prints what the bar's query
+/// holds, the node the keyboard went to and the bar's readout (`find`), and where the keyboard is
+/// once the bar is closed (`find closed`); it presses the four arrows and prints whether the
+/// keyboard moved (`arrows`), then Enter and prints whether the node it is on opened (`enter`).
+/// Then it saves the session and quits. `restored` prints whether the graph came back with the
+/// session, the file it is around (`session`) and what its menu shows (`saved`); opens `lone.md`,
+/// which it does not hold, and with animations off shows the graph again, printing what it started
+/// again around and whether it showed no places between where the nodes were placed and the settled
+/// layout (`still`); then closes it and prints whether the layout's threads ended with it
+/// (`closed`). `drill_graph` writes the notes into a scratch vault.
 pub(super) fn bench_graph(app: &Rc<App>, arg: &str) {
     let app = app.clone();
     let arg = arg.to_string();
@@ -68,11 +72,7 @@ async fn check(app: &Rc<App>, rel: &str) {
             .and_then(|pane| app.panes.borrow().iter().position(|p| Rc::ptr_eq(p, pane)))
             .map_or(0, |n| n + 1);
         let preview = pane.as_ref().and_then(|pane| pane.preview()) == page;
-        let keyboard = match app.focused() {
-            Some(focus) if focus.is_ancestor(&graph.page.child()) => "graph",
-            Some(_) => "elsewhere",
-            None => "none",
-        };
+        let keyboard = keyboard(app, &graph);
         let opened = (pane.as_ref())
             .and_then(|pane| app.doc_of(pane))
             .map(|doc| doc.key());
@@ -161,7 +161,73 @@ async fn check(app: &Rc<App>, rel: &str) {
         graph.roots(),
         graph.nodes()
     );
+    let Some(pane) = app.pane_of(&graph.page) else {
+        return;
+    };
+    // Typed with real keys over the canvas: the first key opens the bar and lands in its query.
+    let canvas = graph.key_target();
+    canvas.grab_focus();
+    let at = gtk::graphene::Point::new(canvas.width() as f32 / 2.0, 8.0);
+    let at = canvas.compute_point(&app.window, &at).unwrap_or(at);
+    let keys = format!(
+        "move {:.0} {:.0}; focus; type c; key period; type md",
+        at.x(),
+        at.y()
+    );
+    super::git::xtest(&keys).await;
+    until("graph", "find", 10_000, || {
+        graph.current().as_deref() == Some("c.md")
+    })
+    .await;
+    println!(
+        "bench graph find typed={:?} current={} readout={:?}",
+        pane.find.query_box().text(),
+        graph.current().unwrap_or_default(),
+        pane.find.readout().0
+    );
+    pane.find.close();
+    glib::timeout_future(Duration::from_millis(200)).await;
+    println!(
+        "bench graph find closed keyboard={} current={}",
+        keyboard(app, &graph),
+        graph.current().unwrap_or_default()
+    );
+    let from = graph.current();
+    let mut moved = false;
+    for key in [
+        gdk::Key::Right,
+        gdk::Key::Down,
+        gdk::Key::Left,
+        gdk::Key::Up,
+    ] {
+        graph.press_key(key);
+        moved |= graph.current() != from;
+    }
+    println!("bench graph arrows moved={moved}");
+    let current = graph.current().unwrap_or_default();
+    graph.press_key(gdk::Key::Return);
+    let shown = || {
+        (app.panes.borrow().iter())
+            .any(|pane| app.doc_of(pane).is_some_and(|doc| doc.key() == current))
+    };
+    let opened = until("graph", "enter", 10_000, shown).await.is_some();
+    println!("bench graph enter opened_current={opened}");
+    // Where the arrows ended depends on the layout's shape: the session is left on one file.
+    app.open_path("c.md");
+    until("graph", "c.md", 10_000, || {
+        app.active_key().as_deref() == Some("c.md")
+    })
+    .await;
     app.save_session();
+}
+
+/// Where the keyboard is: on the graph, elsewhere, or nowhere.
+fn keyboard(app: &App, graph: &GraphTab) -> &'static str {
+    match app.focused() {
+        Some(focus) if focus.is_ancestor(&graph.page.child()) => "graph",
+        Some(_) => "elsewhere",
+        None => "none",
+    }
 }
 
 /// Run the graph's menu command `action` and wait for its answer to be laid out.
