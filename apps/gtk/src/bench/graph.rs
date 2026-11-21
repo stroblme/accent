@@ -7,16 +7,19 @@ use crate::graph::GraphTab;
 /// `ACCENT_BENCH_GRAPH=check:<rel>` opens `rel`, then Show Graph, and prints the nodes, a ghost's
 /// key ending in `?`, and the links once laid out (`open`). It presses two of them in turn, each
 /// opening beside the graph as the other pane's preview, and prints where each opened and where the
-/// keyboard is (`click`), and the roots and nodes the graph grew to (`grow`). Through the menu's
-/// commands it shows tags and images and prints the nodes each adds (`tags`, `images`); a press on
-/// the ghost prints the name New File offers (`ghost`); it shows the whole vault without its
-/// orphans and then with them (`all`, `orphans`), and prints Reset Graph's roots (`reset`). Then it
-/// saves the session and quits. `restored` prints whether the graph came back with the session, the
-/// file it is around (`session`) and what its menu shows (`saved`); opens `lone.md`, which it does
-/// not hold, and with animations off shows the graph again, printing what it started again around
-/// and whether it showed no places between where the nodes were placed and the settled layout
-/// (`still`); then closes it and prints whether the layout's threads ended with it (`closed`).
-/// `drill_graph` writes the notes into a scratch vault.
+/// keyboard is (`click`), and the roots and nodes the graph grew to (`grow`). It writes a link to
+/// `d.md` into `c.md` and prints the node that adds and whether every node kept its index
+/// (`update`), then renames `b.md` and prints whether its node kept its index and the ghost the
+/// link to its old name leaves (`rename`). Through the menu's commands it shows tags and images and
+/// prints the nodes each adds (`tags`, `images`); a press on the ghost prints the name New File
+/// offers (`ghost`); it shows the whole vault without its orphans and then with them (`all`,
+/// `orphans`), and prints Reset Graph's roots (`reset`). Then it saves the session and quits.
+/// `restored` prints whether the graph came back with the session, the file it is around
+/// (`session`) and what its menu shows (`saved`); opens `lone.md`, which it does not hold, and with
+/// animations off shows the graph again, printing what it started again around and whether it
+/// showed no places between where the nodes were placed and the settled layout (`still`); then
+/// closes it and prints whether the layout's threads ended with it (`closed`). `drill_graph` writes
+/// the notes into a scratch vault.
 pub(super) fn bench_graph(app: &Rc<App>, arg: &str) {
     let app = app.clone();
     let arg = arg.to_string();
@@ -87,6 +90,39 @@ async fn check(app: &Rc<App>, rel: &str) {
             graph.front().unwrap_or_default()
         );
     }
+    let root = app.root();
+    let before: Vec<(String, Option<usize>)> = (graph.nodes().into_iter())
+        .map(|key| (key.clone(), graph.index_of(&key)))
+        .collect();
+    if let Err(e) = std::fs::write(root.join("c.md"), "[[f]] [[d]]\n") {
+        return println!("bench graph update failed {e}");
+    }
+    until("graph", "update", 10_000, || {
+        graph.index_of("d.md").is_some() && graph.landed()
+    })
+    .await;
+    let added: Vec<String> = (graph.nodes().into_iter())
+        .filter(|n| !before.iter().any(|(k, _)| k == n))
+        .collect();
+    let kept = (before.iter()).all(|(key, at)| graph.index_of(key) == *at);
+    println!("bench graph update c.md nodes+={added:?} kept={kept}");
+    // `a.md`'s link to `b.md` dangles once it has gone: a ghost in its place.
+    let (was, before) = (graph.index_of("b.md"), graph.nodes());
+    if let Err(e) = std::fs::rename(root.join("b.md"), root.join("bee.md")) {
+        return println!("bench graph rename failed {e}");
+    }
+    until("graph", "rename", 10_000, || {
+        graph.nodes().iter().any(|n| n == "b.md?") && graph.landed()
+    })
+    .await;
+    let added: Vec<String> = (graph.nodes().into_iter())
+        .filter(|n| !before.contains(n))
+        .collect();
+    println!(
+        "bench graph rename b.md bee.md index_kept={} roots={:?} nodes+={added:?}",
+        was.is_some() && graph.index_of("bee.md") == was,
+        graph.roots()
+    );
     for (action, what) in [("win.graph-tags", "tags"), ("win.graph-images", "images")] {
         let before = graph.nodes();
         menu(app, &graph, action).await;

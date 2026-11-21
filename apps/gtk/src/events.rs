@@ -254,6 +254,10 @@ impl App {
             // And which templates name a target, each a command of its own.
             self.follow_templates(&event);
         }
+        // The graph's files and links, a file added too: a ghost's note written, say.
+        if touched || matches!(event, Event::FilesAdded(_)) {
+            self.graphs_follow(&event);
+        }
         // A note's hints are about the index as much as about its own text: the file a
         // `[[link]]` names may have just been created, renamed or deleted, and none of that is
         // an edit of the note holding the link. So the open notes, and the notebooks' markdown

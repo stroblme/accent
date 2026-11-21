@@ -1699,6 +1699,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - Dragging the background or with the middle button pans, and so do the wheel and the touchpad, while `Ctrl+scroll`, a pinch and the zoom chords zoom as over a diagram (Zoom).
   Until the reader pans or zooms, the graph is kept fitted as it settles, never past 100 %, and the readout says Fit as an image's does.
   `Ctrl+0` fits it again.
+- It follows the vault 300 ms after the last change, a note saved here or by another program and a file added, renamed or deleted, each node keeping its place, a renamed one too.
 - Its menu, a right-click anywhere on the canvas, holds Show Whole Vault, Show Unresolved Links, Show Tags, Show Images and Show Orphans as checks, then Reset Graph, each a palette command too (Keyboard, Graph).
   What it shows is kept in the vault's session, and a restored graph comes back around the file in front.
 - Like a shell or a comparison it is no file, so it has no backlinks, stays in its window and is no recent file.
@@ -2721,6 +2722,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 | A copy's count on the status bar, by file or by byte | 200 ms | `statusbar.rs::TICK` |
 | Automatic reconnect | after 1, 2, 4, 8, 16 s, then every 30 s, for 10 min; the banner's count ticks every 1 s | `reconnect.rs::backoff`, `GIVE_UP` |
 | Preview re-render, a note's word count | 300 ms | `main.rs::RENDER` |
+| The graph after a change in the vault | 300 ms | `graph/mod.rs::REFRESH` |
 | Symbols and folds after an edit | 300 ms | `lang.rs::REFRESH` |
 | References after a caret move | 300 ms | `references.rs::REFERENCES` |
 | Outline row after a caret move | 100 ms | `editor/mod.rs::CURSOR` |

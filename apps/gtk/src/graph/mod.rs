@@ -27,6 +27,10 @@ const ICON: &str = "links-graph-symbolic";
 /// The empty page's name in the tab's holder.
 const EMPTY: &str = "empty";
 
+/// How long after the last change in the vault the graph asks again (DESIGN.md, Motion): a burst
+/// of saves, a sync or a folder moved, costs one question.
+const REFRESH: Duration = Duration::from_millis(300);
+
 pub(crate) fn is_key(key: &str) -> bool {
     key == KEY
 }
@@ -60,7 +64,8 @@ enum Ask {
     Fresh,
     /// The roots grown by this key: what is new slides out of its node.
     Grow(String),
-    /// The same roots asked again, something more or less shown: every node stays where it is.
+    /// The same roots asked again, the vault changed or something more or less shown: every
+    /// node stays where it is.
     Again,
 }
 
@@ -78,6 +83,8 @@ pub struct GraphTab {
     asked: Cell<u64>,
     /// Whether it has been seeded, which waits until it is first on screen.
     started: Cell<bool>,
+    /// The question asked again after the vault changed ([`REFRESH`]).
+    refresh: widgets::Debounce,
     /// The last question whose answer landed.
     answered: Cell<u64>,
 }
@@ -167,6 +174,10 @@ impl GraphTab {
 
     pub fn roots(&self) -> Vec<String> {
         self.view.graph().roots.clone()
+    }
+
+    pub fn index_of(&self, key: &str) -> Option<usize> {
+        self.view.graph().index_of(key)
     }
 
     /// The file drawn in the accent.
@@ -283,6 +294,7 @@ impl App {
             query: RefCell::new(None),
             asked: Cell::new(0),
             started: Cell::new(false),
+            refresh: widgets::Debounce::new(REFRESH),
             answered: Cell::new(0),
         });
         graph.describe();
@@ -647,6 +659,37 @@ impl App {
         for graph in graphs {
             graph.view.set_front(front.clone());
         }
+    }
+
+    /// The vault changed: a file renamed keeps its node under its new name, a root deleted is no
+    /// root, and each graph asks again [`REFRESH`] after the last change, a ghost whose note was
+    /// written turning into it in place.
+    pub(crate) fn graphs_follow(self: &Rc<Self>, event: &Event) {
+        for graph in self.graphs().iter().filter(|g| g.started.get()) {
+            match event {
+                Event::FileRenamed { from, to } => graph.view.rename(from, to),
+                Event::FileRemoved(rel) => graph.view.graph_mut().forget(rel),
+                _ => {}
+            }
+            self.refresh_graph_soon(graph);
+        }
+    }
+
+    /// Ask again after [`REFRESH`], as the vault changed: an own save emits no event.
+    pub(crate) fn refresh_graphs_soon(self: &Rc<Self>) {
+        for graph in self.graphs().iter().filter(|g| g.started.get()) {
+            self.refresh_graph_soon(graph);
+        }
+    }
+
+    fn refresh_graph_soon(self: &Rc<Self>, graph: &Rc<GraphTab>) {
+        let (app, weak) = (Rc::downgrade(self), Rc::downgrade(graph));
+        graph.refresh.call(move || {
+            if let (Some(app), Some(graph)) = (app.upgrade(), weak.upgrade()) {
+                graph.describe();
+                app.query_graph(&graph, Ask::Again);
+            }
+        });
     }
 
     /// Lay the graphs' names out again in a new style.

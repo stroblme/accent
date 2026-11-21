@@ -3,13 +3,15 @@ bench graph click c.md opened=c.md pane=2 preview=true keyboard=graph tabs=1
 bench graph grow c.md roots=["a.md", "c.md"] nodes=["a.md", "b.md", "c.md", "e.md", "f.md", "gone.md?"] front=c.md
 bench graph click b.md opened=b.md pane=2 preview=true keyboard=graph tabs=1
 bench graph grow b.md roots=["a.md", "c.md", "b.md"] nodes=["a.md", "b.md", "c.md", "e.md", "f.md", "gone.md?"] front=b.md
+bench graph update c.md nodes+=["d.md"] kept=true
+bench graph rename b.md bee.md index_kept=true roots=["a.md", "c.md", "bee.md"] nodes+=["b.md?", "bee.md"]
 bench graph tags nodes+=["#topic"]
 bench graph images nodes+=["pic.png"]
 bench graph ghost gone.md dialog=Some("gone.md")
-bench graph all orphans=false nodes=["#topic", "a.md", "b.md", "c.md", "e.md", "f.md", "gone.md?", "main.py", "pic.png", "util.py"]
-bench graph orphans nodes+=["d.md", "lone.md"]
-bench graph reset all=false roots=["b.md"] nodes=["a.md", "b.md", "c.md"]
-bench graph session restored=true front=b.md
+bench graph all orphans=false nodes=["#topic", "a.md", "b.md?", "bee.md", "c.md", "d.md", "e.md", "f.md", "gone.md?", "main.py", "pic.png", "util.py"]
+bench graph orphans nodes+=["lone.md"]
+bench graph reset all=false roots=["bee.md"] nodes=["bee.md", "c.md"]
+bench graph session restored=true front=bee.md
 bench graph saved all=false unresolved=true tags=true images=true orphans=true
 bench graph still roots=["lone.md"] nodes=["lone.md"] settled_at_once=true
 bench graph closed worker_ended=true

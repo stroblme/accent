@@ -328,6 +328,14 @@ impl GraphView {
         }
     }
 
+    /// A file or a folder moved: its nodes keep their places under the new keys.
+    pub fn rename(&self, from: &str, to: &str) {
+        let imp = self.imp();
+        imp.graph.borrow_mut().rename(from, to);
+        imp.labels.borrow_mut().clear();
+        self.queue_draw();
+    }
+
     /// The names are laid out again in the new style, and everything drawn in its colours.
     pub fn restyle(&self) {
         self.imp().labels.borrow_mut().clear();

@@ -173,18 +173,42 @@ impl Graph {
         self.reindex();
     }
 
-    /// A file moved from `from` to `to`: its node, and a root, keep their place under the new
-    /// key. Whether the graph holds it.
-    pub fn rename(&mut self, from: &str, to: &str) -> bool {
-        for root in self.roots.iter_mut().filter(|r| *r == from) {
-            *root = to.to_string();
-        }
-        let Some(i) = self.index.remove(from) else {
-            return false;
+    /// A file or a folder moved from `from` to `to`: its nodes, and the roots, keep their place
+    /// under their new keys.
+    pub fn rename(&mut self, from: &str, to: &str) {
+        let moved = |key: &str| match key.strip_prefix(from) {
+            Some("") => Some(to.to_string()),
+            Some(rest) if rest.starts_with('/') => Some(format!("{to}{rest}")),
+            _ => None,
         };
-        self.nodes[i].key = to.to_string();
-        self.index.insert(to.to_string(), i);
-        true
+        for root in &mut self.roots {
+            if let Some(new) = moved(root) {
+                *root = new;
+            }
+        }
+        let mut any = false;
+        for node in &mut self.nodes {
+            if let Some(new) = (node.kind != NodeKind::Tag)
+                .then(|| moved(&node.key))
+                .flatten()
+            {
+                node.key = new;
+                any = true;
+            }
+        }
+        if any {
+            self.reindex();
+        }
+    }
+
+    /// A file or a folder deleted: no root is in it any more.
+    pub fn forget(&mut self, gone: &str) {
+        self.roots.retain(|r| {
+            r != gone
+                && !r
+                    .strip_prefix(gone)
+                    .is_some_and(|rest| rest.starts_with('/'))
+        });
     }
 
     /// The pairs the layout pulls together, each once whichever way and however many kinds of
@@ -318,19 +342,20 @@ mod tests {
 
     #[test]
     fn a_rename_keeps_the_index_and_the_root() {
-        let mut graph = shown(&part(&["a.md", "b.md"], &[(0, 1)]));
-        graph.roots = vec!["b.md".into()];
-        assert!(graph.rename("b.md", "bee.md"));
+        let mut graph = shown(&part(&["a.md", "b.md", "dir/c.md", "dirt.md"], &[(0, 1)]));
+        graph.roots = vec!["b.md".into(), "dir/c.md".into()];
+        graph.rename("b.md", "bee.md");
         assert_eq!(graph.index_of("bee.md"), Some(1));
         assert_eq!(graph.index_of("b.md"), None);
+        // A folder takes what is in it along, and nothing that only starts like it.
+        graph.rename("dir", "box");
+        assert_eq!(keys(&graph), ["a.md", "bee.md", "box/c.md", "dirt.md"]);
+        assert_eq!(graph.roots, ["bee.md", "box/c.md"]);
+        // The next answer names them under their new keys, and nothing moves.
+        let next = part(&["a.md", "bee.md", "box/c.md", "dirt.md"], &[(0, 1)]);
+        assert!(graph.changes(&next, None).is_empty());
+        graph.forget("box");
         assert_eq!(graph.roots, ["bee.md"]);
-        assert!(!graph.rename("nowhere.md", "x.md"));
-        // The next answer names it under its new key, and nothing moves.
-        assert!(
-            graph
-                .changes(&part(&["a.md", "bee.md"], &[(0, 1)]), None)
-                .is_empty()
-        );
     }
 
     /// A link and an embed between the same two files pull them together once.
