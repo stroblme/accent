@@ -39,6 +39,7 @@ mod fold;
 mod ghost;
 mod git;
 mod goals;
+mod graph;
 mod highlight;
 mod hover;
 mod lang;
@@ -679,6 +680,7 @@ impl App {
         self.sync_drawing();
         self.sync_synctex(self.active_doc());
         self.sync_image_invert();
+        self.sync_graphs();
         // The tree's selection follows the tab in front, so the sidebar says which file is open
         // rather than which row the pointer last crossed. A diff, a terminal and a file from
         // outside the vault have no row to point at, and clear it.
@@ -1039,6 +1041,7 @@ impl App {
             Some(Doc::Image(_)) => (Some("Image".to_string()), None),
             Some(Doc::Terminal(_)) => (Some("Terminal".to_string()), None),
             Some(Doc::Rendered(_)) => (Some("Preview".to_string()), None),
+            Some(Doc::Graph(g)) => (Some("Graph".to_string()), Some(g.facts())),
             Some(Doc::Status(_) | Doc::Loading(_)) | Some(Doc::Diff(_)) | None => (None, None),
         };
         self.statusbar.set_kind(kind.as_deref());
@@ -1140,6 +1143,7 @@ impl App {
         for term in self.terminals() {
             term.restyle();
         }
+        self.restyle_graphs();
     }
 
     /// Apply theme/Preferences recolouring to file tabs and preview; used by restyling and kind toggles.

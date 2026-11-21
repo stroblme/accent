@@ -944,6 +944,11 @@ impl App {
             if rendered::note_of(key).is_some() {
                 continue;
             }
+            // The graph is no read either, and seeds itself once on screen.
+            if graph::is_key(key) {
+                self.open_graph(Opened::Restored);
+                continue;
+            }
             let previewed = restore
                 .placed
                 .iter()

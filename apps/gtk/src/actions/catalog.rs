@@ -412,6 +412,7 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.python-environment", "Select Python Environment", &[]),
     ("win.view-mode", "Toggle Preview", &["<Primary>m"]),
     ("win.minimap", "Toggle Minimap", &[]),
+    ("win.graph", "Show Graph", &["<Primary><Shift>m"]),
     // No chord: `Ctrl+H`, the file managers' own, is Replace here.
     ("win.show-hidden-files", "Show Hidden Files", &[]),
     ("win.sort-files-menu", "Sort Files…", &[]),

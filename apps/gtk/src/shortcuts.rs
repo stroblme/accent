@@ -118,7 +118,7 @@ fn section(action: &str) -> Option<&'static str> {
         "follow-link" | "quick-fix" | "source-action" | "fold" | "unfold" | "fold-all"
         | "unfold-all" | "lsp-restart-file" | "python-environment" => "Code",
         _ if starts(&["debug-"]) => "Debugging",
-        "view-mode" | "minimap" | "present" | "laser" => "Views",
+        "view-mode" | "minimap" | "graph" | "present" | "laser" => "Views",
         "fullscreen" | "preferences" | "shortcuts" | "menu" | "about" => "Window",
         "copy-name" | "copy-relative-path" | "copy-absolute-path" | "show-in-files"
         | "reveal-in-sidebar" | "move-to-new-window" | "pin-tab" | "unpin-tab"

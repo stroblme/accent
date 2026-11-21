@@ -50,7 +50,7 @@ async fn run(app: &Rc<App>) {
         app,
         vec![
             command("Pass", "true", Some("<Control><Shift>k")),
-            command("Fail", "pwd; false", Some("<Control><Shift>m")),
+            command("Fail", "pwd; false", Some("<Control><Shift>y")),
         ],
     );
     // Every tab the pane takes, by title once the opener has named it.
@@ -81,7 +81,7 @@ async fn run(app: &Rc<App>) {
         app.recent_commands.borrow().first()
     );
 
-    super::git::xtest("key ctrl+shift+m").await;
+    super::git::xtest("key ctrl+shift+y").await;
     let exited = || {
         app.terminals()
             .first()

@@ -183,9 +183,10 @@ impl App {
             // the file as it is when it gets there. One held for a comparison waits for it.
             Doc::Loading(held) if !held.unread() => self.read_again(held),
             Doc::Loading(_) => {}
-            // Neither a diff nor a shell is keyed by a path, so a file changing under one
-            // reaches none of these; a preview is rendered again from its note's tab.
-            Doc::Status(_) | Doc::Diff(_) | Doc::Terminal(_) | Doc::Rendered(_) => {}
+            // Neither a diff, a shell nor the graph is keyed by a path, so a file changing under
+            // one reaches none of these; a preview is rendered again from its note's tab.
+            Doc::Status(_) | Doc::Diff(_) | Doc::Terminal(_) | Doc::Rendered(_) | Doc::Graph(_) => {
+            }
         }
     }
 

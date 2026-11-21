@@ -24,6 +24,7 @@ mod folders;
 mod git;
 mod goals;
 mod goto;
+mod graph;
 mod ignored;
 mod image;
 mod info;
@@ -440,6 +441,8 @@ use user_commands::bench_commands;
 ///   never listed, a link into the vault listed beside its file with a link drawn on it and one
 ///   to nothing listed so once its file appears; `<dir>` pictures the rows light and dark there
 ///   (`dangling::bench_dangling`). Writes into the vault.
+/// - `ACCENT_BENCH_GRAPH=check:<rel>`, then `restored`: the Graph tab round `rel`, a press on
+///   its nodes opening beside it, and the tab back with the session (`graph::bench_graph`).
 /// - `ACCENT_BENCH_RETYPE=1`: an open tab following a rename to another extension
 ///   (`retype::bench_retype`). Saves: a scratch vault under `/tmp`.
 /// - `ACCENT_BENCH_UNFOLD=<rel>,<rel>,…`: folder expansion; `race:<dir>`,
@@ -519,6 +522,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     }
     if let Ok(arg) = std::env::var("ACCENT_BENCH_DANGLING") {
         return dangling::bench_dangling(app, &arg);
+    }
+    if let Ok(arg) = std::env::var("ACCENT_BENCH_GRAPH") {
+        return graph::bench_graph(app, &arg);
     }
     if std::env::var_os("ACCENT_BENCH_COAST").is_some() {
         return coast::bench_coast(app);

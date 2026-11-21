@@ -246,6 +246,7 @@ fn watch(doc: &Doc) -> Watch {
         Doc::Notebook(notebook) => rc("tab", notebook),
         Doc::Rendered(rendered) => rc("tab", rendered),
         Doc::Loading(held) => rc("tab", held),
+        Doc::Graph(graph) => rc("tab", graph),
     });
     if let Doc::Pdf(pdf) = doc {
         watch.extend(pdf.views().iter().map(|view| object("pdfview", view)));

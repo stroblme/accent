@@ -78,6 +78,8 @@ pub enum Doc {
     Rendered(Rc<crate::rendered::Rendered>),
     /// A file's tab whose document is still being read, or whose read failed (`loading`).
     Loading(Rc<crate::loading::Held>),
+    /// The vault's files and their links, around the file in front.
+    Graph(Rc<crate::graph::GraphTab>),
 }
 
 impl Doc {
@@ -93,15 +95,19 @@ impl Doc {
             Doc::Notebook(n) => n.key(),
             Doc::Rendered(r) => r.key(),
             Doc::Loading(held) => held.key(),
+            Doc::Graph(_) => crate::graph::KEY.to_string(),
         }
     }
 
-    /// Whether the document has no file: diffs, shells, previews and a text over no file (a
-    /// diagram cell's style) cannot be renamed or recorded as recent notes.
+    /// Whether the document has no file: diffs, shells, previews, the graph and a text over no
+    /// file (a diagram cell's style) cannot be renamed or recorded as recent notes.
     pub fn is_transient(&self) -> bool {
         match self {
             Doc::Text(tab) => tab.is_scratch(),
-            doc => matches!(doc, Doc::Diff(_) | Doc::Terminal(_) | Doc::Rendered(_)),
+            doc => matches!(
+                doc,
+                Doc::Diff(_) | Doc::Terminal(_) | Doc::Rendered(_) | Doc::Graph(_)
+            ),
         }
     }
 
@@ -135,6 +141,7 @@ impl Doc {
             Doc::Notebook(n) => &n.page,
             Doc::Rendered(r) => &r.page,
             Doc::Loading(held) => &held.page,
+            Doc::Graph(g) => &g.page,
         }
     }
 
@@ -197,6 +204,13 @@ impl Doc {
         }
     }
 
+    pub fn graph(&self) -> Option<&Rc<crate::graph::GraphTab>> {
+        match self {
+            Doc::Graph(g) => Some(g),
+            _ => None,
+        }
+    }
+
     /// What the document keeps on the language layer: a text tab's file, a notebook's program.
     pub fn language_document(&self) -> Option<Rc<crate::lang::Document>> {
         match self {
@@ -219,9 +233,9 @@ impl Doc {
             Doc::Pdf(pdf) => pdf.retarget(root, key),
             Doc::Diagram(d) => d.retarget(root, key),
             Doc::Notebook(n) => n.retarget(root, key),
-            // Neither a diff nor a shell is a file, so a rename has nothing to point them at; a
-            // preview follows its note's tab, whose key it takes its own from.
-            Doc::Diff(_) | Doc::Terminal(_) | Doc::Rendered(_) => {}
+            // Neither a diff, a shell nor the graph is a file, so a rename has nothing to point
+            // them at; a preview follows its note's tab, whose key it takes its own from.
+            Doc::Diff(_) | Doc::Terminal(_) | Doc::Rendered(_) | Doc::Graph(_) => {}
             Doc::Image(v) | Doc::Status(v) => {
                 *v.key.borrow_mut() = key.to_string();
                 v.page.set_title(file_name(key));

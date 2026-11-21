@@ -35,7 +35,7 @@ pub(crate) fn scroller(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
 
 /// How long a wheel notch takes to scroll: GTK's own easing of a page key or a scrollbar press
 /// (`ANIMATION_DURATION` in `gtkscrolledwindow.c`), so the wheel and the keys move alike.
-const WHEEL_MS: u32 = 200;
+pub(crate) const WHEEL_MS: u32 = 200;
 
 /// Ease each mouse-wheel notch on `scroller` over [`WHEEL_MS`] instead of GTK's jump, notches in
 /// quick succession adding up to one target. The [`Wheel`] returned lets a widget beside the

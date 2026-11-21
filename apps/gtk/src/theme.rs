@@ -239,6 +239,13 @@ pub const FIELD_ALPHA: f32 = 0.13;
 pub const FOCUS_ALPHA: f32 = 0.5;
 /// A diagram's grid over its paper, in the ink that reads on it: draw.io's `#e6e6e6` on white.
 pub const GRID_ALPHA: f32 = 0.1;
+/// The graph's links against the foreground, and what lies outside the lit node's neighbourhood;
+/// a text file's or a tag's node, a ghost's name and the lit node's links; a ghost's ring (user
+/// decision 2026-11-21).
+pub const GRAPH_EDGE_ALPHA: f32 = 0.2;
+pub const GRAPH_DIM_ALPHA: f32 = 0.15;
+pub const GRAPH_FAINT_ALPHA: f32 = 0.6;
+pub const GRAPH_RING_ALPHA: f32 = 0.4;
 
 /// Selection opacity matching libadwaita: 30 % accent while focused, 10 % foreground otherwise.
 /// Custom secondary selections match GTK's primary selection.

@@ -91,8 +91,8 @@ fn bench_template_commands(app: &Rc<App>) {
             crate::templates::action("Templates/Inbox Note.md"),
             "Inbox/Inbox Note.md",
         );
-        app.rebind(&inbox, Some(vec!["<Control><Shift>m".to_string()]));
-        super::git::xtest("move 700 450; focus; key ctrl+shift+m").await;
+        app.rebind(&inbox, Some(vec!["<Control><Shift>y".to_string()]));
+        super::git::xtest("move 700 450; focus; key ctrl+shift+y").await;
         let opened = until("template_commands", "chord", 5000, || front(note)).await;
         println!(
             "bench template_commands chord opened={} made={}",
@@ -108,7 +108,7 @@ fn bench_template_commands(app: &Rc<App>) {
         .await;
         app.open_path("Meta.md");
         until("template_commands", "back", 5000, || front("Meta.md")).await;
-        super::git::xtest("key ctrl+shift+m").await;
+        super::git::xtest("key ctrl+shift+y").await;
         let stored = app.config.borrow().shortcuts.contains_key(&inbox);
         println!(
             "bench template_commands deleted gone={} rows={:?} stored={stored} front={:?}",

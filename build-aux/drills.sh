@@ -825,6 +825,21 @@ drill_dangling() {
 		'bench dangling goto ["alias shortcut.md real/pre.md"]'
 }
 
+# The Graph tab round a note: the notes it links to and is linked from, a ghost for one not
+# written yet, a press opening a note beside the graph as the other pane's preview with the
+# keyboard left on the graph, and the tab back with the session.
+drill_graph() {
+	printf '[[b]] [[c]] [[gone]] #topic ![[pic.png]]\n' >"$vault/a.md"
+	echo '[[c]]' >"$vault/b.md"
+	echo 'plain' >"$vault/c.md"
+	echo 'alone' >"$vault/d.md"
+	echo '[[a]]' >"$vault/e.md"
+	cp "$repo/docs/guide/social-preview.png" "$vault/pic.png"
+	launch 90 ACCENT_BENCH_GRAPH=check:a.md >"$dir/graph"
+	launch 60 ACCENT_BENCH_GRAPH=restored >>"$dir/graph"
+	expect graph
+}
+
 if [ -n "${HEADLESS_DIR-}" ]; then
 	# Inside the launch headless.sh set up for the one drill named.
 	dir=$HEADLESS_DIR vault=$HEADLESS_DIR/vault

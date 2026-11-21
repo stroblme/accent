@@ -103,6 +103,7 @@ impl App {
                 (zoom != 1.0).then(|| format!("{} %", (zoom * 100.0).round() as i32))
             }
             Some(Doc::Image(image)) => Some(image_zoom_label(&image)),
+            Some(Doc::Graph(g)) => Some(g.zoom_label()),
             Some(Doc::Status(_) | Doc::Loading(_)) | None => None,
         };
         self.statusbar.set_zoom(label.as_deref());

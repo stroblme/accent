@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- tabler-icons "chart-dots-3" (v3.35.0), MIT (see LICENSE.tabler); strokes converted to fills. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24">
+    <path fill-rule="evenodd" d="M 5 3.875 A 3.125 3.125 0 1 1 4.999 3.875 Z M 5 6.125 A 0.875 0.875 0 1 0 5.001 6.125 Z" fill="currentColor"/>
+    <path fill-rule="evenodd" d="M 16 11.875 A 3.125 3.125 0 1 1 15.999 11.875 Z M 16 14.125 A 0.875 0.875 0 1 0 16.001 14.125 Z" fill="currentColor"/>
+    <path fill-rule="evenodd" d="M 18 1.875 A 4.125 4.125 0 1 1 17.999 1.875 Z M 18 4.125 A 1.875 1.875 0 1 0 18.001 4.125 Z" fill="currentColor"/>
+    <path fill-rule="evenodd" d="M 6 13.875 A 4.125 4.125 0 1 1 5.999 13.875 Z M 6 16.125 A 1.875 1.875 0 1 0 6.001 16.125 Z" fill="currentColor"/>
+    <path d="M 9.3233 18.0776 L 14.3233 16.5776 A 1.125 1.125 0 0 0 13.6767 14.4224 L 8.6767 15.9224 A 1.125 1.125 0 0 0 9.3233 18.0776 Z" fill="currentColor"/>
+    <path d="M 5.8626 9.427 L 13.6726 14.797 A 1.125 1.125 0 0 0 14.9474 12.943 L 7.1374 7.573 A 1.125 1.125 0 0 0 5.8626 9.427 Z" fill="currentColor"/>
+    <path d="M 7.1395 8.1163 L 15.1395 7.1163 A 1.125 1.125 0 0 0 14.8605 4.8837 L 6.8605 5.8837 A 1.125 1.125 0 0 0 7.1395 8.1163 Z" fill="currentColor"/>
+</svg>

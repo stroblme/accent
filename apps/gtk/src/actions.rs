@@ -37,6 +37,7 @@ fn front_of(doc: &Doc) -> Front {
         Doc::Terminal(_) => Front::Terminal,
         Doc::Diff(_) => Front::Diff,
         Doc::Rendered(_) => Front::Preview,
+        Doc::Graph(_) => Front::Graph,
         Doc::Status(_) | Doc::Loading(_) => Front::Status,
     }
 }
@@ -587,6 +588,7 @@ impl App {
             "pane-outline" => self.show_pane("outline"),
             "pane-properties" => self.show_pane("properties"),
             "view-mode" => self.toggle_preview(),
+            "graph" => self.show_graph(),
             "follow-link" => self.go_to_definition(),
             "debug-toggle-breakpoint" => self.toggle_breakpoint_at_caret(),
             "debug-remove-breakpoints" => self.remove_all_breakpoints(),
@@ -869,6 +871,12 @@ impl App {
                 "zoom-in" => d.zoom_step(false),
                 "zoom-out" => d.zoom_step(true),
                 _ => d.fit_page(),
+            },
+            // Reset fits it again, as an image's does.
+            Some(Doc::Graph(g)) => match name {
+                "zoom-in" => g.zoom_step(false),
+                "zoom-out" => g.zoom_step(true),
+                _ => g.fit(),
             },
             Some(Doc::Status(_) | Doc::Loading(_)) | None => {}
         }

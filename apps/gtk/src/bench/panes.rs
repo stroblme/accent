@@ -1614,7 +1614,7 @@ fn apart_windows(what: &str, shell: &Rc<crate::shell::Shell>, here: &Rc<App>) {
                     Doc::Notebook(_) => "notebook",
                     Doc::Status(_) => "status",
                     Doc::Loading(_) => "loading",
-                    Doc::Diff(_) | Doc::Terminal(_) | Doc::Rendered(_) => "other",
+                    Doc::Diff(_) | Doc::Terminal(_) | Doc::Rendered(_) | Doc::Graph(_) => "other",
                 };
                 format!("{kind}:{}", doc::file_name(&doc.key()))
             })
