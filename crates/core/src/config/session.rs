@@ -184,6 +184,8 @@ pub struct Session {
     /// path, where the reader picked one: kept here and never in the notebook (user decision
     /// 2026-10-27). Entries are not pruned.
     pub kernels: BTreeMap<String, String>,
+    /// What the Graph tab shows, kept with the graph closed too.
+    pub graph: GraphView,
 }
 
 /// A line a debugged program stops at, and what the reader set beside it: VS Code's conditional
@@ -250,6 +252,7 @@ impl Default for Session {
             watches: Vec::new(),
             exceptions: Vec::new(),
             kernels: BTreeMap::new(),
+            graph: GraphView::default(),
         }
     }
 }

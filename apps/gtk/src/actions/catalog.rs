@@ -413,6 +413,12 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.view-mode", "Toggle Preview", &["<Primary>m"]),
     ("win.minimap", "Toggle Minimap", &[]),
     ("win.graph", "Show Graph", &["<Primary><Shift>m"]),
+    ("win.graph-all", "Show Whole Vault", &[]),
+    ("win.graph-unresolved", "Show Unresolved Links", &[]),
+    ("win.graph-tags", "Show Tags", &[]),
+    ("win.graph-images", "Show Images", &[]),
+    ("win.graph-orphans", "Show Orphans", &[]),
+    ("win.graph-reset", "Reset Graph", &[]),
     // No chord: `Ctrl+H`, the file managers' own, is Replace here.
     ("win.show-hidden-files", "Show Hidden Files", &[]),
     ("win.sort-files-menu", "Sort Files…", &[]),

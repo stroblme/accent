@@ -501,6 +501,12 @@ impl App {
             breakpoints: self.debugger.saved(self),
             watches: self.debugger.watches(),
             exceptions: self.debugger.exceptions(),
+            // What the graph's menu shows, kept with the graph closed too.
+            graph: self
+                .graphs()
+                .first()
+                .map(|graph| graph.saved())
+                .unwrap_or(stored.graph),
             // Merged, as the PDFs' places are: a notebook closed earlier keeps its pick.
             kernels: {
                 let mut picks = stored.kernels.clone();

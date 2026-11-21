@@ -1676,13 +1676,16 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Show Graph opens it right of the tab in front, in that pane, as Toggle Preview opens a preview, and from the graph it goes back to the file in front.
 - **It starts local**, with the file in front and every file that file links to or is linked from, one node a file (user decision 2026-11-21).
   The file in front is the active pane's tab, or with the graph in front the most recently used tab of the window that is a vault file, a preview tab's note and a terminal editor's file among them.
-  Without one it says so on a status page.
+  Without one it says so on a status page whose one button is Show Whole Vault.
 - **A click on a node opens its file beside the graph and adds that file's neighbours**, so the graph grows as it is read (user decision 2026-11-21).
   The file opens as the preview of the most recently used other pane, so clicking down the graph leaves one tab there, and in a window of one pane it splits a pane off to the graph's right.
   A file open in another pane already comes to the front there, and one open behind the graph moves over to it.
   The keyboard stays on the graph as it stays in the Files tree, and a double-click keeps the tab and gives it the keyboard, as a double-click on a tree row does.
-  Show Graph over a file the graph does not hold starts it again around that file.
-- A link to a note that is not written yet is a ghost, a ring with its name dimmed (user decision 2026-11-21).
+  A click on a tag adds the files carrying it.
+  Reset Graph takes it back to the file in front, and Show Graph over a file the graph does not hold starts it again around that file.
+- A link to a note that is not written yet is a ghost, a ring with its name dimmed, and a click on it offers New File with the path typed in, as following the link does (user decision 2026-11-21).
+  Tags, images and orphans stay out until Show Tags, Show Images or Show Orphans puts them in, an orphan being a file linked neither way and offered under Show Whole Vault alone.
+  A code file's links are the files it imports, and an import that names no file in the vault is left out.
 - **A node takes its kind's colour** from the hues a table's columns take (Colour), and the file in front takes the accent itself with a ring round it (user decision 2026-11-21).
   A note is drawn in the foreground, code, a PDF, a diagram, a notebook and an image each in one of the five hues after the accent, and a text file or a tag in the foreground at 60 %.
   Links are hairlines in the foreground at a fifth of its strength, without arrows.
@@ -1696,6 +1699,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - Dragging the background or with the middle button pans, and so do the wheel and the touchpad, while `Ctrl+scroll`, a pinch and the zoom chords zoom as over a diagram (Zoom).
   Until the reader pans or zooms, the graph is kept fitted as it settles, never past 100 %, and the readout says Fit as an image's does.
   `Ctrl+0` fits it again.
+- Its menu, a right-click anywhere on the canvas, holds Show Whole Vault, Show Unresolved Links, Show Tags, Show Images and Show Orphans as checks, then Reset Graph, each a palette command too (Keyboard, Graph).
+  What it shows is kept in the vault's session, and a restored graph comes back around the file in front.
 - Like a shell or a comparison it is no file, so it has no backlinks, stays in its window and is no recent file.
 - The status bar names it Graph and counts it, "42 files · 57 links".
 
@@ -2329,6 +2334,10 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 - Run Cell is `Ctrl+Return`, Insert Line Below's chord, which a notebook in front answers, and Run Cell and Advance `Shift+Return`, the notebook's own key: Jupyter's and VS Code's (user decision 2026-10-20).
   Run All, Interrupt Kernel, Restart Kernel, Shut Down Kernel, Clear Outputs and Clear All Outputs are unbound and in the palette; Clear Outputs is on the cell's More menu beside Run Cell, Shut Down Kernel only in the palette but as the kernel strip's Stop while a kernel starts, and the rest on that strip, Interrupt Kernel as its Stop.
   Debug Cell is unbound too, on the cell's More menu after Run Cell and on the kernel's strip, Start Debugging's `Ctrl+F5` doing it while the notebook is in front.
+
+### Graph
+
+- The graph's own Show Whole Vault, Show Unresolved Links, Show Tags, Show Images, Show Orphans and Reset Graph (unbound), beside Show Graph `Ctrl+Shift+M` (Views).
 
 ### History
 

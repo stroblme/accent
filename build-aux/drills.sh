@@ -837,6 +837,8 @@ drill_graph() {
 	echo 'end' >"$vault/f.md"
 	echo 'alone' >"$vault/lone.md"
 	echo '[[a]]' >"$vault/e.md"
+	echo 'import util' >"$vault/main.py"
+	echo 'x = 1' >"$vault/util.py"
 	cp "$repo/docs/guide/social-preview.png" "$vault/pic.png"
 	launch 90 ACCENT_BENCH_GRAPH=check:a.md >"$dir/graph"
 	launch 60 ACCENT_BENCH_GRAPH=restored >>"$dir/graph"

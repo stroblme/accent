@@ -80,6 +80,8 @@ pub struct Context {
     pub editor_note: bool,
     /// The window is in presentation mode, where the laser pointer is.
     pub presenting: bool,
+    /// The graph in front shows the whole vault, where Show Orphans applies.
+    pub graph_all: bool,
 }
 
 /// Actions another sync enables, on state of its own that changes with no tab change: SyncTeX's
@@ -235,6 +237,8 @@ pub fn applies(action: &str, cx: &Context) -> bool {
         "win.notebook-run-all" | "win.notebook-clear-all-outputs" => notebook || cx.kernel,
         a if a.starts_with("win.notebook-") => notebook,
         "win.python-environment" => cx.python,
+        "win.graph-orphans" => front == Some(Graph) && cx.graph_all,
+        a if a.starts_with("win.graph-") => front == Some(Graph),
 
         // The sidebar's panes, where the window has them.
         "win.pane-files" | "win.show-hidden-files" => pane("files"),
@@ -349,6 +353,27 @@ mod tests {
             };
             assert!(listed(&presenting).contains(&"win.laser"));
         }
+    }
+
+    /// The graph's commands are the graph's, and Show Orphans the whole vault's; Show Graph is
+    /// the vault's, wherever the reader is.
+    #[test]
+    fn the_graph_commands_apply_over_a_graph() {
+        let graph = Context {
+            front: Some(Front::Graph),
+            vault: Some(false),
+            ..Context::default()
+        };
+        let note = listed(&vault_file(Front::Note { markdown: true }));
+        assert!(!note.contains(&"win.graph-reset") && note.contains(&"win.graph"));
+        assert!(applies("win.graph-reset", &graph) && applies("win.graph-tags", &graph));
+        assert!(!applies("win.graph-orphans", &graph));
+        let all = Context {
+            graph_all: true,
+            ..graph
+        };
+        assert!(applies("win.graph-orphans", &all));
+        assert!(!applies("win.graph", &Context::default()));
     }
 
     /// Show Changes is a commit's file's, in front: a staged change's comparison has no toggle.

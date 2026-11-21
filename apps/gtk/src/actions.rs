@@ -109,6 +109,7 @@ impl App {
                 Some(rendered::Note::Editor(_))
             ),
             presenting: self.presenting.get().is_some(),
+            graph_all: doc.as_ref().and_then(Doc::graph).is_some_and(|g| g.all()),
         }
     }
 
@@ -589,6 +590,7 @@ impl App {
             "pane-properties" => self.show_pane("properties"),
             "view-mode" => self.toggle_preview(),
             "graph" => self.show_graph(),
+            name if name.starts_with("graph-") => self.graph_action(name),
             "follow-link" => self.go_to_definition(),
             "debug-toggle-breakpoint" => self.toggle_breakpoint_at_caret(),
             "debug-remove-breakpoints" => self.remove_all_breakpoints(),
@@ -1193,6 +1195,12 @@ pub fn install_actions(app: &Rc<App>) {
                     gio::SimpleAction::new_stateful(name, None, &true.to_variant())
                 }
                 "image-invert" => gio::SimpleAction::new_stateful(name, None, &false.to_variant()),
+                // The graph's menu toggles, which follow the graph in front
+                // (`App::sync_graph_actions`).
+                "graph-all" | "graph-unresolved" | "graph-tags" | "graph-images"
+                | "graph-orphans" => {
+                    gio::SimpleAction::new_stateful(name, None, &false.to_variant())
+                }
                 _ => gio::SimpleAction::new(name, None),
             };
             action.connect_activate(glib::clone!(

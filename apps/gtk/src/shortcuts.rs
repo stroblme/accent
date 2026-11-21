@@ -11,7 +11,7 @@ use accent_api::Config;
 use adw::prelude::*;
 
 /// DESIGN.md Keyboard's headings that hold commands, in its order.
-const SECTIONS: [&str; 19] = [
+const SECTIONS: [&str; 20] = [
     "Files",
     "Palette and find",
     "Editing",
@@ -19,6 +19,7 @@ const SECTIONS: [&str; 19] = [
     "PDF",
     "Diagram",
     "Notebook",
+    "Graph",
     "History",
     "Zoom",
     "Terminal",
@@ -105,6 +106,7 @@ fn section(action: &str) -> Option<&'static str> {
         "new-drawing" => "Diagram",
         _ if starts(&["diagram-"]) => "Diagram",
         _ if starts(&["notebook-"]) => "Notebook",
+        _ if starts(&["graph-"]) => "Graph",
         _ if starts(&["bib-"]) => "Bibliography",
         "back" | "forward" => "History",
         _ if starts(&["zoom-"]) => "Zoom",

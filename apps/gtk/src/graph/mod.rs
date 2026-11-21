@@ -14,7 +14,8 @@ mod view;
 mod worker;
 
 use super::*;
-use accent_core::graph::{Part, Shown};
+use accent_core::config::GraphView as Saved;
+use accent_core::graph::{NodeKind, Part, Shown};
 use view::GraphView;
 
 /// The graph tab's key, which names no file: what the session keeps it by.
@@ -30,6 +31,27 @@ pub(crate) fn is_key(key: &str) -> bool {
     key == KEY
 }
 
+/// The graph's menu: Show Whole Vault; what is shown, Show Orphans while the whole vault is;
+/// Reset Graph. A toggle is drawn as a check, its action carrying its state.
+fn graph_menu(all: bool) -> gio::Menu {
+    let section = |actions: &[&str]| {
+        let section = gio::Menu::new();
+        for action in actions {
+            section.append(Some(crate::actions::label_of(action)), Some(action));
+        }
+        section
+    };
+    let mut shown = vec!["win.graph-unresolved", "win.graph-tags", "win.graph-images"];
+    if all {
+        shown.push("win.graph-orphans");
+    }
+    let menu = gio::Menu::new();
+    menu.append_section(None, &section(&["win.graph-all"]));
+    menu.append_section(None, &section(&shown));
+    menu.append_section(None, &section(&["win.graph-reset"]));
+    menu
+}
+
 /// What a question to the vault is for, which says how its answer is shown.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Ask {
@@ -38,6 +60,8 @@ enum Ask {
     Fresh,
     /// The roots grown by this key: what is new slides out of its node.
     Grow(String),
+    /// The same roots asked again, something more or less shown: every node stays where it is.
+    Again,
 }
 
 pub struct GraphTab {
@@ -87,6 +111,19 @@ impl GraphTab {
     /// The status bar's "42 files · 57 links".
     pub fn facts(&self) -> String {
         self.view.graph().facts()
+    }
+
+    /// What the session keeps of it: what its menu shows.
+    pub fn saved(&self) -> Saved {
+        Saved {
+            all: self.all.get(),
+            shown: self.shown.get(),
+        }
+    }
+
+    /// Whether it shows the whole vault, under which Show Orphans applies.
+    pub fn all(&self) -> bool {
+        self.all.get()
     }
 
     /// Show the empty page: no file to start from, and not the whole vault.
@@ -215,6 +252,13 @@ impl App {
             "No File Open",
             "Open a file to see what it links to, or show the whole vault.",
         );
+        let all = gtk::Button::builder()
+            .label("Show Whole Vault")
+            .action_name("win.graph-all")
+            .halign(gtk::Align::Center)
+            .css_classes(["pill"])
+            .build();
+        empty.set_child(Some(&all));
         holder.add_named(&empty, Some(EMPTY));
         let page = match how {
             Opened::Restored => self.tabs_for(KEY).append(&holder),
@@ -257,6 +301,21 @@ impl App {
             self,
             move || app.refresh_zoom()
         ));
+        // Its menu, anywhere on the canvas, built at each press: Show Orphans is the whole
+        // vault's alone.
+        let menu = gtk::GestureClick::builder()
+            .button(gdk::BUTTON_SECONDARY)
+            .build();
+        let weak = Rc::downgrade(&graph);
+        menu.connect_pressed(move |menu, _, x, y| {
+            let (Some(graph), Some(host)) = (weak.upgrade(), menu.widget()) else {
+                return;
+            };
+            menu.set_state(gtk::EventSequenceState::Claimed);
+            let anchor = gdk::Rectangle::new(x as i32, y as i32, 1, 1);
+            widgets::popup_menu(&host, &graph_menu(graph.all.get()), Some(anchor));
+        });
+        host.add_controller(menu);
         graph.holder.connect_map(glib::clone!(
             #[weak(rename_to = app)]
             self,
@@ -283,7 +342,78 @@ impl App {
         let front = self.graph_front().map(|(_, key)| key);
         graph.view.set_front(front.clone());
         graph.view.graph_mut().roots = front.into_iter().collect();
+        if let Some(vault) = self.vault() {
+            let saved = vault.session().graph;
+            graph.all.set(saved.all);
+            graph.shown.set(saved.shown);
+        }
+        self.sync_graph_actions();
         self.query_graph(graph, Ask::Fresh);
+    }
+
+    /// The graph's menu commands, over the graph in front: Reset Graph back to the file in
+    /// front, the whole vault's, and the toggles of what is shown.
+    pub(crate) fn graph_action(self: &Rc<Self>, name: &str) {
+        let Some(graph) = self.active_doc().and_then(|doc| doc.graph().cloned()) else {
+            return;
+        };
+        let mut shown = graph.shown.get();
+        let ask = match name {
+            "graph-reset" => {
+                graph.all.set(false);
+                let front = self.graph_front().map(|(_, key)| key);
+                graph.view.graph_mut().roots = front.into_iter().collect();
+                Ask::Fresh
+            }
+            "graph-all" => {
+                graph.all.set(!graph.all.get());
+                Ask::Fresh
+            }
+            "graph-unresolved" => {
+                shown.unresolved = !shown.unresolved;
+                Ask::Again
+            }
+            "graph-tags" => {
+                shown.tags = !shown.tags;
+                Ask::Again
+            }
+            "graph-images" => {
+                shown.images = !shown.images;
+                Ask::Again
+            }
+            "graph-orphans" => {
+                shown.orphans = !shown.orphans;
+                Ask::Again
+            }
+            _ => return,
+        };
+        graph.shown.set(shown);
+        graph.describe();
+        self.query_graph(&graph, ask);
+        self.sync_graph_actions();
+        self.sync_applicable();
+        self.save_session_soon();
+    }
+
+    /// The graph menu's checks follow the graph in front.
+    pub(crate) fn sync_graph_actions(&self) {
+        let saved = (self
+            .active_doc()
+            .and_then(|doc| doc.graph().map(|g| g.saved())))
+        .unwrap_or_default();
+        let shown = saved.shown;
+        for (name, on) in [
+            ("graph-all", saved.all),
+            ("graph-unresolved", shown.unresolved),
+            ("graph-tags", shown.tags),
+            ("graph-images", shown.images),
+            ("graph-orphans", shown.orphans),
+        ] {
+            let action = self.window.lookup_action(name);
+            if let Some(action) = action.and_downcast::<gio::SimpleAction>() {
+                action.set_state(&on.to_variant());
+            }
+        }
     }
 
     /// Ask the vault for what `graph` shows, off the main loop, and show the answer as `ask`
@@ -344,7 +474,7 @@ impl App {
         }
         let near = match ask {
             Ask::Grow(key) => Some(key.as_str()),
-            Ask::Fresh => None,
+            Ask::Fresh | Ask::Again => None,
         };
         let changes = graph.view.graph().changes(part, near);
         graph.view.apply(&changes);
@@ -378,14 +508,25 @@ impl App {
     }
 
     /// A press on node `i`: a file opens beside the graph, and the graph grows by its
-    /// neighbours.
+    /// neighbours; a tag grows it by its files; a ghost offers New File with its path typed in,
+    /// as following its link does, and once written it is a file in the ghost's place.
     fn graph_activate(self: &Rc<Self>, graph: &Rc<GraphTab>, i: usize, keep: bool) {
         let Some(node) = graph.view.graph().nodes.get(i).cloned() else {
             return;
         };
-        if let accent_core::graph::NodeKind::File(_) = node.kind {
-            self.open_from_graph(graph, &node.key, keep);
-            self.grow_graph(graph, &node.key);
+        match node.kind {
+            NodeKind::File(_) => {
+                self.open_from_graph(graph, &node.key, keep);
+                self.grow_graph(graph, &node.key);
+            }
+            NodeKind::Tag => self.grow_graph(graph, &node.key),
+            // Cancelling says nothing, as following the link does.
+            NodeKind::Missing if !keep => {
+                if let Some(ops) = self.ops() {
+                    fileops::new_linked_note(ops, &node.key);
+                }
+            }
+            NodeKind::Missing => {}
         }
     }
 

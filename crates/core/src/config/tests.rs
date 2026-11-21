@@ -673,6 +673,10 @@ fn session_roundtrips_as_json() {
             on: true,
         }],
         kernels: BTreeMap::from([("r.ipynb".to_string(), "ir".to_string())]),
+        graph: GraphView {
+            all: true,
+            ..GraphView::default()
+        },
     };
     with_xdg(&state, || {
         assert_eq!(Session::load(&vault).open, Vec::<String>::new());
@@ -704,6 +708,7 @@ fn session_roundtrips_as_json() {
         assert_eq!(back.watches, s.watches);
         assert_eq!(back.exceptions, s.exceptions);
         assert_eq!(back.kernels, s.kernels);
+        assert_eq!(back.graph, s.graph);
 
         // A terminal session's key is no path: it hashes as given, as an `ssh://` one does.
         let named = Path::new("terminal://dev");
