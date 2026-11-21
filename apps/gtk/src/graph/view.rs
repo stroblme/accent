@@ -243,7 +243,8 @@ impl GraphView {
         imp.at.borrow_mut().clear();
         imp.hover.set(None);
         imp.dragging.take();
-        imp.camera.set(Camera::default());
+        // Through the setter, so the zoom readout says Fit again.
+        self.set_camera(Camera::default());
         imp.placed.set(false);
         imp.picture.take();
         imp.asked.take();

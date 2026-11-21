@@ -232,7 +232,8 @@ fn lay_out(rx: &Receiver<Cmd>, shared: &Shared) {
             shared.wake.notify_all();
         };
     loop {
-        let moving = animate && !force.settled();
+        // An empty layout, before the first change, has nothing to move.
+        let moving = animate && !force.settled() && !force.positions().is_empty();
         // Moving, it takes what came meanwhile and steps on; still, it waits for the next.
         let mut cmds = Vec::new();
         if !moving {
@@ -287,9 +288,12 @@ fn lay_out(rx: &Receiver<Cmd>, shared: &Shared) {
                     held = Some((i, at));
                     changed = true;
                 }
+                // Handed over too, so a canvas waiting on a layout that settled under the
+                // drag gets a frame and stops.
                 Cmd::Unpin(i) if i < len => {
                     force.unpin(i);
                     held = None;
+                    changed = true;
                 }
                 Cmd::Pin(..) | Cmd::Unpin(_) => {}
                 Cmd::Settle => settle = true,
@@ -300,7 +304,8 @@ fn lay_out(rx: &Receiver<Cmd>, shared: &Shared) {
             hand(&force, generation, &shape, held, cold);
         }
         let t = Instant::now();
-        match (settle, animate && !force.settled()) {
+        let moving = animate && !force.settled() && !force.positions().is_empty();
+        match (settle, moving) {
             (true, _) => {
                 for _ in 0..MAX_SETTLE {
                     if force.step() == 0.0 {
