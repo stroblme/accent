@@ -6,10 +6,14 @@ use crate::graph::GraphTab;
 
 /// `ACCENT_BENCH_GRAPH=check:<rel>` opens `rel`, then Show Graph, and prints the nodes, a ghost's
 /// key ending in `?`, and the links once laid out (`open`). It presses two of them in turn, each
-/// opening beside the graph as the other pane's preview, and prints where each opened and where
-/// the keyboard is (`click`); then saves the session and quits. `restored` prints whether the
-/// graph came back with the session and the file it is around (`session`), closes it and prints
-/// that it went (`closed`). `drill_graph` writes the notes into a scratch vault.
+/// opening beside the graph as the other pane's preview, and prints where each opened and where the
+/// keyboard is (`click`), and the roots and nodes the graph grew to (`grow`). Then it saves the
+/// session and quits. `restored` prints whether the graph came back with the session and the file
+/// it is around (`session`); opens `lone.md`, which it does not hold, and with animations off shows
+/// the graph again, printing what it started again around and whether it showed no places between
+/// where the nodes were placed and the settled layout (`still`); then closes it and prints whether
+/// the layout's threads ended with it (`closed`). `drill_graph` writes the notes into a scratch
+/// vault.
 pub(super) fn bench_graph(app: &Rc<App>, arg: &str) {
     let app = app.clone();
     let arg = arg.to_string();
@@ -72,6 +76,13 @@ async fn check(app: &Rc<App>, rel: &str) {
              tabs={tabs}",
             opened.unwrap_or_default()
         );
+        until("graph", "grown", 10_000, || graph.landed()).await;
+        println!(
+            "bench graph grow {key} roots={:?} nodes={:?} front={}",
+            graph.roots(),
+            graph.nodes(),
+            graph.front().unwrap_or_default()
+        );
     }
     app.save_session();
 }
@@ -84,9 +95,35 @@ async fn restored(app: &Rc<App>) {
         "bench graph session restored=true front={}",
         graph.front().unwrap_or_default()
     );
+    if let Some(settings) = gtk::Settings::default() {
+        settings.set_gtk_enable_animations(false);
+    }
+    app.open_path("lone.md");
+    until("graph", "lone.md", 10_000, || {
+        app.tab_for("lone.md").is_some()
+    })
+    .await;
+    let _ = WidgetExt::activate_action(&app.window, "win.graph", None);
+    until("graph", "still", 10_000, || {
+        graph.roots() == ["lone.md"] && graph.laid_out()
+    })
+    .await;
+    println!(
+        "bench graph still roots={:?} nodes={:?} settled_at_once={}",
+        graph.roots(),
+        graph.nodes(),
+        graph.frames() <= 2
+    );
+    let life = graph.worker_life();
     app.close_page(&graph.page);
     until("graph", "closed", 10_000, || app.graphs().is_empty()).await;
-    println!("bench graph closed");
+    drop(graph);
+    let ended = until("graph", "worker", 10_000, || {
+        life.as_ref().is_none_or(|life| life.upgrade().is_none())
+    })
+    .await
+    .is_some();
+    println!("bench graph closed worker_ended={ended}");
 }
 
 /// The window's graph once it shows a laid-out answer.

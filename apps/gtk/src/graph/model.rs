@@ -45,7 +45,7 @@ impl Changes {
 /// How a node is painted (user decision 2026-11-21): the canvas turns each into the theme's
 /// colours as it draws.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(super) enum Paint {
+pub enum Paint {
     /// A note, in the foreground.
     Ink,
     /// Code, a PDF, a diagram, a notebook or an image, in one of the five hues after the accent

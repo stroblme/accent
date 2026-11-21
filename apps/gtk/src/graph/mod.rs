@@ -2,12 +2,16 @@
 //! from, on a canvas of our own ([`view`]), a click opening a file beside the graph.
 //!
 //! The vault answers which files and links to show (`Vault::graph_around`) on a worker, and the
-//! tab diffs each answer against what it shows ([`model`]), so a node that stays keeps its place.
+//! tab diffs each answer against what it shows ([`model`]), so a node that stays keeps its place
+//! and the force layout ([`worker`]) only makes room for what is new. A click grows the graph by
+//! the file clicked: it is one of the roots the vault is asked around from then on.
 //! One graph a window, keyed [`KEY`]: like a preview tab it is no file.
 
 mod camera;
 mod model;
+mod raster;
 mod view;
+mod worker;
 
 use super::*;
 use accent_core::graph::{Part, Shown};
@@ -26,6 +30,16 @@ pub(crate) fn is_key(key: &str) -> bool {
     key == KEY
 }
 
+/// What a question to the vault is for, which says how its answer is shown.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Ask {
+    /// A part of the vault shown afresh, laid out cold: the first answer, Reset Graph, the whole
+    /// vault turned on or off, and the graph started again around another file.
+    Fresh,
+    /// The roots grown by this key: what is new slides out of its node.
+    Grow(String),
+}
+
 pub struct GraphTab {
     pub page: adw::TabPage,
     /// The page's child: blank, then loading, then the canvas, the empty page or a failure.
@@ -40,6 +54,8 @@ pub struct GraphTab {
     asked: Cell<u64>,
     /// Whether it has been seeded, which waits until it is first on screen.
     started: Cell<bool>,
+    /// The last question whose answer landed.
+    answered: Cell<u64>,
 }
 
 impl GraphTab {
@@ -112,6 +128,10 @@ impl GraphTab {
         self.view.graph().edges.len()
     }
 
+    pub fn roots(&self) -> Vec<String> {
+        self.view.graph().roots.clone()
+    }
+
     /// The file drawn in the accent.
     pub fn front(&self) -> Option<String> {
         self.view.front()
@@ -125,9 +145,23 @@ impl GraphTab {
         }
     }
 
-    /// Whether it shows the vault's answer, laid out.
+    /// Whether it shows the vault's last answer.
+    pub fn landed(&self) -> bool {
+        loading::shown(&self.holder) && self.answered.get() == self.asked.get()
+    }
+
+    /// Whether it shows the vault's last answer, its layout settled.
     pub fn laid_out(&self) -> bool {
-        loading::shown(&self.holder) && self.view.settled()
+        self.landed() && self.view.settled()
+    }
+
+    /// The layout's frames landed since the last change.
+    pub fn frames(&self) -> usize {
+        self.view.frames()
+    }
+
+    pub fn worker_life(&self) -> Option<std::sync::Weak<impl Sized + use<>>> {
+        self.view.worker_life()
     }
 }
 
@@ -154,7 +188,7 @@ impl App {
                 if let Some(front) = front.filter(|key| graph.started.get() && !graph.holds(key)) {
                     graph.all.set(false);
                     graph.view.graph_mut().roots = vec![front];
-                    self.query_graph(&graph, None);
+                    self.query_graph(&graph, Ask::Fresh);
                 }
                 graph
             }
@@ -205,6 +239,7 @@ impl App {
             query: RefCell::new(None),
             asked: Cell::new(0),
             started: Cell::new(false),
+            answered: Cell::new(0),
         });
         graph.describe();
         let weak = Rc::downgrade(&graph);
@@ -248,12 +283,12 @@ impl App {
         let front = self.graph_front().map(|(_, key)| key);
         graph.view.set_front(front.clone());
         graph.view.graph_mut().roots = front.into_iter().collect();
-        self.query_graph(graph, None);
+        self.query_graph(graph, Ask::Fresh);
     }
 
-    /// Ask the vault for what `graph` shows, off the main loop, and show the answer, a new node
-    /// placed beside the one keyed `near`.
-    fn query_graph(self: &Rc<Self>, graph: &Rc<GraphTab>, near: Option<String>) {
+    /// Ask the vault for what `graph` shows, off the main loop, and show the answer as `ask`
+    /// says.
+    fn query_graph(self: &Rc<Self>, graph: &Rc<GraphTab>, ask: Ask) {
         let Some(vault) = self.vault().cloned() else {
             return;
         };
@@ -266,6 +301,17 @@ impl App {
         }
         let asked = graph.asked.get() + 1;
         graph.asked.set(asked);
+        // A graph started afresh is kept until the answer lands, and gives way to the loading
+        // page if that takes a while, as an open does.
+        if ask == Ask::Fresh && loading::shown(&graph.holder) {
+            let weak = Rc::downgrade(graph);
+            glib::timeout_add_local_once(loading::OPENING, move || {
+                let waiting = |g: &Rc<GraphTab>| g.asked.get() == asked && g.answered.get() < asked;
+                if let Some(graph) = weak.upgrade().filter(waiting) {
+                    graph.holder.set_visible_child_name(loading::LOADING);
+                }
+            });
+        }
         let (app, weak) = (Rc::downgrade(self), Rc::downgrade(graph));
         let task = glib::spawn_future_local(async move {
             let answer = work::off_thread("graph", move || match all {
@@ -279,8 +325,9 @@ impl App {
             let Some(graph) = weak.upgrade().filter(|g| g.asked.get() == asked) else {
                 return;
             };
+            graph.answered.set(asked);
             match answer {
-                Some(Ok(part)) => app.land_graph(&graph, &part, near.as_deref()),
+                Some(Ok(part)) => app.land_graph(&graph, &part, &ask),
                 Some(Err(why)) => app.graph_failed(&graph, &why.to_string()),
                 None => app.graph_failed(&graph, "the worker stopped"),
             }
@@ -291,7 +338,14 @@ impl App {
     }
 
     /// The vault's answer: what changed shown, the canvas up if it was not.
-    fn land_graph(self: &Rc<Self>, graph: &Rc<GraphTab>, part: &Part, near: Option<&str>) {
+    fn land_graph(self: &Rc<Self>, graph: &Rc<GraphTab>, part: &Part, ask: &Ask) {
+        if *ask == Ask::Fresh {
+            graph.view.restart();
+        }
+        let near = match ask {
+            Ask::Grow(key) => Some(key.as_str()),
+            Ask::Fresh => None,
+        };
         let changes = graph.view.graph().changes(part, near);
         graph.view.apply(&changes);
         loading::show(&graph.holder);
@@ -312,7 +366,7 @@ impl App {
         let retry = move || {
             if let (Some(app), Some(graph)) = (app.upgrade(), weak.upgrade()) {
                 loading::again(&graph.holder);
-                app.query_graph(&graph, None);
+                app.query_graph(&graph, Ask::Fresh);
             }
         };
         loading::failed(
@@ -323,13 +377,32 @@ impl App {
         );
     }
 
-    /// A press on node `i`: a file opens beside the graph.
+    /// A press on node `i`: a file opens beside the graph, and the graph grows by its
+    /// neighbours.
     fn graph_activate(self: &Rc<Self>, graph: &Rc<GraphTab>, i: usize, keep: bool) {
         let Some(node) = graph.view.graph().nodes.get(i).cloned() else {
             return;
         };
         if let accent_core::graph::NodeKind::File(_) = node.kind {
             self.open_from_graph(graph, &node.key, keep);
+            self.grow_graph(graph, &node.key);
+        }
+    }
+
+    /// Add `key` to the roots, so its neighbours join the graph beside it. The whole vault's
+    /// graph has nothing to add.
+    fn grow_graph(self: &Rc<Self>, graph: &Rc<GraphTab>, key: &str) {
+        let grew = {
+            let mut shown = graph.view.graph_mut();
+            let new = !graph.all.get() && !shown.roots.iter().any(|r| r == key);
+            if new {
+                shown.roots.push(key.to_string());
+            }
+            new
+        };
+        if grew {
+            graph.describe();
+            self.query_graph(graph, Ask::Grow(key.to_string()));
         }
     }
 
@@ -390,6 +463,8 @@ impl App {
                 if self.set_active_pane(&home) {
                     self.sync_active();
                 }
+                // The file opened is the one in front now, which the accent follows.
+                self.sync_graphs();
                 // After any focus a split queued, which an idle of its own hands over.
                 let view = graph.view.downgrade();
                 glib::idle_add_local_once(move || {

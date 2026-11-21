@@ -1672,12 +1672,12 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 
 ### Graph
 
-- **The graph is a tab of its own** (user decision 2026-11-21), one a window, titled Graph and led by `links-graph-symbolic`, on a canvas of ours drawn with GSK rather than the diagram's.
+- **The graph is a tab of its own** (user decision 2026-11-21), one a window, titled Graph and led by `links-graph-symbolic`, on a canvas of ours rather than the diagram's.
   Show Graph opens it right of the tab in front, in that pane, as Toggle Preview opens a preview, and from the graph it goes back to the file in front.
 - **It starts local**, with the file in front and every file that file links to or is linked from, one node a file (user decision 2026-11-21).
   The file in front is the active pane's tab, or with the graph in front the most recently used tab of the window that is a vault file, a preview tab's note and a terminal editor's file among them.
   Without one it says so on a status page.
-- **A click on a node opens its file beside the graph** (user decision 2026-11-21).
+- **A click on a node opens its file beside the graph and adds that file's neighbours**, so the graph grows as it is read (user decision 2026-11-21).
   The file opens as the preview of the most recently used other pane, so clicking down the graph leaves one tab there, and in a window of one pane it splits a pane off to the graph's right.
   A file open in another pane already comes to the front there, and one open behind the graph moves over to it.
   The keyboard stays on the graph as it stays in the Files tree, and a double-click keeps the tab and gives it the keyboard, as a double-click on a tree row does.
@@ -1688,8 +1688,13 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Links are hairlines in the foreground at a fifth of its strength, without arrows.
 - The pointer over a node lights it, its links and its neighbours, and dims the rest.
   Names show from 60 % up, and below that only round the lit node and the file in front.
+- **The layout is a live force layout** worked out off the main loop (user decision 2026-11-21), so the nodes settle as they are watched, a dragged node pulls its neighbours along and what a click adds slides out of the node clicked.
+  The links and nodes are drawn off the main loop too, into a picture the canvas moves and zooms until the next one arrives, and only the names are drawn on the canvas itself (user decision 2026-11-21).
+  So the first nodes show as soon as the vault answers, where they were placed and before their links, and the graph pans, zooms and follows the pointer while it settles and while a picture is drawn (user decision 2026-11-21).
+  A dragged node is held only while the pointer holds it, and settles back with the rest once let go.
+  With animations off the nodes go from where they were placed to the settled layout in one step, and a drag moves the one node until it is let go.
 - Dragging the background or with the middle button pans, and so do the wheel and the touchpad, while `Ctrl+scroll`, a pinch and the zoom chords zoom as over a diagram (Zoom).
-  Until the reader pans or zooms, the graph is kept fitted, never past 100 %, and the readout says Fit as an image's does.
+  Until the reader pans or zooms, the graph is kept fitted as it settles, never past 100 %, and the readout says Fit as an image's does.
   `Ctrl+0` fits it again.
 - Like a shell or a comparison it is no file, so it has no backlinks, stays in its window and is no recent file.
 - The status bar names it Graph and counts it, "42 files · 57 links".

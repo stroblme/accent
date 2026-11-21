@@ -1,21 +1,27 @@
-//! The graph's canvas (DESIGN.md, Graph): every node and link drawn with GSK each frame, a path
-//! per colour, culled to what is on screen, and the input that moves round it.
+//! The graph's canvas (DESIGN.md, Graph): the links and nodes as the layout's thread drew them,
+//! the names on top, and the input that moves round it.
 //!
 //! The canvas owns the [`Graph`] and where each of its nodes is. Every change to what it shows
-//! goes through [`GraphView::apply`], so the nodes and their places stay in step; their places
-//! come from the force layout, worked out off the main loop.
+//! goes through [`GraphView::apply`], into the graph and the layout's [`Worker`] together, so the
+//! two keep their nodes in the same order. With animations on the worker moves the layout on its
+//! own clock and the canvas shows the newest places at each frame, so the nodes settle as they
+//! are watched; with them off it settles in one go. How the canvas wants the graph drawn, its
+//! camera, size and what is lit, goes to the worker as each frame is drawn, and until a picture
+//! of that comes back the last one is moved and scaled to the camera (user decision 2026-11-21),
+//! so panning, zooming and the pointer never wait on the worker.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use accent_core::graph::layout::Layout as Force;
 use adw::prelude::*;
 use gtk::subclass::prelude::*;
 use gtk::{gdk, glib, graphene, gsk, pango};
 
 use super::camera::{self, Camera};
 use super::model::{self, Changes, Graph, Paint};
+use super::raster::{self, Colours, Rgba};
+use super::worker::{Cmd, Picture, Worker};
 use crate::theme;
 
 /// Names show for every node on screen from this zoom up, and below it only round the lit node,
@@ -27,9 +33,6 @@ const LABELS_MAX: usize = 400;
 const LABEL_WIDTH: i32 = 160;
 /// How far a wheel notch pans, in pixels.
 const NOTCH: f64 = 64.0;
-/// The most steps the layout takes to settle, which a cold layout of any size settles well
-/// within (300 steps).
-const MAX_SETTLE: usize = 1000;
 
 /// A press and whether it is still a click: where it went down and the node under it.
 #[derive(Clone, Copy)]
@@ -37,6 +40,14 @@ pub struct Press {
     at: [f64; 2],
     node: Option<usize>,
     slop: f64,
+}
+
+/// A drag under way: from where, the node it holds or none for a pan, and how far it has
+/// panned, `None` while it is still within a click's slop.
+struct Drag {
+    from: [f64; 2],
+    node: Option<String>,
+    panned: Option<[f64; 2]>,
 }
 
 /// What a press on a node asks of the tab: open its file, and keep it for a double click.
@@ -56,8 +67,22 @@ mod imp {
         /// The file in front of the window, drawn in the accent, by key: it is no node until the
         /// answer holding it lands.
         pub front: RefCell<Option<String>>,
-        /// Counts the layouts asked for, so only the last one's places land.
+        /// Counts the changes sent to the layout, so only places of what is shown land.
         pub generation: Cell<u64>,
+        pub worker: RefCell<Option<Worker>>,
+        pub ticking: RefCell<Option<gtk::TickCallbackId>>,
+        /// Whether the places shown are the settled layout of what is shown.
+        pub settled: Cell<bool>,
+        /// The last picture of the graph the worker drew, and the last view asked of it with
+        /// its serial, which counts the views asked.
+        pub picture: RefCell<Option<Picture>>,
+        pub asked: RefCell<Option<raster::View>>,
+        pub serial: Cell<u64>,
+        /// Whether the layout has placed the nodes since it started over: until then they are
+        /// all in one spot, and nothing is drawn.
+        pub placed: Cell<bool>,
+        /// The node a drag holds, by key.
+        pub dragging: RefCell<Option<String>>,
         /// Each name laid out once, by the node's key, until the style changes.
         pub labels: RefCell<HashMap<String, pango::Layout>>,
         pub press: Cell<Option<Press>>,
@@ -66,9 +91,9 @@ mod imp {
         pub wheel: RefCell<Option<adw::TimedAnimation>>,
         pub open: RefCell<Option<Rc<Open>>>,
         pub zoomed: RefCell<Option<Rc<dyn Fn()>>>,
-        /// Whether the places shown are the settled layout of what is shown, for the drill.
+        /// How many of the layout's frames have landed since the last change, for the drill.
         #[cfg(feature = "bench")]
-        pub settled: Cell<bool>,
+        pub frames: Cell<usize>,
         /// How long each frame took to draw, for the drill.
         #[cfg(feature = "bench")]
         pub painted: RefCell<Vec<f64>>,
@@ -136,9 +161,12 @@ impl GraphView {
     }
 
     /// Show what `changes` change, the nodes staying in place and the new ones placed beside the
-    /// node they slide out of, then lay the graph out again.
+    /// node they slide out of, and set the layout moving.
     pub fn apply(&self, changes: &Changes) {
         let imp = self.imp();
+        if changes.is_empty() && changes.edges == imp.graph.borrow().edges {
+            return;
+        }
         {
             let mut at = imp.at.borrow_mut();
             for &i in &changes.removed {
@@ -151,48 +179,145 @@ impl GraphView {
         }
         imp.graph.borrow_mut().apply(changes);
         imp.hover.set(None);
-        #[cfg(feature = "bench")]
+        let generation = imp.generation.get() + 1;
+        imp.generation.set(generation);
         imp.settled.set(false);
-        self.lay_out();
+        #[cfg(feature = "bench")]
+        imp.frames.set(0);
+        let (links, paints) = {
+            let graph = imp.graph.borrow();
+            let paints = graph.nodes.iter().map(|n| model::paint_of(n.kind));
+            (graph.links(), paints.collect())
+        };
+        let animate = self.animations();
+        imp.worker
+            .borrow_mut()
+            .get_or_insert_with(Worker::start)
+            .send(Cmd::Change {
+                generation,
+                removed: changes.removed.clone(),
+                added: changes.added.iter().map(|(_, near)| *near).collect(),
+                links,
+                paints,
+                animate,
+            });
+        // Along with the change, so its first frame is drawn already.
+        self.ask();
+        self.run();
         self.queue_draw();
     }
 
-    /// Work the layout out off the main loop, from scratch, and show it once settled.
-    fn lay_out(&self) {
+    /// Start over with nothing shown and a cold layout, fitted again, the roots kept: for what
+    /// shows a different part of the vault, so it is laid out afresh.
+    pub fn restart(&self) {
         let imp = self.imp();
-        let generation = imp.generation.get() + 1;
-        imp.generation.set(generation);
-        let (n, links) = {
-            let graph = imp.graph.borrow();
-            (graph.nodes.len(), graph.links())
-        };
-        let view = self.downgrade();
-        glib::spawn_future_local(async move {
-            let at = crate::work::off_thread("graph layout", move || {
-                let mut force = Force::new();
-                for _ in 0..n {
-                    force.add(None);
-                }
-                force.set_links(&links);
-                for _ in 0..MAX_SETTLE {
-                    if force.step() == 0.0 {
-                        break;
-                    }
-                }
-                force.positions().to_vec()
-            })
-            .await;
-            let Some(view) = view.upgrade() else {
-                return;
-            };
-            let imp = view.imp();
-            if let Some(at) = at.filter(|_| imp.generation.get() == generation) {
-                imp.at.replace(at);
-                #[cfg(feature = "bench")]
-                imp.settled.set(true);
-                view.queue_draw();
+        imp.worker.replace(None);
+        let roots = std::mem::take(&mut imp.graph.borrow_mut().roots);
+        imp.graph.replace(Graph::default());
+        imp.graph.borrow_mut().roots = roots;
+        imp.at.borrow_mut().clear();
+        imp.hover.set(None);
+        imp.dragging.take();
+        imp.camera.set(Camera::default());
+        imp.placed.set(false);
+        imp.picture.take();
+        imp.asked.take();
+    }
+
+    fn animations(&self) -> bool {
+        self.settings().is_gtk_enable_animations()
+    }
+
+    /// Take the layout's frames from the next frame of the canvas's on, until it settles.
+    fn run(&self) {
+        if self.imp().ticking.borrow().is_some() {
+            return;
+        }
+        let id = self.add_tick_callback(|view, _| view.tick());
+        self.imp().ticking.replace(Some(id));
+    }
+
+    /// A frame of the canvas: the newest places the layout reached and the newest picture
+    /// shown, where they are of what is shown, until it has settled and the picture is of the
+    /// last view asked.
+    fn tick(&self) -> glib::ControlFlow {
+        let imp = self.imp();
+        let frame = match imp.worker.borrow().as_ref() {
+            Some(worker) => worker.take(),
+            None => {
+                imp.ticking.take();
+                return glib::ControlFlow::Break;
             }
-        });
+        };
+        let Some(frame) = frame else {
+            return glib::ControlFlow::Continue;
+        };
+        if frame.generation != imp.generation.get() || frame.at.len() != imp.at.borrow().len() {
+            return glib::ControlFlow::Continue;
+        }
+        imp.at.replace(frame.at);
+        imp.settled.set(frame.settled);
+        imp.placed.set(true);
+        #[cfg(feature = "bench")]
+        if frame.moved {
+            imp.frames.set(imp.frames.get() + 1);
+        }
+        if let Some(picture) = frame.picture {
+            // A fitting camera is the one the picture was fitted at.
+            if imp.camera.get().fitting && imp.dragging.borrow().is_none() {
+                imp.camera.set(picture.camera);
+            }
+            imp.picture.replace(Some(picture));
+        }
+        self.queue_draw();
+        let current = (imp.picture.borrow().as_ref()).is_some_and(|p| p.serial == imp.serial.get());
+        if frame.settled && current && imp.dragging.borrow().is_none() {
+            imp.ticking.take();
+            return glib::ControlFlow::Break;
+        }
+        glib::ControlFlow::Continue
+    }
+
+    /// Hold node `key` under canvas point `at`, as a drag does: its neighbours follow it as the
+    /// layout steps, and with animations off it moves alone.
+    fn hold(&self, key: &str, at: [f64; 2]) {
+        let imp = self.imp();
+        let Some(i) = imp.graph.borrow().index_of(key) else {
+            return;
+        };
+        let world = self.camera().to_world(at);
+        if let Some(place) = imp.at.borrow_mut().get_mut(i) {
+            *place = world;
+        }
+        if imp.dragging.replace(Some(key.to_string())).is_none() {
+            self.set_cursor_from_name(Some("grabbing"));
+        }
+        if let Some(worker) = imp.worker.borrow().as_ref() {
+            worker.send(Cmd::Pin(i, world));
+        }
+        self.run();
+        self.queue_draw();
+    }
+
+    /// The drag let its node go, which settles back with the rest.
+    fn let_go(&self) {
+        let imp = self.imp();
+        let Some(key) = imp.dragging.take() else {
+            return;
+        };
+        self.set_cursor_from_name(Some("pointer"));
+        if let (Some(i), Some(worker)) = (
+            imp.graph.borrow().index_of(&key),
+            imp.worker.borrow().as_ref(),
+        ) {
+            worker.send(Cmd::Unpin(i));
+            // With animations off the node moved alone, and the rest settle round it at once.
+            if !self.animations() {
+                worker.send(Cmd::Settle);
+            }
+        }
+        imp.settled.set(false);
+        self.run();
     }
 
     /// Draw the file keyed `key` in the accent, or none.
@@ -302,34 +427,66 @@ impl GraphView {
         ));
         self.add_controller(click);
 
-        // How far the drag has panned, `None` while it is still within a click's slop.
+        // The first button or a finger on a node drags the node, anywhere else pans; the middle
+        // button always pans.
         let drag = gtk::GestureDrag::builder().button(0).build();
-        let panned = Rc::new(Cell::new(None::<[f64; 2]>));
+        let held = Rc::new(RefCell::new(None::<Drag>));
         drag.connect_drag_begin(glib::clone!(
+            #[weak(rename_to = view)]
+            self,
             #[strong]
-            panned,
-            move |drag, _, _| {
-                if !matches!(drag.current_button(), 0..=2) {
+            held,
+            move |drag, x, y| {
+                let button = drag.current_button();
+                if !matches!(button, 0..=2) {
                     drag.set_state(gtk::EventSequenceState::Denied);
+                    return;
                 }
-                panned.set(None);
+                let node = (button != 2)
+                    .then(|| view.node_at([x, y]))
+                    .flatten()
+                    .map(|i| view.graph().nodes[i].key.clone());
+                held.replace(Some(Drag {
+                    from: [x, y],
+                    node,
+                    panned: None,
+                }));
             }
         ));
         drag.connect_drag_update(glib::clone!(
             #[weak(rename_to = view)]
             self,
             #[strong]
-            panned,
+            held,
             move |drag, dx, dy| {
-                let was = match panned.get() {
+                let mut held = held.borrow_mut();
+                let Some(on) = held.as_mut() else {
+                    return;
+                };
+                let was = match on.panned {
                     Some(was) => was,
                     None if dx.hypot(dy) <= crate::widgets::click_slop(drag) => return,
                     None => [0.0; 2],
                 };
-                panned.set(Some([dx, dy]));
-                let mut camera = view.camera();
-                camera.pan([dx - was[0], dy - was[1]]);
-                view.set_camera(camera);
+                on.panned = Some([dx, dy]);
+                match &on.node {
+                    Some(key) => view.hold(key, [on.from[0] + dx, on.from[1] + dy]),
+                    None => {
+                        let mut camera = view.camera();
+                        camera.pan([dx - was[0], dy - was[1]]);
+                        view.set_camera(camera);
+                    }
+                }
+            }
+        ));
+        drag.connect_drag_end(glib::clone!(
+            #[weak(rename_to = view)]
+            self,
+            #[strong]
+            held,
+            move |_, _, _| {
+                held.take();
+                view.let_go();
             }
         ));
         self.add_controller(drag);
@@ -443,34 +600,92 @@ impl GraphView {
         animation.play();
     }
 
-    /// Draw the links, then the nodes a path per colour, then the names, all culled to the
-    /// canvas.
+    /// How the canvas wants the graph drawn now, sent to the worker when it changed: its camera,
+    /// size and display scale, what is lit, and the theme's colours.
+    fn ask(&self) {
+        let imp = self.imp();
+        let size = self.size();
+        if size[0] < 1.0 || size[1] < 1.0 {
+            return;
+        }
+        let view = {
+            let graph = imp.graph.borrow();
+            let index = |key: &RefCell<Option<String>>| {
+                (key.borrow().as_deref()).and_then(|key| graph.index_of(key))
+            };
+            let camera = imp.camera.get();
+            let surface = self.native().and_then(|n| n.surface());
+            raster::View {
+                // The worker fits a fitting camera to what it draws.
+                camera: if camera.fitting {
+                    Camera::default()
+                } else {
+                    camera
+                },
+                size,
+                scale: surface.map_or(f64::from(self.scale_factor()), |s| s.scale()),
+                lit: imp.hover.get(),
+                front: index(&imp.front),
+                colours: Colours {
+                    ink: rgba(self.color()),
+                    lanes: std::array::from_fn(|k| rgba(crate::highlight::lane_colour(k + 1))),
+                    accent: rgba(theme::accent()),
+                },
+            }
+        };
+        if imp.asked.borrow().as_ref() == Some(&view) {
+            return;
+        }
+        let serial = imp.serial.get() + 1;
+        match imp.worker.borrow().as_ref() {
+            Some(worker) => worker.view(serial, view.clone()),
+            None => return,
+        }
+        imp.serial.set(serial);
+        imp.asked.replace(Some(view));
+        self.run();
+    }
+
+    /// The worker's last picture of the graph, moved and scaled from the camera it was drawn at
+    /// to the canvas's, then the names on top, at the places it was drawn with.
     fn paint(&self, snapshot: &gtk::Snapshot) {
+        self.ask();
         let imp = self.imp();
         let graph = imp.graph.borrow();
         let at = imp.at.borrow();
-        if graph.nodes.is_empty() || at.len() != graph.nodes.len() {
+        let picture = imp.picture.borrow();
+        let Some(picture) = picture.as_ref() else {
+            return;
+        };
+        if graph.nodes.is_empty() || at.len() != graph.nodes.len() || !imp.placed.get() {
             return;
         }
         let size = self.size();
-        let mut camera = imp.camera.get();
-        if camera.fitting {
-            camera = Camera::fit(&at, size);
-            imp.camera.set(camera);
-        }
+        let camera = imp.camera.get();
         snapshot.push_clip(&graphene::Rect::new(
             0.0,
             0.0,
             size[0] as f32,
             size[1] as f32,
         ));
+        let (drawn, k) = (picture.camera, camera.zoom / picture.camera.zoom);
+        snapshot.append_scaled_texture(
+            &picture.texture,
+            gsk::ScalingFilter::Linear,
+            &graphene::Rect::new(
+                (camera.offset[0] - drawn.offset[0] * k) as f32,
+                (camera.offset[1] - drawn.offset[1] * k) as f32,
+                (picture.size[0] * k) as f32,
+                (picture.size[1] * k) as f32,
+            ),
+        );
         let ink = self.color();
         let screen: Vec<[f64; 2]> = at.iter().map(|&p| camera.to_screen(p)).collect();
         let radius = |i: usize| {
             (f64::from(model::radius(graph.adjacency[i].len())) * camera.zoom)
                 .max(camera::MIN_RADIUS)
         };
-        // A node whose disc, or a link whose box, reaches the canvas.
+        // A node whose name may reach the canvas.
         let pad = f64::from(model::radius(usize::MAX)) * camera.zoom + 4.0;
         let on_screen = |p: [f64; 2]| {
             (-pad..=size[0] + pad).contains(&p[0]) && (-pad..=size[1] + pad).contains(&p[1])
@@ -481,108 +696,13 @@ impl GraphView {
             .unwrap_or_default();
         let dimmed = |i: usize| lit.is_some() && !near.contains(&i);
         let front = (imp.front.borrow().as_deref()).and_then(|key| graph.index_of(key));
-
-        let (links, lit_links) = (gsk::PathBuilder::new(), gsk::PathBuilder::new());
-        for e in &graph.edges {
-            let (a, b) = (screen[e.from as usize], screen[e.to as usize]);
-            let misses = a[0].max(b[0]) < 0.0
-                || a[0].min(b[0]) > size[0]
-                || a[1].max(b[1]) < 0.0
-                || a[1].min(b[1]) > size[1];
-            if misses {
-                continue;
-            }
-            let path = match lit.is_some_and(|l| e.from as usize == l || e.to as usize == l) {
-                true => &lit_links,
-                false => &links,
-            };
-            path.move_to(a[0] as f32, a[1] as f32);
-            path.line_to(b[0] as f32, b[1] as f32);
-        }
-        let hairline = gsk::Stroke::new(1.0);
-        snapshot.append_stroke(
-            &links.to_path(),
-            &hairline,
-            &theme::at(ink, theme::GRAPH_EDGE_ALPHA),
-        );
-        snapshot.append_stroke(
-            &lit_links.to_path(),
-            &hairline,
-            &theme::at(ink, theme::GRAPH_FAINT_ALPHA),
-        );
-
-        // One path a colour: a note's, the five hues', a faint file's, a tag's square, a ghost's
-        // ring, and the dimmed discs and rings outside the lit node's neighbourhood.
-        let paths: [gsk::PathBuilder; 11] = std::array::from_fn(|_| gsk::PathBuilder::new());
-        let mut used = [false; 11];
-        const DIM: usize = 9;
-        let mut named = Vec::new();
-        for (i, &p) in screen.iter().enumerate() {
-            if !on_screen(p) || Some(i) == front {
-                continue;
-            }
-            let (r, paint) = (radius(i), model::paint_of(graph.nodes[i].kind));
-            let slot = match (paint, dimmed(i)) {
-                (Paint::Ghost, true) => DIM + 1,
-                (_, true) => DIM,
-                (Paint::Ink, _) => 0,
-                (Paint::Lane(n), _) => n,
-                (Paint::Faint, _) => 6,
-                (Paint::Tag, _) => 7,
-                (Paint::Ghost, _) => 8,
-            };
-            used[slot] = true;
-            let centre = graphene::Point::new(p[0] as f32, p[1] as f32);
-            match paint {
-                Paint::Tag => paths[slot].add_rect(&graphene::Rect::new(
-                    (p[0] - r) as f32,
-                    (p[1] - r) as f32,
-                    (2.0 * r) as f32,
-                    (2.0 * r) as f32,
-                )),
-                _ => paths[slot].add_circle(&centre, r as f32),
-            }
-            if camera.zoom >= LABEL_ZOOM || near.contains(&i) {
-                named.push(i);
-            }
-        }
-        for (slot, path) in paths.iter().enumerate().filter(|(slot, _)| used[*slot]) {
-            let path = path.to_path();
-            let faint = theme::at(ink, theme::GRAPH_FAINT_ALPHA);
-            match slot {
-                8 | 10 => snapshot.append_stroke(
-                    &path,
-                    &gsk::Stroke::new(1.5),
-                    &theme::at(
-                        ink,
-                        match slot {
-                            8 => theme::GRAPH_RING_ALPHA,
-                            _ => theme::GRAPH_DIM_ALPHA,
-                        },
-                    ),
-                ),
-                _ => snapshot.append_fill(
-                    &path,
-                    gsk::FillRule::Winding,
-                    &match slot {
-                        0 => ink,
-                        1..=5 => crate::highlight::lane_colour(slot),
-                        6 | 7 => faint,
-                        _ => theme::at(ink, theme::GRAPH_DIM_ALPHA),
-                    },
-                ),
-            }
-        }
-        // The file in front in the accent, a ring round it.
+        // Every name from LABEL_ZOOM up, below it the lit node's neighbourhood's; the front's
+        // last, over the rest.
+        let mut named: Vec<usize> = (0..screen.len())
+            .filter(|&i| on_screen(screen[i]) && Some(i) != front)
+            .filter(|i| camera.zoom >= LABEL_ZOOM || near.contains(i))
+            .collect();
         if let Some(i) = front.filter(|&i| on_screen(screen[i])) {
-            let (p, r) = (screen[i], radius(i) as f32);
-            let centre = graphene::Point::new(p[0] as f32, p[1] as f32);
-            let disc = gsk::PathBuilder::new();
-            disc.add_circle(&centre, r);
-            snapshot.append_fill(&disc.to_path(), gsk::FillRule::Winding, &theme::accent());
-            let ring = gsk::PathBuilder::new();
-            ring.add_circle(&centre, r + 3.0);
-            snapshot.append_stroke(&ring.to_path(), &gsk::Stroke::new(1.5), &theme::accent());
             named.push(i);
         }
         self.paint_labels(snapshot, &graph, &screen, &named, &radius, &dimmed, ink);
@@ -632,6 +752,11 @@ impl GraphView {
     }
 }
 
+/// `colour` as the drawer takes it.
+fn rgba(colour: gdk::RGBA) -> Rgba {
+    [colour.red(), colour.green(), colour.blue(), colour.alpha()]
+}
+
 #[cfg(feature = "bench")]
 impl GraphView {
     /// A press on node `i`, as a click lands one.
@@ -644,6 +769,16 @@ impl GraphView {
 
     pub fn settled(&self) -> bool {
         self.imp().settled.get()
+    }
+
+    /// The layout's frames landed since the last change.
+    pub fn frames(&self) -> usize {
+        self.imp().frames.get()
+    }
+
+    /// What tells whether the layout's thread has ended once the canvas is gone.
+    pub fn worker_life(&self) -> Option<std::sync::Weak<impl Sized + use<>>> {
+        self.imp().worker.borrow().as_ref().map(Worker::life)
     }
 
     pub fn front(&self) -> Option<String> {

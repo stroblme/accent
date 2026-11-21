@@ -827,12 +827,15 @@ drill_dangling() {
 
 # The Graph tab round a note: the notes it links to and is linked from, a ghost for one not
 # written yet, a press opening a note beside the graph as the other pane's preview with the
-# keyboard left on the graph, and the tab back with the session.
+# keyboard left on the graph and growing the graph by its links, the tab back with the session,
+# and started again round a note it does not hold, settled in one frame with animations off.
 drill_graph() {
 	printf '[[b]] [[c]] [[gone]] #topic ![[pic.png]]\n' >"$vault/a.md"
 	echo '[[c]]' >"$vault/b.md"
-	echo 'plain' >"$vault/c.md"
+	echo '[[f]]' >"$vault/c.md"
 	echo 'alone' >"$vault/d.md"
+	echo 'end' >"$vault/f.md"
+	echo 'alone' >"$vault/lone.md"
 	echo '[[a]]' >"$vault/e.md"
 	cp "$repo/docs/guide/social-preview.png" "$vault/pic.png"
 	launch 90 ACCENT_BENCH_GRAPH=check:a.md >"$dir/graph"

@@ -1,5 +1,8 @@
 bench graph open front=a.md nodes=["a.md", "b.md", "c.md", "e.md", "gone.md?"] links=5
 bench graph click c.md opened=c.md pane=2 preview=true keyboard=graph tabs=1
+bench graph grow c.md roots=["a.md", "c.md"] nodes=["a.md", "b.md", "c.md", "e.md", "f.md", "gone.md?"] front=c.md
 bench graph click b.md opened=b.md pane=2 preview=true keyboard=graph tabs=1
+bench graph grow b.md roots=["a.md", "c.md", "b.md"] nodes=["a.md", "b.md", "c.md", "e.md", "f.md", "gone.md?"] front=b.md
 bench graph session restored=true front=b.md
-bench graph closed
+bench graph still roots=["lone.md"] nodes=["lone.md"] settled_at_once=true
+bench graph closed worker_ended=true
