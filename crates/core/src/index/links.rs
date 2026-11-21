@@ -22,8 +22,23 @@ const BEST_REL_PATH: &str = "SELECT f.rel_path FROM file_keys k JOIN files f ON 
 
 /// The row the path `?1` names: its own, or the one it is a second path to (`aliases`), so a tab
 /// on either reads the same links.
-const ROW: &str = "COALESCE((SELECT id FROM files WHERE rel_path = ?1),
+pub(super) const ROW: &str = "COALESCE((SELECT id FROM files WHERE rel_path = ?1),
                             (SELECT file_id FROM aliases WHERE rel_path = ?1))";
+
+/// A link `l` from the file `s` that names a file New File could write: it resolves to nothing,
+/// is not external, names more than an anchor in its own note (`''`) and no folder (a row by its
+/// exact path), and `s` is not a file the index holds only because a tab opened it, which the
+/// vault's notes miss nothing for. What [`Index::missing_notes`] lists and the graph's ghosts are.
+pub(super) const DANGLING: &str = "l.resolved_file IS NULL AND l.kind <> 3 AND l.target <> ''
+     AND s.rel_path NOT IN (SELECT rel_path FROM opened)
+     AND NOT EXISTS (SELECT 1 FROM files WHERE files.rel_path = l.target)";
+
+/// The note a [`DANGLING`] link's target is written as ([`linked_path`]), `None` where the target
+/// names an image, a PDF or another file that is not a note.
+pub(super) fn missing_path(target: &str) -> Option<String> {
+    let rel = linked_path(target);
+    (file_type(&rel) == FileType::Note).then_some(rel)
+}
 
 /// [`Index::resolve_links`] narrowed to what one indexed file can have changed: the links it
 /// holds, every link whose key it answers to — which is where a dangling link finds its new
@@ -202,21 +217,18 @@ impl Index {
     /// file the index holds only because it was opened: the vault's notes miss them, not the
     /// opened file in a folder the walk leaves out.
     pub fn missing_notes(&self) -> Result<Vec<String>> {
-        let mut st = self.conn.prepare_cached(
+        let mut st = self.conn.prepare_cached(&format!(
             "SELECT DISTINCT l.target FROM links l JOIN files s ON s.id = l.src_file
-             WHERE l.resolved_file IS NULL AND l.kind <> 3 AND l.target <> ''
-               AND s.rel_path NOT IN (SELECT rel_path FROM opened)
-               AND NOT EXISTS (SELECT 1 FROM files f WHERE f.rel_path = l.target)
-             ORDER BY l.target",
-        )?;
+             WHERE {DANGLING} ORDER BY l.target"
+        ))?;
         let targets = st
             .query_map([], |r| r.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut seen = HashSet::new();
         Ok(targets
             .iter()
-            .map(|target| linked_path(target))
-            .filter(|rel| file_type(rel) == FileType::Note && seen.insert(markdown::link_key(rel)))
+            .filter_map(|target| missing_path(target))
+            .filter(|rel| seen.insert(markdown::link_key(rel)))
             .collect())
     }
 }

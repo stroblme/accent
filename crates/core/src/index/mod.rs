@@ -7,6 +7,7 @@
 
 mod files;
 mod filter;
+mod graph;
 mod links;
 mod pdf_text;
 mod reconcile;
