@@ -370,6 +370,7 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.diagram-select", "Select and Move", &[]),
     ("win.diagram-rect", "Add Rectangle", &[]),
     ("win.diagram-ellipse", "Add Ellipse", &[]),
+    ("win.diagram-shape", "Add Shape", &[]),
     ("win.diagram-text", "Add Text", &[]),
     ("win.diagram-connector", "Add Connector", &[]),
     ("win.diagram-image", "Add Image…", &[]),

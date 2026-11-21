@@ -4,7 +4,7 @@ Open a draw.io file (`.drawio`, `.dio` or `.drawio.xml`) from [Files](vaults.md)
 
 ## Edit the drawing
 
-The tool ring adds rectangles, ellipses, text, connectors and images.
+The tool ring adds rectangles, ellipses, text, connectors and images, and the shapes of draw.io's General and Basic palettes.
 Select a shape to move or resize it, or use the [Properties pane](vaults.md#find-your-way) to change its appearance.
 Drag a connector from one shape to another to keep them connected as you move things around.
 Double-click a shape or label to edit its text, then click away to finish.

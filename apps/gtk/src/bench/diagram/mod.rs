@@ -11,6 +11,7 @@ pub(super) mod pictures;
 mod props;
 mod round;
 mod select;
+mod shape;
 mod style;
 
 /// A two-page diagram with a shape, an ellipse, an edge between them, a formula, a label of text
@@ -67,6 +68,7 @@ pub(super) const SAMPLE: &str = r#"<mxfile host="accent">
 /// - `=style:<rel>` probes the style editor: Edit Style, live apply, following, completion, the
 ///   star and closing with the cell.
 /// - `=select:<rel>` writes groups to `<rel>` and prints what real clicks and bands select.
+/// - `=shape:<rel>` picks shapes from the Shape tool's grid and draws them by real input.
 /// - `=render` draws a page as `accent --render-diagram` does and prints where its lines fall.
 /// - `=edges` exports a picture on paper as a PDF and counts the seams pdfium draws around it.
 ///
@@ -106,6 +108,9 @@ pub(super) fn bench_diagram(app: &Rc<App>, arg: &str) {
     }
     if let Some(rel) = arg.strip_prefix("style:") {
         return style::style(app, rel);
+    }
+    if let Some(rel) = arg.strip_prefix("shape:") {
+        return shape::shape(app, rel);
     }
     if let Some((rel, dir)) = arg.strip_prefix("export:").and_then(|a| a.split_once(':')) {
         return output::export(app, rel, Path::new(dir));

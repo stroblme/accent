@@ -856,6 +856,11 @@ impl DiagramTab {
             Edit::Resize { id, rect, alone } => {
                 self.edit(|e, page| e.resize(page, &id, rect, alone))
             }
+            Edit::Drop { tool, at } => {
+                let (w, h) = tool.size(&self.options.get());
+                let rect = accent_drawio::Rect::new(at.x - w / 2.0, at.y - h / 2.0, w, h);
+                self.apply(Edit::Add { tool, rect });
+            }
             Edit::Add { tool, rect } => {
                 let style = self.new_style(&edit);
                 let mut added = None;

@@ -334,6 +334,7 @@ impl App {
             "diagram-select" => self.diagram_tool(Tool::Select),
             "diagram-rect" => self.diagram_tool(Tool::Rect),
             "diagram-ellipse" => self.diagram_tool(Tool::Ellipse),
+            "diagram-shape" => self.diagram_tool(Tool::Shape),
             "diagram-text" => self.diagram_tool(Tool::Text),
             "diagram-connector" => self.diagram_tool(Tool::Connector),
             "diagram-image" => {
@@ -353,6 +354,7 @@ impl App {
         let inserts = [
             Tool::Rect,
             Tool::Ellipse,
+            Tool::Shape,
             Tool::Text,
             Tool::Connector,
             Tool::Image,

@@ -1205,7 +1205,7 @@ impl Props {
                         Tool::Ellipse => "ellipses",
                         Tool::Text => "text boxes",
                         Tool::Connector => "connectors",
-                        Tool::Select | Tool::Image => unreachable!(),
+                        Tool::Select | Tool::Shape | Tool::Image => unreachable!(),
                     };
                     // Filled while the cell's style is the default, which a press then clears.
                     let (icon, action) = match is_default {

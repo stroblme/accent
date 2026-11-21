@@ -5,12 +5,14 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use accent_core::config::{DiagramConfig, Route};
+use accent_drawio::palette::{self, Entry};
 use accent_drawio::presets::{self, EdgeKind};
 use accent_drawio::{Color, Style};
 use adw::prelude::*;
 
 use super::colours::{SLOTS, hex};
-use super::paint::Tint;
+use super::geometry::{DEFAULT_SIZE, Frame};
+use super::paint::{self, Cache, Tint};
 use crate::ring::Ring;
 
 /// What a drag over the page does.
@@ -21,6 +23,8 @@ pub enum Tool {
     Select,
     Rect,
     Ellipse,
+    /// One of draw.io's palette shapes, the one picked on the outer orbit.
+    Shape,
     Text,
     /// Draw an edge from one shape to another, or to where the drag ends.
     Connector,
@@ -51,7 +55,7 @@ impl Tool {
             Tool::Ellipse => Some("accentStyleEllipse"),
             Tool::Text => Some("accentStyleText"),
             Tool::Connector => Some("accentStyleConnector"),
-            Tool::Select | Tool::Image => None,
+            Tool::Select | Tool::Shape | Tool::Image => None,
         }
     }
 
@@ -98,6 +102,7 @@ impl Tool {
             Tool::Select => "win.diagram-select",
             Tool::Rect => "win.diagram-rect",
             Tool::Ellipse => "win.diagram-ellipse",
+            Tool::Shape => "win.diagram-shape",
             Tool::Text => "win.diagram-text",
             Tool::Connector => "win.diagram-connector",
             Tool::Image => "win.diagram-image",
@@ -106,7 +111,16 @@ impl Tool {
 
     /// Whether a drag with it draws a box: the shapes and text.
     pub fn draws_box(self) -> bool {
-        matches!(self, Tool::Rect | Tool::Ellipse | Tool::Text)
+        matches!(self, Tool::Rect | Tool::Ellipse | Tool::Shape | Tool::Text)
+    }
+
+    /// The size a click draws its cell at: the palette entry's for a shape, as draw.io's sidebar
+    /// inserts it, and draw.io's rectangle's for the rest.
+    pub fn size(self, options: &DiagramConfig) -> (f64, f64) {
+        match self {
+            Tool::Shape => (options.shape.width.into(), options.shape.height.into()),
+            _ => DEFAULT_SIZE,
+        }
     }
 
     /// New-cell style from the ring's options, persisted in `[diagram]` so all tabs
@@ -116,6 +130,7 @@ impl Tool {
             Tool::Rect if options.rounded => presets::ROUNDED.to_string(),
             Tool::Rect => presets::RECT.to_string(),
             Tool::Ellipse => presets::ELLIPSE.to_string(),
+            Tool::Shape => options.shape.style.to_string(),
             Tool::Text if options.note => presets::NOTE.to_string(),
             Tool::Text => presets::TEXT.to_string(),
             Tool::Connector => presets::edge(edge_kind(options.route), options.arrow),
@@ -138,6 +153,7 @@ impl crate::ring::Tool for Tool {
         (Tool::Select, "tool-select-symbolic"),
         (Tool::Rect, "tool-rect-symbolic"),
         (Tool::Ellipse, "tool-circle-symbolic"),
+        (Tool::Shape, "tool-shapes-symbolic"),
         (Tool::Text, "insert-text-symbolic"),
         (Tool::Connector, "tool-line-symbolic"),
         (Tool::Image, "insert-image-symbolic"),
@@ -178,16 +194,19 @@ pub enum Pick {
     Note(bool),
     Route(Route),
     Arrow(bool),
+    /// The Shape tool's palette entry.
+    Shape(&'static Entry),
 }
 
 impl Pick {
     /// The Default Style it is written into where the diagram has one: its tool's, and none for
-    /// Text or Note, which picks the shape the text tool draws, not a key of the text box's style.
+    /// Text or Note, which picks the shape the text tool draws, not a key of the text box's style,
+    /// nor for a shape, whose tool has no Default Style.
     pub fn default_attr(self) -> Option<&'static str> {
         match self {
             Pick::Rounded(_) => Tool::Rect.default_attr(),
             Pick::Route(_) | Pick::Arrow(_) => Tool::Connector.default_attr(),
-            Pick::Note(_) => None,
+            Pick::Note(_) | Pick::Shape(_) => None,
         }
     }
 
@@ -198,6 +217,7 @@ impl Pick {
             Pick::Note(note) => DiagramConfig { note, ..options },
             Pick::Route(route) => DiagramConfig { route, ..options },
             Pick::Arrow(arrow) => DiagramConfig { arrow, ..options },
+            Pick::Shape(shape) => DiagramConfig { shape, ..options },
         }
     }
 
@@ -208,7 +228,7 @@ impl Pick {
         match self {
             Pick::Rounded(on) => style.set("rounded", Some(if on { "1" } else { "0" })),
             // Never written into a Default Style (`Pick::default_attr`).
-            Pick::Note(_) => {}
+            Pick::Note(_) | Pick::Shape(_) => {}
             Pick::Arrow(on) => style.set("endArrow", (!on).then_some("none")),
             Pick::Route(route) => {
                 let preset = Style::parse(&presets::edge(edge_kind(route), true));
@@ -230,6 +250,7 @@ pub struct Picks {
     pub note: bool,
     pub route: Option<Route>,
     pub arrow: bool,
+    pub shape: &'static Entry,
 }
 
 impl Picks {
@@ -264,6 +285,7 @@ impl From<DiagramConfig> for Picks {
             note: options.note,
             route: Some(options.route),
             arrow: options.arrow,
+            shape: options.shape,
         }
     }
 }
@@ -301,17 +323,28 @@ const COMMANDS: [(&str, &str); 4] = [
     ("win.diagram-delete", "user-trash-symbolic"),
 ];
 
+/// The shape grid's columns, the size its glyphs are drawn at, and the height it scrolls past.
+const COLUMNS: u32 = 6;
+const CELL: i32 = 32;
+const GRID_HEIGHT: i32 = 360;
+/// How wide a shape's glyph draws its line on screen, as the other glyphs do.
+const LINE: f64 = 1.5;
+
 /// The generic ring with a diagram's options on its outer orbit: plain or rounded corners while
-/// the rectangle is in hand, plain text or a Note while the text tool is, and the line's route and
-/// its arrow while the connector is. Colour swatches follow them for every drawing tool, and line
-/// widths for every tool that draws a line; Select has its commands in the swatches' place.
+/// the rectangle is in hand, the shape picked while the Shape tool is, plain text or a Note while
+/// the text tool is, and the line's route and its arrow while the connector is. Colour swatches
+/// follow them for every drawing tool, and line widths for every tool that draws a line; Select
+/// has its commands in the swatches' place.
 pub struct DiagramRing {
     ring: Rc<Ring<Tool>>,
     corners: Vec<(bool, gtk::ToggleButton)>,
+    /// The Shape tool's one option, its pick's glyph, which opens the grid of the others.
+    shape: gtk::ToggleButton,
+    grid: std::cell::OnceCell<Grid>,
     texts: Vec<(bool, gtk::ToggleButton)>,
     lines: Vec<(Route, gtk::ToggleButton)>,
     arrow: gtk::ToggleButton,
-    picks: Cell<Picks>,
+    picks: Rc<Cell<Picks>>,
     swatches: Vec<gtk::ToggleButton>,
     /// The swatches' colours as the file is given them, and the one picked.
     colours: Rc<RefCell<Vec<[u8; 3]>>>,
@@ -346,6 +379,11 @@ impl DiagramRing {
             (false, option(0, Glyph::Square, "Square Corners")),
             (true, option(1, Glyph::Rounded, "Rounded Corners")),
         ];
+        let picks = Rc::new(Cell::new(Picks::from(DiagramConfig::default())));
+        let picked = picks.clone();
+        let glyph = shape_glyph(move || picked.get().shape, crate::ring::GLYPH);
+        let shape = ring.add_option(0, slots, glyph.upcast_ref());
+        shape.set_tooltip_text(Some(palette::DEFAULT.title));
         let texts = vec![
             (false, option(0, Glyph::Text, "Text")),
             (true, option(1, Glyph::Note, "Note")),
@@ -394,10 +432,12 @@ impl DiagramRing {
         let diagram = Rc::new(DiagramRing {
             ring,
             corners,
+            shape,
+            grid: std::cell::OnceCell::new(),
             texts,
             lines,
             arrow,
-            picks: Cell::new(DiagramConfig::default().into()),
+            picks,
             swatches,
             colours,
             picked: Cell::new(None),
@@ -420,6 +460,12 @@ impl DiagramRing {
                 }
             });
         }
+        let weak = Rc::downgrade(&diagram);
+        diagram.shape.connect_clicked(move |_| {
+            if let Some(d) = weak.upgrade() {
+                d.open_grid();
+            }
+        });
         for (note, button) in &diagram.texts {
             let (note, weak) = (*note, Rc::downgrade(&diagram));
             button.connect_clicked(move |_| {
@@ -500,12 +546,117 @@ impl DiagramRing {
 
     pub fn set_picks(&self, picks: Picks) {
         self.picks.set(picks);
+        self.shape.set_tooltip_text(Some(picks.shape.title));
+        if let Some(glyph) = self.shape.child() {
+            glyph.queue_draw();
+        }
         self.sync();
     }
 
     /// Call `f` with each click on the outer orbit; it answers with [`DiagramRing::set_picks`].
     pub fn connect_pick(&self, f: impl Fn(Pick) + 'static) {
         *self.on_pick.borrow_mut() = Some(Box::new(f));
+    }
+
+    /// Open the grid of shapes beside the shape slot, the one picked focused. It is built the
+    /// first time, with the shapes accent then draws.
+    fn open_grid(self: &Rc<Self>) {
+        let grid = self.grid.get_or_init(|| self.build_grid());
+        // The keyboard goes back where it was once the grid closes, to the page a click on the
+        // ring leaves it on.
+        grid.back
+            .replace(self.shape.root().and_then(|root| root.focus()));
+        grid.popover.set_parent(&self.shape);
+        grid.popover.popup();
+        let picked = self.picks.get().shape;
+        for (flow, entries) in &grid.flows {
+            let at = entries.iter().position(|entry| *entry == picked);
+            match at.and_then(|i| flow.child_at_index(i as i32)) {
+                // Focused as the keys focus a shape, which selects it and puts the grid's cursor
+                // on it, where the arrow keys go on from.
+                Some(child) => {
+                    child.child_focus(gtk::DirectionType::TabForward);
+                }
+                None => flow.unselect_all(),
+            }
+        }
+        // The click flipped the slot's look, which stays checked while the tool is in hand.
+        self.sync();
+    }
+
+    /// The popover of draw.io's General and Basic shapes that accent draws, a grid under each
+    /// palette's title, which a click or `Return` picks from and `Escape` closes.
+    fn build_grid(self: &Rc<Self>) -> Grid {
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        let mut flows = Vec::new();
+        for (title, entries) in palette::PALETTES {
+            let entries: Vec<&'static Entry> = entries.iter().filter(|e| e.drawn()).collect();
+            if entries.is_empty() {
+                continue;
+            }
+            let heading = gtk::Label::new(Some(title));
+            heading.set_xalign(0.0);
+            heading.add_css_class("heading");
+            let flow = gtk::FlowBox::builder()
+                .selection_mode(gtk::SelectionMode::Single)
+                .homogeneous(true)
+                .min_children_per_line(COLUMNS)
+                .max_children_per_line(COLUMNS)
+                .build();
+            for &entry in &entries {
+                let child = gtk::FlowBoxChild::builder()
+                    .child(&shape_glyph(move || entry, CELL))
+                    .tooltip_text(entry.title)
+                    .build();
+                child.update_property(&[gtk::accessible::Property::Label(entry.title)]);
+                flow.insert(&child, -1);
+            }
+            content.append(&heading);
+            content.append(&flow);
+            flows.push((flow, entries));
+        }
+        for (flow, entries) in &flows {
+            let (weak, entries) = (Rc::downgrade(self), entries.clone());
+            flow.connect_child_activated(move |_, child| {
+                let popover = child.ancestor(gtk::Popover::static_type());
+                if let Some(popover) = popover.and_downcast::<gtk::Popover>() {
+                    popover.popdown();
+                }
+                if let (Some(d), Some(entry)) =
+                    (weak.upgrade(), entries.get(child.index() as usize).copied())
+                {
+                    d.choose(Pick::Shape(entry));
+                }
+            });
+        }
+        content.add_controller(across(&flows));
+        let scroller = gtk::ScrolledWindow::builder()
+            .child(&content)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .propagate_natural_width(true)
+            .propagate_natural_height(true)
+            .max_content_height(GRID_HEIGHT)
+            .build();
+        // Left of the ring, which starts in the page's top right corner, so the grid covers the
+        // page rather than the ring; GTK turns it right where there is no room.
+        let popover = gtk::Popover::builder()
+            .child(&scroller)
+            .position(gtk::PositionType::Left)
+            .build();
+        let back: Rc<RefCell<Option<gtk::Widget>>> = Rc::default();
+        let to = back.clone();
+        // A popover parented by hand stays parented until it is unparented by hand.
+        popover.connect_closed(move |popover| {
+            popover.unparent();
+            if let Some(widget) = to.take() {
+                widget.grab_focus();
+            }
+        });
+        Grid {
+            popover,
+            flows,
+            back,
+        }
     }
 
     fn choose(&self, pick: Pick) {
@@ -592,6 +743,7 @@ impl DiagramRing {
         for (rounded, button) in &self.corners {
             check(button, tool == Tool::Rect, *rounded == picks.rounded);
         }
+        check(&self.shape, tool == Tool::Shape, true);
         for (note, button) in &self.texts {
             check(button, tool == Tool::Text, *note == picks.note);
         }
@@ -627,6 +779,57 @@ impl DiagramRing {
             check(button, lines, lines && self.width.get() == Some(width));
         }
     }
+}
+
+/// The arrow keys going on from a palette's grid into the one above or below it, to the shape in
+/// the same column, as in one grid: `Up` from its first row and `Down` from where no shape is
+/// below. GTK's `keynav-failed` says Down for either key (ISSUES.md), so the keys are read first.
+fn across(flows: &[(gtk::FlowBox, Vec<&'static Entry>)]) -> gtk::EventControllerKey {
+    let flows: Vec<(gtk::FlowBox, u32)> = (flows.iter())
+        .map(|(flow, entries)| (flow.clone(), entries.len() as u32))
+        .collect();
+    let keys = gtk::EventControllerKey::new();
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    keys.connect_key_pressed(move |_, key, _, _| {
+        let (down, direction) = match key {
+            gtk::gdk::Key::Up => (false, gtk::DirectionType::Up),
+            gtk::gdk::Key::Down => (true, gtk::DirectionType::Down),
+            _ => return gtk::glib::Propagation::Proceed,
+        };
+        let focused = flows.iter().enumerate().find_map(|(i, (flow, n))| {
+            let child = flow.focus_child().and_downcast::<gtk::FlowBoxChild>()?;
+            Some((i, flow, *n, child.index() as u32))
+        });
+        let Some((i, flow, n, at)) = focused else {
+            return gtk::glib::Propagation::Proceed;
+        };
+        let next = match down {
+            true if at + COLUMNS >= n => flows.get(i + 1),
+            false if at < COLUMNS => i.checked_sub(1).and_then(|i| flows.get(i)),
+            _ => None,
+        };
+        let Some((to, m)) = next else {
+            return gtk::glib::Propagation::Proceed;
+        };
+        let row = if down { 0 } else { (m - 1) / COLUMNS };
+        let Some(child) = to.child_at_index((row * COLUMNS + at % COLUMNS).min(m - 1) as i32)
+        else {
+            return gtk::glib::Propagation::Proceed;
+        };
+        flow.unselect_all();
+        // Focused as the keys focus a shape, which selects it and puts the grid's cursor on it.
+        child.child_focus(direction);
+        gtk::glib::Propagation::Stop
+    });
+    keys
+}
+
+/// The Shape tool's grid: its popover, each palette's grid with the entries it shows, and where the
+/// keyboard goes back to once it closes.
+struct Grid {
+    popover: gtk::Popover,
+    flows: Vec<(gtk::FlowBox, Vec<&'static Entry>)>,
+    back: Rc<RefCell<Option<gtk::Widget>>>,
 }
 
 /// What swatch `i` is called, on the ring and in Recolour Selection's palette rows.
@@ -725,6 +928,75 @@ fn glyph_area(glyph: Glyph) -> gtk::DrawingArea {
     area
 }
 
+/// The cell of `entry()`'s style, drawn by the canvas's own renderer in a box `size` pixels square:
+/// all of what it paints in the foreground colour, as the other glyphs are drawn, its fill left
+/// out.
+fn shape_glyph(entry: impl Fn() -> &'static Entry + 'static, size: i32) -> gtk::DrawingArea {
+    let area = gtk::DrawingArea::new();
+    area.set_size_request(size, size);
+    area.set_halign(gtk::Align::Center);
+    area.set_valign(gtk::Align::Center);
+    area.set_draw_func(move |area, cr, w, h| {
+        let entry = entry();
+        let (w, h) = (f64::from(w), f64::from(h));
+        let (ew, eh) = (f64::from(entry.width), f64::from(entry.height));
+        // At its own size, scaled down whole as draw.io's sidebar draws it, so the parts of a
+        // fixed size keep their place, and a pixel in, where a line on the edge is not cut.
+        let scale = ((w - 2.0) / ew).min((h - 2.0) / eh);
+        let frame = Frame {
+            scale,
+            x: (w - ew * scale) / 2.0,
+            y: (h - eh * scale) / 2.0,
+            pixels: scale,
+        };
+        let (snapshot, cache) = (gtk::Snapshot::new(), Cache::default());
+        for (i, prim) in glyph_prims(entry, scale).iter().enumerate() {
+            paint::prim(
+                &snapshot,
+                area.upcast_ref(),
+                i,
+                prim,
+                &frame,
+                &cache,
+                Tint::FILE,
+            );
+        }
+        let Some(node) = snapshot.to_node() else {
+            return;
+        };
+        // What the renderer painted, as the mask the foreground colour goes through.
+        cr.push_group();
+        node.draw(cr);
+        let Ok(mask) = cr.pop_group() else {
+            return;
+        };
+        let c = area.color();
+        cr.set_source_rgba(
+            f64::from(c.red()),
+            f64::from(c.green()),
+            f64::from(c.blue()),
+            f64::from(c.alpha()),
+        );
+        let _ = cr.mask(&mask);
+    });
+    area
+}
+
+/// The display list of one cell of `entry`'s style at its own size, unfilled, its line as wide as
+/// [`LINE`] once scaled by `scale`.
+fn glyph_prims(entry: &Entry, scale: f64) -> Vec<accent_drawio::Prim> {
+    let mut style = Style::parse(entry.style);
+    style.set("fillColor", Some("none"));
+    style.set("strokeColor", Some("#000000"));
+    style.set("strokeWidth", Some(&(LINE / scale).to_string()));
+    let (w, h) = (f64::from(entry.width), f64::from(entry.height));
+    let rect = accent_drawio::Rect::new(0.0, 0.0, w, h);
+    let cell = accent_drawio::Cell::new_vertex("glyph", "1", rect, &style.to_string(), "");
+    let mut page = accent_drawio::Page::blank("", "");
+    page.cells.push(cell);
+    accent_drawio::scene(&page).prims
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -772,6 +1044,24 @@ mod tests {
         assert_eq!(label(&Tool::Text.style_in(&file, &options)), "Text");
     }
 
+    /// The Shape tool draws the entry picked, as draw.io's sidebar inserts it and at its size for a
+    /// click, and the pick goes to the config, there being no Default Style for it.
+    #[test]
+    fn the_shape_tool_draws_the_entry_picked() {
+        let file = accent_drawio::File::blank();
+        let style =
+            "shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=15;";
+        let cylinder = palette::find(style).expect("the General palette's Cylinder");
+        let options = Pick::Shape(cylinder).apply(DiagramConfig::default());
+        assert_eq!(Tool::Shape.style_in(&file, &options), style);
+        assert_eq!(label(style), "");
+        assert_eq!(Tool::Shape.size(&options), (60.0, 80.0));
+        assert_eq!(Tool::Rect.size(&options), DEFAULT_SIZE);
+        assert_eq!(Pick::Shape(cylinder).default_attr(), None);
+        assert_eq!(Picks::of(&file, &options).shape, cylinder);
+        assert!(Tool::Shape.draws_box() && Tool::Shape.default_attr().is_none());
+    }
+
     #[test]
     fn only_creation_shapes_can_supply_a_default_style() {
         use accent_drawio::{Cell, Point, Rect};
@@ -784,6 +1074,8 @@ mod tests {
         );
         assert_eq!(Tool::of(&vertex("text;fillColor=none;")), Some(Tool::Text));
         assert_eq!(Tool::of(&vertex("group;")), None);
+        // A palette shape's tool has no Default Style.
+        assert_eq!(Tool::of(&vertex(palette::DEFAULT.style)), None);
         assert_eq!(Tool::of(&vertex("shape=image;")), None);
         let edge = Cell::new_edge(
             "e",

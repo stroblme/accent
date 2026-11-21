@@ -9,7 +9,7 @@ use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 
 use super::{DiagramView, Edit};
-use crate::diagram::geometry::{self, DEFAULT_SIZE, HANDLE, Handle, Sheet, TOLERANCE};
+use crate::diagram::geometry::{self, HANDLE, Handle, Sheet, TOLERANCE};
 use crate::diagram::tools::Tool;
 
 /// The keys a drag reads on every event, as draw.io's handlers do: Alt places freely, Shift
@@ -648,10 +648,8 @@ impl DiagramView {
             }
             // A click draws a shape of draw.io's size around it.
             Drag::Draw { tool, from } if !moved => {
-                let c = geometry::snap_point(from, self.grid(mods.free));
-                let (w, h) = DEFAULT_SIZE;
-                let rect = Rect::new(c.x - w / 2.0, c.y - h / 2.0, w, h);
-                self.emit(Edit::Add { tool, rect });
+                let at = geometry::snap_point(from, self.grid(mods.free));
+                self.emit(Edit::Drop { tool, at });
             }
             // A click with the connector selects the cell under it, and over empty page lets go
             // of the selection, the arrow just drawn too.

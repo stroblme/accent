@@ -3,6 +3,7 @@
 //! Config stays outside the vault so preferences do not sync through Syncthing or git.
 //! `~/.config/accent/config.toml` is documented by [`Config`] with a worked example.
 
+use accent_drawio::palette::{self, Entry};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -64,6 +65,7 @@ rounded = true
 note = true
 route = "curved"
 arrow = false
+shape = "triangle;whiteSpace=wrap;html=1;shapeInside=1;"
 grid = true
 
 [lsp]
@@ -363,6 +365,9 @@ pub struct DiagramConfig {
     pub route: Route,
     /// A connector ends in an arrow.
     pub arrow: bool,
+    /// What the Shape tool draws: one of draw.io's palette entries, written as its style.
+    #[serde(with = "palette_entry")]
+    pub shape: &'static Entry,
     /// The canvas shows the page's grid at all times, not only while something is placed
     /// (Show Grid).
     pub grid: bool,
@@ -375,8 +380,25 @@ impl Default for DiagramConfig {
             note: false,
             route: Route::Orthogonal,
             arrow: true,
+            shape: palette::DEFAULT,
             grid: false,
         }
+    }
+}
+
+/// A palette entry as the config writes it: its style, which names it alone. One the catalogue no
+/// longer holds reads as the default.
+mod palette_entry {
+    use accent_drawio::palette::{self, Entry};
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(entry: &&'static Entry, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(entry.style)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<&'static Entry, D::Error> {
+        let style = String::deserialize(d)?;
+        Ok(palette::find(&style).unwrap_or(palette::DEFAULT))
     }
 }
 

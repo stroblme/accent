@@ -50,6 +50,11 @@ pub enum Edit {
         tool: Tool,
         rect: Rect,
     },
+    /// A new shape or text box of its tool's size around `at`: a click with the tool.
+    Drop {
+        tool: Tool,
+        at: Point,
+    },
     /// A new edge; an end with no cell dangles at its point, and one pinned to a connection
     /// point carries its constraint.
     Connect {

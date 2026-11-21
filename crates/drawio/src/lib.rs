@@ -18,6 +18,7 @@ pub mod html;
 pub mod label;
 mod marker;
 pub mod model;
+pub mod palette;
 mod perimeter;
 mod placeholders;
 pub mod route;

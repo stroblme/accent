@@ -87,7 +87,7 @@ pub struct Context {
 /// (`App::sync_diagram_tools`), the debug session's controls (`App::sync_debug`), the kernel's
 /// (`App::sync_kernel`) and Recolour Selection as Select's hold changes (`App::sync_recolour`).
 /// [`applies`] leaves them to those, which follow the tab in front themselves.
-pub const OWN_SYNC: [&str; 27] = [
+pub const OWN_SYNC: [&str; 28] = [
     "win.pdf-go-to-source",
     "win.show-in-pdf",
     "win.pdf-export-highlights",
@@ -102,6 +102,7 @@ pub const OWN_SYNC: [&str; 27] = [
     "win.image-copy",
     "win.diagram-rect",
     "win.diagram-ellipse",
+    "win.diagram-shape",
     "win.diagram-text",
     "win.diagram-connector",
     "win.diagram-image",

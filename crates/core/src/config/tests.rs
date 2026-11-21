@@ -109,6 +109,8 @@ fn config_roundtrip_parses_the_documented_example() {
         note: true,
         route: Route::Curved,
         arrow: false,
+        shape: accent_drawio::palette::find("triangle;whiteSpace=wrap;html=1;shapeInside=1;")
+            .unwrap(),
         grid: true,
     };
     assert_eq!(c.diagram, diagram);

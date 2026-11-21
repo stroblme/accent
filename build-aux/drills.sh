@@ -190,9 +190,9 @@ drill_ring_panes() {
 		"bench ring panes pdfs window's Line pressed=true a=Line b=Line active=true keyboard=true" \
 		'bench ring panes pdfs shown Line pressed=true a=Line b=Read active=true keyboard=true' \
 		'bench ring panes pdfs other Circle pressed=true a=Line b=Circle active=true keyboard=true' \
-		'bench ring panes diagram held greyed=0 of=15' \
+		'bench ring panes diagram held greyed=0 of=16' \
 		'bench ring panes diagram Delete Selection pressed=true a=Line deleted=true active=true keyboard=true' \
-		'bench ring panes diagram greyed=0 of=7' \
+		'bench ring panes diagram greyed=0 of=8' \
 		'bench ring panes diagram Add Rectangle pressed=true a=Line tool=Rect active=true keyboard=true' \
 		'bench ring panes beside diagram greyed=0 of=18' \
 		'bench ring panes beside diagram Highlighter pressed=true a=Highlighter tool=Rect active=true keyboard=true' \
@@ -606,6 +606,28 @@ drill_diagram_select() {
 		'bench diagram select fit delete the rest g=None c=None d=None' \
 		'bench diagram select fit move tb tb=Some("0,0,0,0") t1=Some("320,280,80,60")' \
 		'bench diagram select fit resize G G=Some("40,160,660,90") g2=Some("360,0,300,90") d2=Some("180,0,120,90")'
+}
+
+# The Shape tool through real input: its ring button and slot, the grid the slot opens on the shape
+# picked, the arrow keys moving through it and on from one palette's grid to the next, Escape
+# keeping the pick and Return taking another, a drag drawing it in its palette entry's style, a
+# Basic shape clicked in the grid, and a click dropping it at its entry's size (DESIGN.md, Diagram).
+drill_shape_tool() {
+	launch 60 ACCENT_BENCH_DIAGRAM=shape:shape.drawio >"$dir/shape"
+	has "$dir/shape" \
+		'bench shape ring tool=Shape slot=Diamond checked=true' \
+		'bench shape grid open=true general=20 selected=["Diamond"] focus=Some("Diamond")' \
+		'bench shape right focus=Some("Parallelogram") selected=["Parallelogram"]' \
+		'bench shape escape open=false slot=Diamond config=Diamond tool=Shape keyboard=true' \
+		'bench shape return open=false slot=Triangle config=Triangle tool=Shape keyboard=true' \
+		'bench shape drawn title=Triangle size=80x80 match=true style=triangle;whiteSpace=wrap;html=1;shapeInside=1; tool=Select' \
+		'bench shape click open=false slot=Diagonal Rounded Rectangle config=Diagonal Rounded Rectangle tool=Shape keyboard=true' \
+		'bench shape Home palette=Basic focus=Partial Rectangle' \
+		'bench shape Up palette=General focus=And' \
+		'bench shape Down palette=Basic focus=Partial Rectangle' \
+		'bench shape dropped title=Diagonal Rounded Rectangle size=100x60 match=true style=verticalLabelPosition=bottom;verticalAlign=top;html=1;shape=mxgraph.basic.diag_round_rect;dx=6;whiteSpace=wrap; tool=Select'
+	# How many Basic shapes show changes as more are ported.
+	grep -q '^bench shape basic shown=[0-9]* diagonal=true$' "$dir/shape" || { cat "$dir/shape"; return 1; }
 }
 
 # The style editor: Edit Style's tab of a cell's style, what is typed reaching the cell after the
