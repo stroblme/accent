@@ -442,7 +442,9 @@ use user_commands::bench_commands;
 ///   to nothing listed so once its file appears; `<dir>` pictures the rows light and dark there
 ///   (`dangling::bench_dangling`). Writes into the vault.
 /// - `ACCENT_BENCH_GRAPH=check:<rel>`, then `restored`: the Graph tab round `rel`, a press on
-///   its nodes opening beside it, and the tab back with the session (`graph::bench_graph`).
+///   its nodes opening beside it, its menu, the vault's changes, find and the keys, and the tab
+///   back with the session (`graph::bench_graph`). Writes into the vault, a scratch one. `time`:
+///   the graph's first paint, settle, paints and main-loop stalls on the generated vault.
 /// - `ACCENT_BENCH_RETYPE=1`: an open tab following a rename to another extension
 ///   (`retype::bench_retype`). Saves: a scratch vault under `/tmp`.
 /// - `ACCENT_BENCH_UNFOLD=<rel>,<rel>,…`: folder expansion; `race:<dir>`,

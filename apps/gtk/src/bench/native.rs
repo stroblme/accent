@@ -600,7 +600,7 @@ impl Beat {
 
 /// The main thread's CPU time so far and its time waiting for a CPU, in ms, from
 /// `/proc/thread-self/schedstat`: what the drill did, told apart from other processes' load.
-fn schedstat() -> (f64, f64) {
+pub(super) fn schedstat() -> (f64, f64) {
     let stat = std::fs::read_to_string("/proc/thread-self/schedstat").unwrap_or_default();
     let mut ms = stat
         .split_whitespace()

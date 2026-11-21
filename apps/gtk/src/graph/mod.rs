@@ -99,6 +99,13 @@ pub struct GraphTab {
     finding: RefCell<Find>,
     /// The last question whose answer landed.
     answered: Cell<u64>,
+    /// How long the answers took to land on the main loop, the diff and its apply, for the
+    /// drill.
+    #[cfg(feature = "bench")]
+    landing_ms: Cell<f64>,
+    /// When the first answer since the landings were last taken landed, for the drill.
+    #[cfg(feature = "bench")]
+    landed_at: Cell<Option<std::time::Instant>>,
 }
 
 impl GraphTab {
@@ -307,6 +314,51 @@ impl GraphTab {
         self.view.frames()
     }
 
+    /// How long the answers since the last call took to land on the main loop, in ms.
+    pub fn take_landing_ms(&self) -> f64 {
+        self.landed_at.take();
+        self.landing_ms.replace(0.0)
+    }
+
+    /// When the first answer since [`GraphTab::take_landing_ms`] landed.
+    pub fn landed_at(&self) -> Option<std::time::Instant> {
+        self.landed_at.get()
+    }
+
+    /// The canvas's frame clock, once it is on screen.
+    pub fn frame_clock(&self) -> Option<gdk::FrameClock> {
+        self.view.frame_clock()
+    }
+
+    /// Input `k` of a run, as the pointer gives it: a pan, a zoom or a hover in turn.
+    pub fn bench_input(&self, k: usize) {
+        self.view.bench_input(k);
+    }
+
+    /// The serial of the last view asked of the worker, and of the picture shown.
+    pub fn serials(&self) -> (u64, u64) {
+        self.view.serials()
+    }
+
+    /// How long each frame drawn since the last call took, in ms.
+    pub fn take_paints(&self) -> Vec<f64> {
+        self.view.take_paints()
+    }
+
+    /// How long the worker took to draw each picture shown since the last call, in ms.
+    pub fn take_draws(&self) -> Vec<f64> {
+        self.view.take_draws()
+    }
+
+    /// When a picture of what is shown was first on screen.
+    pub fn shown_at(&self) -> Option<std::time::Instant> {
+        self.view.shown_at()
+    }
+
+    pub fn node_count(&self) -> usize {
+        self.view.graph().nodes.len()
+    }
+
     pub fn worker_life(&self) -> Option<std::sync::Weak<impl Sized + use<>>> {
         self.view.worker_life()
     }
@@ -396,6 +448,10 @@ impl App {
             refresh: widgets::Debounce::new(REFRESH),
             finding: RefCell::new(Find::default()),
             answered: Cell::new(0),
+            #[cfg(feature = "bench")]
+            landing_ms: Cell::new(0.0),
+            #[cfg(feature = "bench")]
+            landed_at: Cell::new(None),
         });
         graph.describe();
         let weak = Rc::downgrade(&graph);
@@ -594,6 +650,12 @@ impl App {
 
     /// The vault's answer: what changed shown, the canvas up if it was not.
     fn land_graph(self: &Rc<Self>, graph: &Rc<GraphTab>, part: &Part, ask: &Ask) {
+        #[cfg(feature = "bench")]
+        let t = std::time::Instant::now();
+        #[cfg(feature = "bench")]
+        if graph.landed_at.get().is_none() {
+            graph.landed_at.set(Some(t));
+        }
         if *ask == Ask::Fresh {
             graph.view.restart();
         }
@@ -608,6 +670,10 @@ impl App {
         if matches!(self.active_doc(), Some(Doc::Graph(_))) {
             self.sync_status();
         }
+        #[cfg(feature = "bench")]
+        graph
+            .landing_ms
+            .set(graph.landing_ms.get() + t.elapsed().as_secs_f64() * 1000.0);
     }
 
     /// The answer did not come: a graph on screen stays as it is, a first one says why.
@@ -653,6 +719,12 @@ impl App {
             }
             NodeKind::Missing => {}
         }
+    }
+
+    /// The graph grown by `key` as a click grows it, without the file opening.
+    #[cfg(feature = "bench")]
+    pub(crate) fn bench_grow(self: &Rc<Self>, graph: &Rc<GraphTab>, key: &str) {
+        self.grow_graph(graph, key);
     }
 
     /// Add `key` to the roots, so its neighbours join the graph beside it. The whole vault's

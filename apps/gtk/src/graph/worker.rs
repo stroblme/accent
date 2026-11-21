@@ -71,6 +71,11 @@ pub struct Picture {
     pub size: [f64; 2],
     /// The view's serial.
     pub serial: u64,
+    /// How long it took to draw, in ms, and the generation drawn, for the drill.
+    #[cfg(feature = "bench")]
+    pub ms: f64,
+    #[cfg(feature = "bench")]
+    pub generation: u64,
 }
 
 pub struct Worker {
@@ -347,6 +352,8 @@ fn draw(shared: &Shared) {
             };
             (places, draw.view.clone(), bare)
         };
+        #[cfg(feature = "bench")]
+        let t = Instant::now();
         let picture = view.and_then(|(serial, view)| {
             let camera = match (view.camera.fitting, places.held) {
                 (true, false) => Camera::fit(&places.at, view.size),
@@ -361,6 +368,12 @@ fn draw(shared: &Shared) {
                 links: if bare { &[] } else { &places.shape.links },
             };
             picture(&scene, &view, camera, serial)
+        });
+        #[cfg(feature = "bench")]
+        let picture = picture.map(|p| Picture {
+            ms: t.elapsed().as_secs_f64() * 1000.0,
+            generation: places.generation,
+            ..p
         });
         *lock(&shared.slot) = Some(Frame {
             generation: places.generation,
@@ -388,6 +401,10 @@ fn picture(scene: &Scene, view: &View, camera: Camera, serial: u64) -> Option<Pi
         camera,
         size: view.size,
         serial,
+        #[cfg(feature = "bench")]
+        ms: 0.0,
+        #[cfg(feature = "bench")]
+        generation: 0,
     })
 }
 

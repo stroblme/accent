@@ -105,6 +105,12 @@ mod imp {
         /// How long each frame took to draw, for the drill.
         #[cfg(feature = "bench")]
         pub painted: RefCell<Vec<f64>>,
+        /// How long the worker took to draw each picture shown, for the drill.
+        #[cfg(feature = "bench")]
+        pub draws: RefCell<Vec<f64>>,
+        /// When a picture of what is shown was first on screen, for the drill.
+        #[cfg(feature = "bench")]
+        pub shown_at: Cell<Option<std::time::Instant>>,
     }
 
     #[glib::object_subclass]
@@ -120,11 +126,13 @@ mod imp {
         fn snapshot(&self, snapshot: &gtk::Snapshot) {
             #[cfg(feature = "bench")]
             let t = std::time::Instant::now();
-            self.obj().paint(snapshot);
+            let _drew = self.obj().paint(snapshot);
             #[cfg(feature = "bench")]
-            self.painted
-                .borrow_mut()
-                .push(t.elapsed().as_secs_f64() * 1000.0);
+            if _drew {
+                self.painted
+                    .borrow_mut()
+                    .push(t.elapsed().as_secs_f64() * 1000.0);
+            }
         }
     }
 }
@@ -197,7 +205,10 @@ impl GraphView {
         imp.generation.set(generation);
         imp.settled.set(false);
         #[cfg(feature = "bench")]
-        imp.frames.set(0);
+        {
+            imp.frames.set(0);
+            imp.shown_at.set(None);
+        }
         let (links, paints) = {
             let graph = imp.graph.borrow();
             let paints = graph.nodes.iter().map(|n| model::paint_of(n.kind));
@@ -281,6 +292,8 @@ impl GraphView {
             if imp.camera.get().fitting && imp.dragging.borrow().is_none() {
                 imp.camera.set(picture.camera);
             }
+            #[cfg(feature = "bench")]
+            imp.draws.borrow_mut().push(picture.ms);
             imp.picture.replace(Some(picture));
         }
         self.queue_draw();
@@ -832,17 +845,18 @@ impl GraphView {
 
     /// The worker's last picture of the graph, moved and scaled from the camera it was drawn at
     /// to the canvas's, then the names on top, at the places it was drawn with.
-    fn paint(&self, snapshot: &gtk::Snapshot) {
+    /// Whether there was anything to draw.
+    fn paint(&self, snapshot: &gtk::Snapshot) -> bool {
         self.ask();
         let imp = self.imp();
         let graph = imp.graph.borrow();
         let at = imp.at.borrow();
         let picture = imp.picture.borrow();
         let Some(picture) = picture.as_ref() else {
-            return;
+            return false;
         };
         if graph.nodes.is_empty() || at.len() != graph.nodes.len() || !imp.placed.get() {
-            return;
+            return false;
         }
         let size = self.size();
         let camera = imp.camera.get();
@@ -852,6 +866,10 @@ impl GraphView {
             size[0] as f32,
             size[1] as f32,
         ));
+        #[cfg(feature = "bench")]
+        if picture.generation == imp.generation.get() && imp.shown_at.get().is_none() {
+            imp.shown_at.set(Some(std::time::Instant::now()));
+        }
         let (drawn, k) = (picture.camera, camera.zoom / picture.camera.zoom);
         snapshot.append_scaled_texture(
             &picture.texture,
@@ -894,6 +912,7 @@ impl GraphView {
         }
         self.paint_labels(snapshot, &graph, &screen, &named, &radius, &dimmed, ink);
         snapshot.pop();
+        true
     }
 
     /// The names of the nodes `named`, right of each disc, [`LABELS_MAX`] at most.
@@ -971,6 +990,49 @@ impl GraphView {
     /// The layout's frames landed since the last change.
     pub fn frames(&self) -> usize {
         self.imp().frames.get()
+    }
+
+    /// When a picture of what is shown was first on screen.
+    pub fn shown_at(&self) -> Option<std::time::Instant> {
+        self.imp().shown_at.get()
+    }
+
+    /// How long each frame drawn since the last call took, in ms.
+    pub fn take_paints(&self) -> Vec<f64> {
+        self.imp().painted.take()
+    }
+
+    /// How long the worker took to draw each picture shown since the last call, in ms.
+    pub fn take_draws(&self) -> Vec<f64> {
+        self.imp().draws.take()
+    }
+
+    /// Input `k` of a run, as the pointer gives it: a pan, a zoom in round the middle, or the
+    /// pointer over node `k`.
+    pub fn bench_input(&self, k: usize) {
+        let size = self.size();
+        match k % 3 {
+            0 => {
+                let mut camera = self.camera();
+                camera.pan([24.0, 12.0]);
+                self.set_camera(camera);
+            }
+            1 => self.zoom_to(self.camera().zoom * 1.1, [size[0] / 2.0, size[1] / 2.0]),
+            _ => {
+                let at = self.imp().at.borrow().get(k).copied();
+                if let Some(p) = at {
+                    let node = self.node_at(self.camera().to_screen(p));
+                    self.hover(node);
+                }
+            }
+        }
+    }
+
+    /// The serial of the last view asked of the worker, and of the picture shown.
+    pub fn serials(&self) -> (u64, u64) {
+        let imp = self.imp();
+        let shown = imp.picture.borrow().as_ref().map_or(0, |p| p.serial);
+        (imp.serial.get(), shown)
     }
 
     /// What tells whether the layout's thread has ended once the canvas is gone.
