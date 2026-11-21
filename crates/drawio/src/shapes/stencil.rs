@@ -744,7 +744,7 @@ fn rounded(segs: &[Seg], arc: f64, frame: &Frame) -> Option<Vec<PathCmd>> {
 
 /// An SVG elliptical arc from `from` to `to` as cubics, a quarter turn each at most
 /// (`mxUtils.arcToCurves`). Empty for a radius of zero, which draw.io draws nothing for.
-fn arc_to_curves(
+pub(super) fn arc_to_curves(
     from: Point,
     r1: f64,
     r2: f64,

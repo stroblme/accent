@@ -2,6 +2,7 @@
 //! Each shape's connection points: where an edge end can be pinned, as the shape faces east
 //! (the shapes' `constraints` and `getConstraints`, Shapes.js 9025-9600).
 
+use super::basic::{band, iso_height, snip, stripe, within};
 use crate::geom::Point;
 use crate::model::Page;
 use crate::route::Constraint;
@@ -61,6 +62,27 @@ pub fn constraints(shape: &str, style: &Resolved, w: f64, h: f64, page: &Page) -
         "callout" => return callout(style, w, h),
         "folder" => return folder(style, w, h),
         "mxgraph.basic.diag_round_rect" => &DIAG_ROUND_RECT,
+        "mxgraph.basic.corner_round_rect" => &CORNER_ROUND_RECT,
+        "mxgraph.basic.three_corner_round_rect" => &THREE_CORNER_ROUND_RECT,
+        "mxgraph.basic.plaque" => &SIDE_MIDDLES,
+        // Neither `constraints` nor `getConstraints`: an edge only meets the outline.
+        "mxgraph.basic.cross2" | "mxgraph.basic.drop" | "mxgraph.basic.donut" => &[],
+        "mxgraph.basic.diag_snip_rect" => return diag_snip_rect(style, w, h),
+        "mxgraph.basic.frame" => return frame(style, w, h),
+        "mxgraph.basic.rounded_frame" | "mxgraph.basic.plaque_frame" => {
+            return inner_frame(style, w, h);
+        }
+        "mxgraph.basic.frame_corner" => return frame_corner(style, w, h),
+        "mxgraph.basic.diag_stripe" => return diag_stripe(style, w, h),
+        "mxgraph.basic.layered_rect" => return layered_rect(style, w, h),
+        "mxgraph.basic.octagon2" => return octagon(style, w, h),
+        "mxgraph.basic.acute_triangle" => return acute_triangle(style, w, h),
+        "mxgraph.basic.obtuse_triangle" => return obtuse_triangle(style, w, h),
+        "mxgraph.basic.4_point_star_2" => return four_point_star(style, w),
+        "mxgraph.basic.wave2" => return wave(style, w, h),
+        "mxgraph.basic.isocube" => return isocube(style, w, h),
+        "mxgraph.basic.cone2" => return cone(style, w, h),
+        "mxgraph.basic.pyramid" => return pyramid(style, w, h),
         _ => &RECTANGLE,
     };
     table.to_vec()
@@ -109,6 +131,37 @@ const DIAG_ROUND_RECT: [Constraint; 6] = [
     fixed(1.0, 0.5),
     fixed(0.5, 1.0),
     fixed(0.0, 1.0),
+    fixed(0.0, 0.5),
+];
+
+/// `mxShapeBasicCornerRoundRect.getConstraints`: the middle of each side and the three sharp
+/// corners (mxBasic.js 1390-1403).
+const CORNER_ROUND_RECT: [Constraint; 7] = [
+    fixed(0.5, 0.0),
+    fixed(1.0, 0.0),
+    fixed(1.0, 0.5),
+    fixed(1.0, 1.0),
+    fixed(0.5, 1.0),
+    fixed(0.0, 1.0),
+    fixed(0.0, 0.5),
+];
+
+/// `mxShapeBasicThreeCornerRoundRect.getConstraints`: the middle of each side and the sharp
+/// corner (mxBasic.js 3246-3257).
+const THREE_CORNER_ROUND_RECT: [Constraint; 5] = [
+    fixed(0.5, 0.0),
+    fixed(1.0, 0.5),
+    fixed(0.5, 1.0),
+    fixed(0.0, 1.0),
+    fixed(0.0, 0.5),
+];
+
+/// The middle of each side: a plaque's (mxBasic.js 1477-1487), and the first of a rounded or
+/// plaque frame's.
+const SIDE_MIDDLES: [Constraint; 4] = [
+    fixed(0.5, 0.0),
+    fixed(1.0, 0.5),
+    fixed(0.5, 1.0),
     fixed(0.0, 0.5),
 ];
 
@@ -419,4 +472,247 @@ fn folder(style: &Resolved, w: f64, h: f64) -> Vec<Constraint> {
     }
     c.extend([fixed(0.25, 1.0), fixed(0.5, 1.0), fixed(0.75, 1.0)]);
     c
+}
+
+// mxBasic.js 1216-1233
+fn diag_snip_rect(style: &Resolved, w: f64, h: f64) -> Vec<Constraint> {
+    let d = snip(style, w, h) * 0.5;
+    vec![
+        at(0.0, 0.0, d, d),
+        fixed(0.5, 0.0),
+        fixed(1.0, 0.0),
+        fixed(1.0, 0.5),
+        at(0.0, 0.0, w - d, h - d),
+        fixed(0.5, 1.0),
+        fixed(0.0, 1.0),
+        fixed(0.0, 0.5),
+    ]
+}
+
+/// A frame's corners and quarters of each side, outside and in.
+// mxBasic.js 1562-1602
+fn frame(style: &Resolved, w: f64, h: f64) -> Vec<Constraint> {
+    let d = band(style, w, h, 0.5);
+    vec![
+        fixed(0.0, 0.0),
+        at(0.0, 0.0, w * 0.25, 0.0),
+        fixed(0.5, 0.0),
+        at(0.0, 0.0, w * 0.75, 0.0),
+        fixed(1.0, 0.0),
+        at(0.0, 0.0, w, h * 0.25),
+        fixed(1.0, 0.5),
+        at(0.0, 0.0, w, h * 0.75),
+        fixed(1.0, 1.0),
+        at(0.0, 0.0, w * 0.75, h),
+        fixed(0.5, 1.0),
+        at(0.0, 0.0, w * 0.25, h),
+        fixed(0.0, 1.0),
+        at(0.0, 0.0, 0.0, h * 0.75),
+        fixed(0.0, 0.5),
+        at(0.0, 0.0, 0.0, h * 0.25),
+        at(0.0, 0.0, d, d),
+        at(0.0, 0.0, (w - 2.0 * d) * 0.25 + d, d),
+        at(0.5, 0.0, 0.0, d),
+        at(0.0, 0.0, (w * 1.5 - d) * 0.5, d),
+        at(1.0, 0.0, -d, d),
+        at(0.0, 0.0, w - d, (h - 2.0 * d) * 0.25 + d),
+        at(1.0, 0.5, -d, 0.0),
+        at(0.0, 0.0, w - d, (h - 2.0 * d) * 0.75 + d),
+        at(1.0, 1.0, -d, -d),
+        at(0.0, 0.0, (w - 2.0 * d) * 0.75 + d, h - d),
+        at(0.5, 1.0, 0.0, -d),
+        at(0.0, 0.0, (w - 2.0 * d) * 0.25 + d, h - d),
+        at(0.0, 1.0, d, -d),
+        at(0.0, 0.0, d, (h - 2.0 * d) * 0.75 + d),
+        at(0.0, 0.5, d, 0.0),
+        at(0.0, 0.0, d, (h - 2.0 * d) * 0.25 + d),
+    ]
+}
+
+/// A rounded or plaque frame's: the middle of each side, outside and in, the band at most half
+/// the shorter side here where the shape draws it a quarter.
+// mxBasic.js 1687-1703 and 1789-1805
+fn inner_frame(style: &Resolved, w: f64, h: f64) -> Vec<Constraint> {
+    let d = band(style, w, h, 0.5);
+    let mut c = SIDE_MIDDLES.to_vec();
+    c.extend([
+        at(0.5, 0.0, 0.0, d),
+        at(1.0, 0.5, -d, 0.0),
+        at(0.5, 1.0, 0.0, -d),
+        at(0.0, 0.5, d, 0.0),
+    ]);
+    c
+}
+
+// mxBasic.js 1877-1896
+fn frame_corner(style: &Resolved, w: f64, h: f64) -> Vec<Constraint> {
+    let d = band(style, w, h, 0.5);
+    vec![
+        fixed(0.0, 0.0),
+        fixed(0.5, 0.0),
+        fixed(1.0, 0.0),
+        at(1.0, 0.0, -d, d),
+        at(0.0, 0.0, (w - 2.0 * d) * 0.5 + d, d),
+        at(0.0, 0.0, d, d),
+        at(0.0, 0.0, d, (h - 2.0 * d) * 0.5 + d),
+        at(0.0, 1.0, d, -d),
+        fixed(0.0, 1.0),
+        fixed(0.0, 0.5),
+    ]
+}
+
+// mxBasic.js 1966-1982
+fn diag_stripe(style: &Resolved, w: f64, h: f64) -> Vec<Constraint> {
+    let (x, y) = stripe(style, w, h);
+    vec![
+        fixed(0.0, 1.0),
+        fixed(0.5, 0.5),
+        fixed(1.0, 0.0),
+        at(0.0, 0.0, w, y * 0.5),
+        at(0.0, 0.0, w, y),
+        at(0.0, 0.0, (w + x) * 0.5, (y + h) * 0.5),
+        at(0.0, 0.0, x, h),
+        at(0.0, 0.0, x * 0.5, h),
+    ]
+}
+
+/// A layered rectangle's: along the front box's top and left side and the back box's right side
+/// and bottom, and at the middle box's two free corners.
+// mxBasic.js 2166-2194
+fn layered_rect(style: &Resolved, w: f64, h: f64) -> Vec<Constraint> {
+    let d = band(style, w, h, 0.5);
+    let mut c: Vec<Constraint> = [0.0, 0.25, 0.5, 0.75, 1.0]
+        .map(|f| at(0.0, 0.0, (w - d) * f, 0.0))
+        .to_vec();
+    c.push(at(0.0, 0.0, w - d * 0.5, d * 0.5));
+    c.extend([0.0, 0.25, 0.5, 0.75, 1.0].map(|f| at(0.0, 0.0, w, (h - d) * f + d)));
+    c.extend([0.75, 0.5, 0.25, 0.0].map(|f| at(0.0, 0.0, (w - d) * f + d, h)));
+    c.push(at(0.0, 0.0, d * 0.5, h - d * 0.5));
+    c.extend([1.0, 0.75, 0.5, 0.25].map(|f| at(0.0, 0.0, 0.0, (h - d) * f)));
+    c
+}
+
+// mxBasic.js 481-498
+fn octagon(style: &Resolved, w: f64, h: f64) -> Vec<Constraint> {
+    let d = snip(style, w, h) * 0.5;
+    vec![
+        fixed(0.5, 0.0),
+        fixed(0.5, 1.0),
+        fixed(0.0, 0.5),
+        fixed(1.0, 0.5),
+        at(0.0, 0.0, d, d),
+        at(0.0, 0.0, w - d, d),
+        at(0.0, 0.0, w - d, h - d),
+        at(0.0, 0.0, d, h - d),
+    ]
+}
+
+// mxBasic.js 663-676
+fn acute_triangle(style: &Resolved, w: f64, h: f64) -> Vec<Constraint> {
+    let dx = w * within(style, "dx", 0.5, w);
+    vec![
+        fixed(1.0, 1.0),
+        fixed(0.5, 1.0),
+        fixed(0.0, 1.0),
+        at(0.0, 0.0, dx, 0.0),
+        at(0.0, 0.0, dx * 0.5, h * 0.5),
+        at(0.0, 0.0, w - (w - dx) * 0.5, h * 0.5),
+    ]
+}
+
+// mxBasic.js 743-756
+fn obtuse_triangle(style: &Resolved, w: f64, h: f64) -> Vec<Constraint> {
+    let dx = w * within(style, "dx", 0.5, w);
+    vec![
+        fixed(0.0, 0.0),
+        fixed(1.0, 1.0),
+        at(0.0, 0.0, w * 0.5, h * 0.5),
+        at(0.0, 0.0, (w + dx) * 0.5, h),
+        at(0.0, 0.0, dx, h),
+        at(0.0, 0.0, dx * 0.5, h * 0.5),
+    ]
+}
+
+// mxBasic.js 1129-1144
+fn four_point_star(style: &Resolved, w: f64) -> Vec<Constraint> {
+    let d = 0.5 * within(style, "dx", 0.8, w);
+    vec![
+        fixed(0.5, 0.0),
+        fixed(0.5, 1.0),
+        fixed(0.0, 0.5),
+        fixed(1.0, 0.5),
+        fixed(d, d),
+        fixed(1.0 - d, d),
+        fixed(1.0 - d, 1.0 - d),
+        fixed(d, 1.0 - d),
+    ]
+}
+
+/// Along a wave's top and bottom, and the middle of its sides.
+// mxBasic.js 383-407
+fn wave(style: &Resolved, w: f64, h: f64) -> Vec<Constraint> {
+    let dy = h * within(style, "dy", 0.5, h);
+    vec![
+        at(0.0, 0.0, 0.0, dy * 0.5),
+        at(0.0, 0.0, w / 6.0, h * 0.015),
+        at(0.0, 0.0, w / 3.0, dy * 0.5),
+        at(0.0, 0.0, w * 0.5, dy * 0.95),
+        at(0.0, 0.0, w * 0.67, dy * 0.5),
+        at(0.0, 0.0, w * 0.83, h * 0.015),
+        at(0.0, 0.0, w, dy * 0.5),
+        at(0.0, 0.0, w, h * 0.5),
+        at(0.0, 0.0, w, h - dy * 0.5),
+        at(0.0, 0.0, w * 0.83, h - dy * 0.95),
+        at(0.0, 0.0, w * 0.67, h - dy * 0.5),
+        at(0.0, 0.0, w * 0.5, h - dy * 0.04),
+        at(0.0, 0.0, w / 3.0, h - dy * 0.5),
+        at(0.0, 0.0, w / 6.0, h - dy * 0.95),
+        at(0.0, 0.0, 0.0, h - dy * 0.5),
+        at(0.0, 0.0, 0.0, h * 0.5),
+    ]
+}
+
+// mxBasic.js 580-596
+fn isocube(style: &Resolved, w: f64, h: f64) -> Vec<Constraint> {
+    let iso = iso_height(style, w, h);
+    vec![
+        fixed(0.5, 0.0),
+        at(0.0, 0.0, w, iso),
+        fixed(1.0, 0.5),
+        at(0.0, 0.0, w, h - iso),
+        fixed(0.5, 1.0),
+        at(0.0, 0.0, 0.0, h - iso),
+        fixed(0.0, 0.5),
+        at(0.0, 0.0, 0.0, iso),
+    ]
+}
+
+// mxBasic.js 906-919
+fn cone(style: &Resolved, w: f64, h: f64) -> Vec<Constraint> {
+    let dx = w * within(style, "dx", 0.5, w);
+    let dy = h * within(style, "dy", 0.9, h);
+    vec![
+        at(0.0, 0.0, dx, 0.0),
+        at(0.0, 0.0, w, dy),
+        at(0.0, 0.0, w * 0.5, h),
+        at(0.0, 0.0, 0.0, dy),
+    ]
+}
+
+// mxBasic.js 1039-1057
+fn pyramid(style: &Resolved, w: f64, h: f64) -> Vec<Constraint> {
+    let dx1 = w * within(style, "dx1", 0.5, w);
+    let dx2 = w * within(style, "dx2", 0.6, w);
+    let dy1 = h * within(style, "dy1", 0.9, h);
+    let dy2 = h * within(style, "dy2", 0.8, h);
+    vec![
+        at(0.0, 0.0, dx1, 0.0),
+        at(0.0, 0.0, (w + dx1) * 0.5, dy2 * 0.5),
+        at(0.0, 0.0, w, dy2),
+        at(0.0, 0.0, (w + dx2) * 0.5, (h + dy2) * 0.5),
+        at(0.0, 0.0, dx2, h),
+        at(0.0, 0.0, dx2 * 0.5, (h + dy1) * 0.5),
+        at(0.0, 0.0, 0.0, dy1),
+        at(0.0, 0.0, dx1 * 0.5, dy1 * 0.5),
+    ]
 }
