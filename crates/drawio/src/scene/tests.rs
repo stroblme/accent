@@ -575,6 +575,32 @@ fn a_picture_is_placed_as_its_shape_is() {
 }
 
 #[test]
+fn a_cropped_picture_fills_the_box_it_was_cropped_from() {
+    let crop = |clip: &str| {
+        let r = Rect::new(100.0, 50.0, 80.0, 40.0);
+        let style = format!("shape=image;image=x.png;clipPath={clip};");
+        let p = page(vec![Cell::new_vertex("i", "1", r, &style, "")]);
+        scene(&p).prims.into_iter().find_map(|prim| match prim {
+            Prim::Image { rect, crop, .. } => Some((rect, crop)),
+            _ => None,
+        })
+    };
+    // The cell shows the middle half across and the bottom half down; its box stays the cell's.
+    let (rect, c) = crop("inset(50% 25% 0% 25%)").unwrap();
+    assert_eq!(rect, Rect::new(100.0, 50.0, 80.0, 40.0));
+    let c = c.unwrap();
+    assert_eq!(c.picture, Rect::new(60.0, 10.0, 160.0, 80.0));
+    assert_eq!(c.radius, (0.0, 0.0));
+    // draw.io's ellipse crop rounds by half the picture's box, at most half the cell's.
+    let c = crop("inset(0% 0% 0% 0% round 50%)").unwrap().1.unwrap();
+    assert_eq!(c.radius, (40.0, 20.0));
+    // A single value stands for all four; a clip of another kind leaves the picture whole.
+    let c = crop("inset(25%)").unwrap().1.unwrap();
+    assert_eq!(c.picture, Rect::new(60.0, 30.0, 160.0, 80.0));
+    assert_eq!(crop("circle(50% at 50% 50%)").unwrap().1, None);
+}
+
+#[test]
 fn a_picture_takes_the_fill_opacity_its_border_the_line_s_and_its_label_the_text_s() {
     let style = "shape=image;image=x.png;imageBackground=#ff0000;imageBorder=#0000ff;\
                  fillOpacity=50;strokeOpacity=40;textOpacity=60;opacity=80;";

@@ -707,6 +707,7 @@ pub fn prim(
             rect,
             source,
             keep_aspect,
+            crop,
             rotation,
             flip_h,
             flip_v,
@@ -717,6 +718,8 @@ pub fn prim(
             // A stencil's picture moves with its lines, where an SVG's copy is drawn too.
             let over = cache.over(*snap, frame);
             let r = frame.rect(rect).translate(over, over);
+            // A cropped picture fills the box it was cropped from, clipped to the cell's.
+            let whole = crop.map_or(r, |c| frame.rect(&c.picture).translate(over, over));
             let picture = match source {
                 ImageSource::DataUri(uri) => cache.picture(index, uri, widget),
                 ImageSource::Url(src) if is_file(src) => cache.file_picture(index, src, widget),
@@ -728,9 +731,20 @@ pub fn prim(
                     Some(p) => {
                         let t = &p.texture;
                         let dest = match keep_aspect {
-                            true => fitted(t.width() as f64, t.height() as f64, &r),
-                            false => r,
+                            true => fitted(t.width() as f64, t.height() as f64, &whole),
+                            false => whole,
                         };
+                        if let Some(c) = crop {
+                            let (rx, ry) = (c.radius.0 * frame.scale, c.radius.1 * frame.scale);
+                            let corner = graphene::Size::new(rx as f32, ry as f32);
+                            snapshot.push_rounded_clip(&gsk::RoundedRect::new(
+                                grect(&r),
+                                corner,
+                                corner,
+                                corner,
+                                corner,
+                            ));
+                        }
                         tint.picture(|| p.document()).under(snapshot, || {
                             match (&p.svg, cache.canvas.get()) {
                                 (Some(svg), _) if cache.vectors.get() => {
@@ -755,6 +769,9 @@ pub fn prim(
                                 ),
                             }
                         });
+                        if crop.is_some() {
+                            snapshot.pop();
+                        }
                     }
                     None => {
                         let edge = theme::at(widget.color(), theme::PAGE_EDGE_ALPHA * 3.0);

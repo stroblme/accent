@@ -1,4 +1,4 @@
-// Derived from draw.io js/grapheditor/Shapes.js (Apache-2.0, Copyright (c) 2006-2026 JGraph Holdings Ltd / draw.io AG), ported to Rust and modified for accent; see crates/drawio/NOTICE.
+// Derived from draw.io js/grapheditor/Shapes.js and shapes/mxBasic.js (Apache-2.0, Copyright (c) 2006-2026 JGraph Holdings Ltd / draw.io AG), ported to Rust and modified for accent; see crates/drawio/NOTICE.
 //! Each shape's connection points: where an edge end can be pinned, as the shape faces east
 //! (the shapes' `constraints` and `getConstraints`, Shapes.js 9025-9600).
 
@@ -60,6 +60,7 @@ pub fn constraints(shape: &str, style: &Resolved, w: f64, h: f64, page: &Page) -
         "cylinder3" => return cylinder3(style, w, h),
         "callout" => return callout(style, w, h),
         "folder" => return folder(style, w, h),
+        "mxgraph.basic.diag_round_rect" => &DIAG_ROUND_RECT,
         _ => &RECTANGLE,
     };
     table.to_vec()
@@ -98,6 +99,17 @@ const ELLIPSE: [Constraint; 8] = [
     on(0.5, 1.0),
     on(0.0, 0.5),
     on(1.0, 0.5),
+];
+
+/// `mxShapeBasicDiagRoundRect.getConstraints`: the middle of each side and the two sharp
+/// corners (mxBasic.js 1306-1317).
+const DIAG_ROUND_RECT: [Constraint; 6] = [
+    fixed(0.5, 0.0),
+    fixed(1.0, 0.0),
+    fixed(1.0, 0.5),
+    fixed(0.5, 1.0),
+    fixed(0.0, 1.0),
+    fixed(0.0, 0.5),
 ];
 
 // Shapes.js 9328-9339

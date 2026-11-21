@@ -125,6 +125,7 @@ pub const KEYS: &[(&str, &[&str])] = &[
     ("imageBorder", &[]),
     ("imageWidth", &[]),
     ("imageHeight", &[]),
+    ("clipPath", &[]),
     ("size", &[]),
     ("fixedSize", FLAG),
     ("double", FLAG),

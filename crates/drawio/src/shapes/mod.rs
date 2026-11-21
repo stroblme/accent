@@ -1,8 +1,10 @@
 // Derived from draw.io mxgraph/src/shape/mxShape.js, mxgraph/src/util/mxSvgCanvas2D.js, mxgraph/src/util/mxConstants.js (Apache-2.0, Copyright (c) 2006-2026 JGraph Holdings Ltd / draw.io AG), ported to Rust and modified for accent; see crates/drawio/NOTICE.
 //! Outlines of vertex shapes and edge lines, as path commands in absolute page coordinates,
 //! before rotation. [`mxgraph`] holds the shapes mxGraph registers itself, [`grapheditor`] those
-//! draw.io adds in `Shapes.js`, and [`stencil`] draws the ones an XML program describes.
+//! draw.io adds in `Shapes.js`, [`basic`] those of its Basic palette, and [`stencil`] draws the
+//! ones an XML program describes.
 
+mod basic;
 mod constraints;
 mod corner;
 mod grapheditor;
@@ -105,9 +107,10 @@ const RECTANGLE_ROUNDING_FACTOR: f64 = 0.15;
 /// Control points this far towards the corner put a cubic's midpoint on the quarter circle.
 const KAPPA: f64 = 4.0 / 3.0 * (std::f64::consts::SQRT_2 - 1.0);
 
-/// The shapes [`vertex`] draws: mxGraph's registry and draw.io's General palette
-/// (`mxCellRenderer`, `Sidebar.addGeneralPalette`). Of the others the scene draws a stencil as its
-/// program says ([`Stencil::of`]) and a placeholder for the rest, the shapes draw.io draws in code.
+/// The shapes [`vertex`] draws: mxGraph's registry, draw.io's General palette and those of its
+/// Basic palette ported so far (`mxCellRenderer`, `Sidebar.addGeneralPalette`, `mxBasic.js`). Of
+/// the others the scene draws a stencil as its program says ([`Stencil::of`]) and a placeholder
+/// for the rest, the shapes draw.io draws in code.
 // ponytail: mxGraph's `arrow` and `arrowConnector`, edge shapes older than `flexArrow`, are not
 // ported; such an edge is drawn as a plain connector.
 pub const KNOWN: &[&str] = &[
@@ -156,6 +159,7 @@ pub const KNOWN: &[&str] = &[
     "endState",
     "offPageConnector",
     "waypoint",
+    "mxgraph.basic.diag_round_rect",
 ];
 
 /// Whether [`vertex`] supports `shape`: one of [`KNOWN`].
@@ -208,6 +212,7 @@ pub fn vertex(shape: &str, bounds: Rect, style: &Resolved) -> Vec<Part> {
         "endState" => ge::state(b, true),
         "offPageConnector" => ge::off_page_connector(b, style),
         "waypoint" => ge::waypoint(b, style),
+        "mxgraph.basic.diag_round_rect" => basic::diag_round_rect(b, style),
         // `label`, `rectangle`, `rect` (a name draw.io has no shape for, which it draws as its
         // fallback rectangle), and the stand-in for every other shape.
         _ => vec![Part::body(mxgraph::rectangle(b, style))],

@@ -218,13 +218,14 @@ pub enum Prim {
     },
     /// A picture filling `rect` (keeping its aspect within it when `keep_aspect`), mirrored
     /// across its middle by `flip_h` and `flip_v`, then turned `rotation` degrees about the
-    /// centre of `rect`.
+    /// centre of `rect`. A cropped one fills its [`Crop`]'s box instead and shows only `rect`.
     Image {
         cell: CellId,
         locked: bool,
         rect: Rect,
         source: ImageSource,
         keep_aspect: bool,
+        crop: Option<Crop>,
         rotation: f64,
         flip_h: bool,
         flip_v: bool,
@@ -233,6 +234,57 @@ pub enum Prim {
         /// which stays where it is set (`mxImageShape`).
         snap: Option<Snap>,
     },
+}
+
+/// The part of a picture a cell shows, draw.io's Crop (`clipPath=inset(…)`): the picture fills
+/// `picture`, of which only the cell's box shows, its corners rounded `radius` across and down.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Crop {
+    pub picture: Rect,
+    pub radius: (f64, f64),
+}
+
+impl Crop {
+    /// The crop `clip` gives a picture cell at `rect`: `inset(top right bottom left [round r])`,
+    /// each a percentage of the picture's whole box, the last value standing in for any left out
+    /// (`mxSvgCanvas2D.processClipPath`, `appendInsetClip`, `parseClipValue`). `None` for any
+    /// other clip, which draw.io's Crop never writes, and for one leaving nothing to show.
+    // ponytail: `circle()`, `ellipse()` and `polygon()` clips are left out, as no draw.io dialog
+    // writes them on a picture; `inset(… round 50%)` is its ellipse.
+    fn of(clip: &str, rect: Rect) -> Option<Crop> {
+        let args = clip.strip_prefix("inset(")?.split(')').next()?;
+        let values: Vec<&str> = args.split([' ', ',']).filter(|v| !v.is_empty()).collect();
+        let last = values.len().checked_sub(1)?;
+        let value = |i: usize| match values[i.min(last)] {
+            "center" => 0.5,
+            "top" | "left" => 0.0,
+            v => v
+                .trim_end_matches('%')
+                .parse::<f64>()
+                .map_or(1.0, |n| (n / 100.0).clamp(0.0, 1.0)),
+        };
+        let (top, right, bottom, left) = (value(0), value(1), value(2), value(3));
+        let (w, h) = (1.0 - right - left, 1.0 - top - bottom);
+        if w <= 0.0 || h <= 0.0 {
+            return None;
+        }
+        let picture = Rect::new(
+            rect.x - rect.w * left / w,
+            rect.y - rect.h * top / h,
+            rect.w / w,
+            rect.h / h,
+        );
+        // SVG's `rx` and `ry`, shares of the picture's box, at most half the side they round.
+        let round = match values.get(4) {
+            Some(&"round") => value(5),
+            _ => 0.0,
+        };
+        let radius = (
+            (round * picture.w).min(rect.w / 2.0),
+            (round * picture.h).min(rect.h / 2.0),
+        );
+        Some(Crop { picture, radius })
+    }
 }
 
 impl Prim {
@@ -766,6 +818,7 @@ impl<'a> Builder<'a> {
                             false => ImageSource::Url(src),
                         },
                         keep_aspect: false,
+                        crop: None,
                         rotation: place.degrees,
                         flip_h: flip_h != place.flip_h,
                         flip_v: flip_v != place.flip_v,
@@ -816,6 +869,7 @@ impl<'a> Builder<'a> {
                 rect,
                 source,
                 keep_aspect: style.flag("imageAspect", true),
+                crop: style.get("clipPath").and_then(|clip| Crop::of(clip, rect)),
                 rotation,
                 flip_h: place.flip_h,
                 flip_v: place.flip_v,
