@@ -14,6 +14,7 @@ mod error;
 pub mod fs;
 pub mod fuzzy;
 pub mod git;
+pub mod graph;
 pub mod index;
 pub mod malloc;
 pub mod markdown;

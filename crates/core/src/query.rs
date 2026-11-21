@@ -10,6 +10,7 @@ use crate::markdown::is_tag_char;
 use crate::path::{FileType, file_type, is_notebook, is_org};
 use crate::{Error, Result};
 use chrono::{DateTime, Duration, NaiveDate, TimeZone};
+use serde::{Deserialize, Serialize};
 
 /// A query once read: what the text has to hold, and what the files holding it have to be.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -61,7 +62,7 @@ pub enum On {
 
 /// What `kind:` tells apart, and what the index keeps for every file (`files.doc`, 0 for a folder,
 /// a conflict copy or a name none of these is).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Doc {
     /// Markdown and org.
     Note = 1,
@@ -102,6 +103,11 @@ impl Doc {
 
     pub fn as_i64(self) -> i64 {
         self as i64
+    }
+
+    /// What `files.doc` holds back as a kind, `None` for 0.
+    pub fn from_i64(v: i64) -> Option<Doc> {
+        Doc::ALL.into_iter().find(|d| d.as_i64() == v)
     }
 
     /// What `rel` is by its name alone: a `.py` is code and an `.xml` text until the index has
