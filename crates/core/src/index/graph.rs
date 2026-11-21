@@ -1,12 +1,14 @@
-//! The graph the Graph tab draws ([`crate::graph`]), read out of the links and tags the index
-//! holds: the files around some and every edge among them, or the whole vault's.
+//! The graph the Graph tab draws ([`crate::graph`]), read out of the links, imports and tags the
+//! index holds: the files around some and every edge among them, or the whole vault's.
 
 use super::Index;
 use super::links::{DANGLING, ROW, missing_path};
 use super::reconcile::link_kind_of;
 use crate::Result;
+use crate::code::is_test_path;
 use crate::graph::{Edge, EdgeKind, Node, NodeKind, Part, Shown};
 use crate::markdown::{LinkKind, link_key, strip_ext};
+use crate::path::parent_dir;
 use crate::query::Doc;
 use crate::walk::FileKind;
 use rusqlite::OptionalExtension;
@@ -34,9 +36,14 @@ fn edge_kind(link_kind: i64) -> EdgeKind {
     }
 }
 
+/// Whether `rel` is a file of the Go package its folder is, which an import of the package names.
+fn in_package(rel: &str) -> bool {
+    rel.ends_with(".go") && !is_test_path(rel)
+}
+
 /// A key `graph_around` was handed, as the index reads it.
 enum Seed {
-    File(i64),
+    File(i64, String),
     Tag(String),
     Missing(String),
 }
@@ -118,10 +125,10 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
 }
 
 impl Index {
-    /// The nodes around `keys`, one link or tag away either way, and every edge among them and
-    /// the keys: what a Graph tab shows of the file in front and the nodes it has opened, the
-    /// same for the same keys and index. A key is a file's path (a second path's answering as its
-    /// row's), `#` and a tag's name, or a missing note's path, and is in the answer whatever
+    /// The nodes around `keys`, one link, import or tag away either way, and every edge among
+    /// them and the keys: what a Graph tab shows of the file in front and the nodes it has opened,
+    /// the same for the same keys and index. A key is a file's path (a second path's answering as
+    /// its row's), `#` and a tag's name, or a missing note's path, and is in the answer whatever
     /// `shown` leaves out; a neighbour is only where `shown` and [`shown_file`] take it.
     pub fn graph_around(&self, keys: &[String], shown: Shown) -> Result<Part> {
         let mut b = Builder::default();
@@ -136,9 +143,9 @@ impl Index {
                 .optional()?;
             seeds.push(match (found, key.strip_prefix('#')) {
                 (Some(file), _) => {
-                    let id = file.0;
+                    let seed = Seed::File(file.0, file.1.clone());
                     b.file(file);
-                    Seed::File(id)
+                    seed
                 }
                 (None, Some(name)) => {
                     b.tag(name.to_string());
@@ -153,7 +160,7 @@ impl Index {
         let filter = shown_file("f", shown.images);
         for seed in &seeds {
             match seed {
-                Seed::File(id) => {
+                Seed::File(id, rel) => {
                     for out in self.links_out(*id, shown.images)? {
                         match (out.file, out.dangling && shown.unresolved) {
                             (Some(file), _) if out.shown => {
@@ -173,6 +180,14 @@ impl Index {
                     ))?;
                     for file in st.query_map([id], row)? {
                         b.file(file?);
+                    }
+                    for (file, taken) in self.imports_out(*id, shown.images)? {
+                        if taken {
+                            b.file(file);
+                        }
+                    }
+                    for file in self.imports_in(*id, rel, shown.images)? {
+                        b.file(file);
                     }
                     if shown.tags {
                         for name in self.tags_of_file(*id)? {
@@ -212,7 +227,7 @@ impl Index {
             }
         }
 
-        // Every edge among the nodes is a link or tag one of the files writes.
+        // Every edge among the nodes is a link, an import or a tag one of the files writes.
         let mut files: Vec<(i64, u32)> = b.files.iter().map(|(&id, &i)| (id, i)).collect();
         files.sort_unstable_by_key(|&(_, i)| i);
         for (id, from) in files {
@@ -228,6 +243,11 @@ impl Index {
                     b.edge(from, to, edge_kind(out.kind));
                 }
             }
+            for ((to, ..), _) in self.imports_out(id, shown.images)? {
+                if let Some(&to) = b.files.get(&to) {
+                    b.edge(from, to, EdgeKind::Import);
+                }
+            }
             if !b.tags.is_empty() {
                 for name in self.tags_of_file(id)? {
                     if let Some(&to) = b.tags.get(&name) {
@@ -239,8 +259,9 @@ impl Index {
         Ok(b.part)
     }
 
-    /// The vault's whole graph: every file [`shown_file`] takes, the links among them, and the
-    /// ghosts and tags `shown` asks for; without `shown.orphans`, only the nodes some edge joins.
+    /// The vault's whole graph: every file [`shown_file`] takes, the links and imports among them,
+    /// and the ghosts and tags `shown` asks for; without `shown.orphans`, only the nodes some edge
+    /// joins.
     pub fn graph_all(&self, shown: Shown) -> Result<Part> {
         let mut b = Builder::default();
         let mut st = self.conn.prepare_cached(&format!(
@@ -259,6 +280,33 @@ impl Index {
             let (from, to, kind): (i64, i64, i64) = link?;
             if let (Some(&from), Some(&to)) = (b.files.get(&from), b.files.get(&to)) {
                 b.edge(from, to, edge_kind(kind));
+            }
+        }
+        // A Go file's import names a package, every Go file of its folder but the tests.
+        let mut packages: HashMap<String, Vec<u32>> = HashMap::new();
+        for (i, node) in b.part.nodes.iter().enumerate() {
+            if in_package(&node.key) {
+                let dir = parent_dir(&node.key).to_string();
+                packages.entry(dir).or_default().push(i as u32);
+            }
+        }
+        let mut st = self.conn.prepare_cached(
+            "SELECT i.src_file, i.resolved_file, t.rel_path FROM imports i
+             JOIN files t ON t.id = i.resolved_file",
+        )?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        for import in rows {
+            let (from, to, rel): (i64, i64, String) = import?;
+            let Some(&from) = b.files.get(&from) else {
+                continue;
+            };
+            let to: Vec<u32> =
+                match b.part.nodes[from as usize].key.ends_with(".go") && in_package(&rel) {
+                    true => packages.get(parent_dir(&rel)).cloned().unwrap_or_default(),
+                    false => b.files.get(&to).copied().into_iter().collect(),
+                };
+            for to in to {
+                b.edge(from, to, EdgeKind::Import);
             }
         }
         if shown.unresolved {
@@ -322,6 +370,69 @@ impl Index {
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The files file `id` imports, each with whether [`shown_file`] takes it: the file each
+    /// import resolved to, or where a Go file imports a package, every file [`in_package`] of the
+    /// folder that file is in.
+    fn imports_out(&self, id: i64, images: bool) -> Result<Vec<(Row, bool)>> {
+        let mut st = self.conn.prepare_cached(&format!(
+            "SELECT t.id, t.rel_path, t.doc, {}, s.rel_path FROM imports i
+             JOIN files s ON s.id = i.src_file JOIN files t ON t.id = i.resolved_file
+             WHERE i.src_file = ?1",
+            shown_file("t", images)
+        ))?;
+        let rows = st.query_map([id], |r| Ok(((row(r)?, r.get(3)?), r.get::<_, String>(4)?)))?;
+        let mut out = Vec::new();
+        for found in rows {
+            let ((file, taken), src) = found?;
+            match src.ends_with(".go") && in_package(&file.1) {
+                true => out.extend(self.package(parent_dir(&file.1), images)?),
+                false => out.push((file, taken)),
+            }
+        }
+        Ok(out)
+    }
+
+    /// The files [`in_package`] of the folder `dir`, each with whether [`shown_file`] takes it.
+    fn package(&self, dir: &str, images: bool) -> Result<Vec<(Row, bool)>> {
+        let mut st = self.conn.prepare_cached(&format!(
+            "SELECT f.id, f.rel_path, f.doc, {} FROM files f
+             WHERE f.parent_dir = ?1 AND f.rel_path LIKE '%.go'",
+            shown_file("f", images)
+        ))?;
+        let rows = st.query_map([dir], |r| Ok((row(r)?, r.get(3)?)))?;
+        let rows = rows.collect::<rusqlite::Result<Vec<(Row, bool)>>>()?;
+        Ok(rows
+            .into_iter()
+            .filter(|(file, _)| in_package(&file.1))
+            .collect())
+    }
+
+    /// The files importing file `rel` that [`shown_file`] takes: for a Go file, those whose
+    /// import of its package resolved to any file of it.
+    fn imports_in(&self, id: i64, rel: &str, images: bool) -> Result<Vec<Row>> {
+        let filter = shown_file("s", images);
+        let rows = match in_package(rel) {
+            true => {
+                let mut st = self.conn.prepare_cached(&format!(
+                    "SELECT DISTINCT s.id, s.rel_path, s.doc FROM files t
+                     JOIN imports i ON i.resolved_file = t.id JOIN files s ON s.id = i.src_file
+                     WHERE t.parent_dir = ?1 AND t.rel_path LIKE '%.go' AND s.rel_path LIKE '%.go'
+                       AND {filter}"
+                ))?;
+                st.query_map([parent_dir(rel)], row)?
+                    .collect::<rusqlite::Result<_>>()?
+            }
+            false => {
+                let mut st = self.conn.prepare_cached(&format!(
+                    "SELECT DISTINCT s.id, s.rel_path, s.doc FROM imports i
+                     JOIN files s ON s.id = i.src_file WHERE i.resolved_file = ?1 AND {filter}"
+                ))?;
+                st.query_map([id], row)?.collect::<rusqlite::Result<_>>()?
+            }
+        };
+        Ok(rows)
     }
 
     fn tags_of_file(&self, id: i64) -> Result<Vec<String>> {
@@ -474,6 +585,50 @@ mod tests {
         assert!(
             !keys(&ix.graph_all(all(true, false, false, true)).unwrap()).contains(&"build/out.md")
         );
+    }
+
+    /// A code file's imports are edges, and a Go file's import of a package one to each of its
+    /// files but the tests.
+    #[test]
+    fn imports_are_edges_and_a_go_import_reaches_its_whole_package() {
+        let (vault, db) = fixture();
+        let root = vault.path();
+        fs::create_dir_all(root.join("app")).unwrap();
+        fs::create_dir_all(root.join("proj/pkg")).unwrap();
+        fs::write(root.join("app/main.py"), "import utils\n").unwrap();
+        fs::write(root.join("app/utils.py"), "").unwrap();
+        let main = "package main\n\nimport \"example.com/me/proj/pkg\"\n";
+        fs::write(root.join("proj/main.go"), main).unwrap();
+        for file in ["a.go", "b.go", "a_test.go"] {
+            fs::write(root.join("proj/pkg").join(file), "package pkg\n").unwrap();
+        }
+        let mut ix = open(&db);
+        ix.reconcile(root, |_| {}).unwrap();
+        use EdgeKind::Import;
+
+        let part = ix.graph_all(Shown::default()).unwrap();
+        for edge in [
+            ("app/main.py", "app/utils.py", Import),
+            ("proj/main.go", "proj/pkg/a.go", Import),
+            ("proj/main.go", "proj/pkg/b.go", Import),
+        ] {
+            assert!(
+                edges(&part).contains(&edge),
+                "{edge:?} in {:?}",
+                edges(&part)
+            );
+        }
+        assert!(!keys(&part).contains(&"proj/pkg/a_test.go"));
+
+        let part = ix
+            .graph_around(&["proj/pkg/b.go".into()], Shown::default())
+            .unwrap();
+        assert_eq!(keys(&part), ["proj/main.go", "proj/pkg/b.go"]);
+        assert_eq!(edges(&part), [("proj/main.go", "proj/pkg/b.go", Import)]);
+        let part = ix
+            .graph_around(&["app/utils.py".into()], Shown::default())
+            .unwrap();
+        assert_eq!(edges(&part), [("app/main.py", "app/utils.py", Import)]);
     }
 
     /// `ACCENT_GRAPH_VAULT=/tmp/<scratch> cargo test --release -p accent-core -- --ignored
