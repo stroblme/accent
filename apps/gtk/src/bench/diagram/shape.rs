@@ -143,6 +143,11 @@ pub(super) fn shape(app: &Rc<App>, rel: &str) {
                     && w.tooltip_text().as_deref() == Some("Diagonal Rounded Rectangle")
             })
         });
+        // Scrolled into sight first, which a grid holding more shapes than it shows needs.
+        if let Some(child) = &diagonal {
+            child.grab_focus();
+        }
+        glib::timeout_future(Duration::from_millis(300)).await;
         match diagonal.and_then(|c| in_popover(&c)) {
             Some(at) => super::super::git::xtest(&format!("move {at}; down; up")).await,
             None => println!("bench shape no_entry"),
