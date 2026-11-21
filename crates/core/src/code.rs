@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::ops::Range;
 use std::sync::LazyLock;
 
+pub mod imports;
 pub mod typst;
 
 /// The languages the scanner reads. TypeScript is read as JavaScript, C++ as C.
@@ -144,18 +145,39 @@ const MINIFIED: usize = 2_000;
 
 /// The declarations in `text`, read as `lang`, in the order they start.
 pub fn symbols(lang: Lang, text: &str) -> Vec<Decl> {
-    if matches!(lang, Lang::Script | Lang::C) && text.lines().any(|l| l.len() > MINIFIED) {
-        return Vec::new();
+    match minified(lang, text) {
+        true => Vec::new(),
+        false => decls(lang, &mask(lang, text), text),
+    }
+}
+
+/// [`symbols`] and the [`imports`](imports::imports) of the file `rel`, the text masked once for
+/// both: what the index keeps of a code file.
+pub fn read(lang: Lang, rel: &str, text: &str) -> (Vec<Decl>, Vec<imports::Import>) {
+    if minified(lang, text) {
+        return (Vec::new(), Vec::new());
     }
     let masked = mask(lang, text);
+    (
+        decls(lang, &masked, text),
+        imports::imports(lang, rel, &masked, text),
+    )
+}
+
+/// A minified script or a generated C table, which is read for nothing.
+fn minified(lang: Lang, text: &str) -> bool {
+    matches!(lang, Lang::Script | Lang::C) && text.lines().any(|l| l.len() > MINIFIED)
+}
+
+fn decls(lang: Lang, masked: &str, text: &str) -> Vec<Decl> {
     let mut out = match lang {
-        Lang::Python => indented(&masked, text),
-        Lang::Lean => lean(&masked, text),
-        Lang::Typst => typst::headings(&masked, text),
-        _ => braced(lang, &masked, text),
+        Lang::Python => indented(masked, text),
+        Lang::Lean => lean(masked, text),
+        Lang::Typst => typst::headings(masked, text),
+        _ => braced(lang, masked, text),
     };
     if lang == Lang::C {
-        out.extend(defines(&masked, text));
+        out.extend(defines(masked, text));
     }
     let starts = line_starts(text);
     let line = |byte: usize| starts.partition_point(|&s| s <= byte) as u32;
