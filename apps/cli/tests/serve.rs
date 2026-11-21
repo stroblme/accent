@@ -114,6 +114,21 @@ fn serve_answers_over_the_pipe_and_stops_when_it_closes() {
     });
     assert_eq!(ghost.as_deref(), Some(" already boiling."));
 
+    // The graph crosses as its nodes' keys and edges between their indices.
+    ask(
+        104,
+        "graph_around",
+        r#"[["a.md"], {"unresolved":true,"tags":false,"images":false,"orphans":false}]"#,
+    );
+    let answer = next(Some(104));
+    let part = &answer["result"];
+    assert_eq!(part["nodes"][0]["key"], "a.md", "{answer}");
+    assert_eq!(part["nodes"][1]["key"], "b.md", "{answer}");
+    assert_eq!(
+        part["edges"],
+        serde_json::json!([{"from": 0, "to": 1, "kind": "Link"}])
+    );
+
     // The window closed. Nothing else tells the server to stop.
     drop(input);
     let deadline = Instant::now() + Duration::from_secs(20);

@@ -47,6 +47,8 @@ pub use accent_core::fs::{Etag, Read, Text};
 pub use accent_core::code::SymbolKind;
 pub use accent_core::git;
 pub use accent_core::git::{Branch, Commit, Entry, LogRow, Repo, Status, Submodule};
+// The module: its layout is stepped beside the window, not asked of the vault.
+pub use accent_core::graph;
 pub use accent_core::index::{
     Backlink, CodeSymbol, FileRow, HeadingHit, Match, Mention, OutLink, PdfLink, Progress,
     ReconcileStats, SearchHit, Stats, SymbolName,

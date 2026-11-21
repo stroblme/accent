@@ -9,6 +9,7 @@ use std::sync::mpsc::channel;
 use crate::Result;
 
 use accent_core::code::Lang;
+use accent_core::graph::{NodeKind, Part, Shown};
 use accent_core::index::Index;
 use accent_core::order::Order;
 use accent_core::path::{basename, parent_dir};
@@ -234,6 +235,31 @@ impl Local {
 
     pub fn unresolved_links(&self) -> Result<Vec<(String, String, i64)>> {
         Ok(self.index().unresolved_links()?)
+    }
+
+    pub fn graph_around(&self, keys: &[String], shown: Shown) -> Result<Part> {
+        let part = self.index().graph_around(keys, shown)?;
+        Ok(self.unignored(part, keys))
+    }
+
+    /// The whole graph, read on the connection the other whole-table reads take.
+    pub fn graph_all(&self, shown: Shown) -> Result<Part> {
+        let part = self.searcher().graph_all(shown)?;
+        Ok(self.unignored(part, &[]))
+    }
+
+    /// `part` without the ghosts of notes the folders git ignores hold, which
+    /// [`missing_notes`](Self::missing_notes) leaves out too, but the ones `keys` name.
+    fn unignored(&self, mut part: Part, keys: &[String]) -> Part {
+        if part.nodes.iter().any(|n| n.kind == NodeKind::Missing) {
+            let ignored = self.lang.ignored.listing(false);
+            part.retain(|_, n| {
+                n.kind != NodeKind::Missing
+                    || keys.contains(&n.key)
+                    || ignored.resolve(&n.key).is_none()
+            });
+        }
+        part
     }
 
     pub fn headings_matching(&self, words: &[String], limit: usize) -> Result<Vec<HeadingHit>> {

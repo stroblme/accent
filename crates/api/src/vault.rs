@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use accent_core::code::Lang;
+use accent_core::graph::{Part, Shown};
 use accent_core::order::Order;
 use accent_core::path::linked_path;
 
@@ -515,6 +516,11 @@ methods! {
     backlink_locations(rel: ref str) -> Vec<Location>;
     /// The links written in a note, in order, and where each leads.
     links_from(rel: ref str) -> Vec<OutLink>;
+    /// The files around `keys`, one hop either way, and every edge among them
+    /// (`Index::graph_around`).
+    graph_around(keys: ref [String], shown: val Shown) -> Part;
+    /// The vault's whole graph (`Index::graph_all`).
+    graph_all(shown: val Shown) -> Part;
     /// `(note, target, byte offset)` for every link nothing in the vault answers to.
     unresolved_links() -> Vec<(String, String, i64)>;
     /// The headings holding the most of `words`, best first.
