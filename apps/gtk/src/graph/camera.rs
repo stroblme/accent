@@ -1,6 +1,6 @@
 //! Where the graph's world is on the canvas: the layout's coordinates scaled by the zoom and
-//! moved by the offset, a screen point being `world · zoom + offset`. Pure, so it is tested
-//! without a window.
+//! moved by the offset, a screen point being `world · zoom + offset`, and which parts of the
+//! canvas its names take. Pure, so it is tested without a window.
 
 /// The space kept round what a fit shows, and round the node the keyboard is on, in pixels.
 pub(super) const MARGIN: f64 = 32.0;
@@ -110,6 +110,16 @@ impl Camera {
         camera
     }
 
+    /// The camera once a picture drawn at `drawn` lands: a fitting canvas takes the fit the
+    /// picture was drawn at, and any other camera stays, so neither a picture fitted before a pan
+    /// nor one drawn before a Fit moves the canvas.
+    pub fn landed(self, drawn: Camera) -> Camera {
+        match self.fitting && drawn.fitting {
+            true => drawn,
+            false => self,
+        }
+    }
+
     /// The node whose disc, `radius(i)` world units or [`MIN_RADIUS`] pixels, holds canvas point
     /// `at` give or take [`SLOP`], the nearest where several do.
     pub fn hit(
@@ -151,6 +161,67 @@ pub(super) fn step(
         }
     }
     best.map(|(i, _)| i)
+}
+
+/// The side of an [`Occupied`] cell, in pixels.
+const CELL: f64 = 8.0;
+
+/// Which parts of a canvas the names placed so far cover, in cells of [`CELL`] pixels, so a
+/// name's box is checked against a few cells however many names were placed. A box takes every
+/// cell it touches, which keeps the names a few pixels apart.
+pub(super) struct Occupied {
+    /// Where the cells start, a cell or less before the canvas's corner.
+    corner: [f64; 2],
+    columns: usize,
+    rows: usize,
+    cells: Vec<bool>,
+}
+
+impl Occupied {
+    /// A canvas of `size` with nothing on it, its cells laid from `origin`, where the world's
+    /// origin is, so they move with a pan and the same names meet before and after it.
+    pub fn new(size: [f64; 2], origin: [f64; 2]) -> Occupied {
+        let corner = origin.map(|o| o.rem_euclid(CELL) - CELL);
+        let [columns, rows] = size.map(|side| (side / CELL).ceil() as usize + 1);
+        Occupied {
+            corner,
+            columns,
+            rows,
+            cells: vec![false; columns * rows],
+        }
+    }
+
+    /// The cells box `[left, top, right, bottom]` touches, none for a box off the canvas.
+    fn cells(&self, b: [f64; 4]) -> Option<(std::ops::Range<usize>, std::ops::Range<usize>)> {
+        let span = |from: f64, to: f64, axis: usize, n: usize| {
+            let first = ((from - self.corner[axis]) / CELL).floor().max(0.0) as usize;
+            let last = (((to - self.corner[axis]) / CELL).ceil().max(0.0) as usize).min(n);
+            (first < last).then_some(first..last)
+        };
+        let xs = span(b[0], b[2], 0, self.columns)?;
+        Some((xs, span(b[1], b[3], 1, self.rows)?))
+    }
+
+    /// Whether box `b` reaches the canvas.
+    pub fn shows(&self, b: [f64; 4]) -> bool {
+        self.cells(b).is_some()
+    }
+
+    /// Whether box `b` is on the canvas and meets no box taken.
+    pub fn fits(&self, b: [f64; 4]) -> bool {
+        self.cells(b).is_some_and(|(xs, ys)| {
+            ys.into_iter()
+                .all(|y| !self.cells[y * self.columns..][xs.clone()].contains(&true))
+        })
+    }
+
+    pub fn take(&mut self, b: [f64; 4]) {
+        if let Some((xs, ys)) = self.cells(b) {
+            for y in ys {
+                self.cells[y * self.columns..][xs.clone()].fill(true);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -196,6 +267,41 @@ mod tests {
         assert_eq!(near.zoom, 1.0);
         assert_eq!(near.to_screen([15.0, 0.0]), [400.0, 300.0]);
         assert_eq!(Camera::fit(&[], size).to_screen([0.0; 2]), [400.0, 300.0]);
+    }
+
+    /// A Fit stays put whatever picture lands next: a fitting canvas takes a fitted picture's
+    /// camera, keeps its own fit under one drawn before the Fit, and a camera the reader moved
+    /// takes neither.
+    #[test]
+    fn a_landed_picture_moves_only_a_fitting_canvas_to_its_fit() {
+        let size = [800.0, 600.0];
+        let fit = Camera::fit(&[[-100.0, 0.0], [300.0, 50.0]], size);
+        let fitted = Camera::fit(&[[-120.0, 0.0], [320.0, 60.0]], size);
+        let mut panned = fit;
+        panned.pan([40.0, 0.0]);
+        assert_eq!(fit.landed(fitted), fitted);
+        assert_eq!(fit.landed(panned), fit);
+        assert_eq!(panned.landed(fitted), panned);
+    }
+
+    /// A box meeting one taken is refused, one beside it is not, and one off the canvas never
+    /// fits. Two boxes a few pixels apart meet or not alike wherever a pan puts them.
+    #[test]
+    fn a_name_is_placed_only_where_none_is() {
+        let mut taken = Occupied::new([200.0, 100.0], [0.0; 2]);
+        assert!(taken.fits([10.0, 10.0, 90.0, 26.0]));
+        taken.take([10.0, 10.0, 90.0, 26.0]);
+        assert!(!taken.fits([80.0, 20.0, 150.0, 36.0]));
+        assert!(taken.fits([100.0, 10.0, 180.0, 26.0]));
+        assert!(taken.fits([10.0, 40.0, 90.0, 56.0]));
+        assert!(!taken.fits([210.0, 10.0, 290.0, 26.0]));
+        assert!(!taken.fits([-90.0, 10.0, -10.0, 26.0]));
+        let meets = |pan: f64| {
+            let mut taken = Occupied::new([200.0, 100.0], [pan, 0.0]);
+            taken.take([10.0 + pan, 10.0, 50.0 + pan, 26.0]);
+            taken.fits([53.0 + pan, 10.0, 90.0 + pan, 26.0])
+        };
+        assert!((1..16).all(|pan| meets(f64::from(pan)) == meets(0.0)));
     }
 
     /// A press finds the nearest node whose disc it is on, a few pixels' slop included, and a

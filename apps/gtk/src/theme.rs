@@ -243,7 +243,7 @@ pub const GRID_ALPHA: f32 = 0.1;
 /// a text file's or a tag's node, a ghost's name and the lit node's links; a ghost's ring (user
 /// decision 2026-11-21).
 pub const GRAPH_EDGE_ALPHA: f32 = 0.2;
-pub const GRAPH_DIM_ALPHA: f32 = 0.15;
+pub const GRAPH_DIM_ALPHA: f32 = 0.35;
 pub const GRAPH_FAINT_ALPHA: f32 = 0.6;
 pub const GRAPH_RING_ALPHA: f32 = 0.4;
 

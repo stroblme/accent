@@ -1690,14 +1690,19 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - **A node takes its kind's colour** from the hues a table's columns take (Colour), and the file in front takes the accent itself with a ring round it (user decision 2026-11-21).
   A note is drawn in the foreground, code, a PDF, a diagram, a notebook and an image each in one of the five hues after the accent, and a text file or a tag in the foreground at 60 %.
   Links are hairlines in the foreground at a fifth of its strength, without arrows.
-- The pointer over a node lights it, its links and its neighbours, and dims the rest.
-  Names show from 60 % up, and below that only round the lit node, the file in front and the node the keyboard is on.
+- The pointer over a node lights it, its links and its neighbours, and dims the rest to 35 % (user decision 2026-11-22).
+  The change crossfades over 150 ms, the names with the discs, and the lit node stays lit for 150 ms after the pointer leaves it, so moving from node to node goes straight from one neighbourhood to the next.
+  With animations off nothing crossfades, and the lit node still stays lit for those 150 ms.
+- Names are placed best first, the file in front, the node the keyboard is on and the lit node always, then the lit node's neighbours and the rest by how many links each has (user decision 2026-11-22).
+  A name whose box meets one already placed is left out, so how many show follows the zoom.
 - **The layout is a live force layout** worked out off the main loop (user decision 2026-11-21), so the nodes settle as they are watched, a dragged node pulls its neighbours along and what a click adds slides out of the node clicked.
   A dragged node is held only while the pointer holds it, and settles back with the rest once let go.
   With animations off the settled layout shows at once, and a drag moves the one node until it is let go.
 - Dragging the background or with the middle button pans, and so do the wheel and the touchpad, while `Ctrl+scroll`, a pinch and the zoom chords zoom as over a diagram (Zoom).
   Until the reader pans or zooms, the graph is kept fitted as it settles, never past 100 %, and the readout says Fit as an image's does.
-  `Ctrl+0` fits it again.
+  `Ctrl+0` fits it again at once.
+  Until the next picture is drawn the last one is moved and scaled, and one drawn for a view the reader moved reaches an eighth of the canvas past each edge, so the edges stay filled through a pan of that much or a zoom step out from 50 % up.
+  A picture of the settled graph at another zoom crossfades in over the scaled one, as a newly lit node's does (user decision 2026-11-22).
 - It follows the vault 300 ms after the last change, a note saved here or by another program and a file added, renamed or deleted, each node keeping its place, a renamed one too.
 - Its menu, a right-click anywhere on the canvas, holds Show Whole Vault, Show Unresolved Links, Show Tags, Show Images and Show Orphans as checks, then Reset Graph, each a palette command too (Keyboard, Graph).
   What it shows is kept in the vault's session, and a restored graph comes back around the file in front.
@@ -2689,6 +2694,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
   A cell added to a notebook — inserted, split off, converted, or past the last by Run Cell and Advance — fades in, and Stop and Run Cell fade in as each takes the other's place; a cell deleted or moved goes or moves at once, as do the cells Undo and Redo bring back, which walk back what was done rather than make anything (Notebook).
   A notebook's cell buttons fade in beside each cell they come to and fade out where they stood when they go, the one fade out besides a toast's and a revealer's: one shared column, faded by one animation that turns round where it is, so a pointer sweeping the cells starts no fade per cell (Notebook).
   Nothing else fades in: not a reload (a LaTeX build rewrites its PDF every few seconds), a restore, a tab landing in another pane, or a layout change (F9, a split).
+- The graph's pictures crossfade over 150 ms, eased out as the rest, since the pointer brings a new one at every node it crosses (Graph, user decision 2026-11-22).
 - Focus mode fades as the chrome's CSS transition does, over 250 ms of `ease`, its line fade and a notebook's outputs eased the same (Chrome auto-hide); Reveal in Sidebar's outline holds a second and fades over two.
 - The laser pointer's strokes keep Xournal++'s timing instead, holding half a second and fading over another half at an even pace, and with animations off they go at the end of the hold (Views).
 - `gtk-enable-animations` off stops all of it, read as each motion starts, so a change to it holds at once: libadwaita's and GTK's animations skip to their end, GTK runs no stylesheet transition, and our own ramps check it themselves; the outline then holds the three seconds and goes at once.
@@ -2724,6 +2730,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 | A copy's count on the status bar, by file or by byte | 200 ms | `statusbar.rs::TICK` |
 | Automatic reconnect | after 1, 2, 4, 8, 16 s, then every 30 s, for 10 min; the banner's count ticks every 1 s | `reconnect.rs::backoff`, `GIVE_UP` |
 | Preview re-render, a note's word count | 300 ms | `main.rs::RENDER` |
+| The graph's crossfade between two pictures, and its lit node held once the pointer leaves it | 150 ms | `graph/view.rs::FADE_MS`, `LINGER` |
 | The graph after a change in the vault | 300 ms | `graph/mod.rs::REFRESH` |
 | Symbols and folds after an edit | 300 ms | `lang.rs::REFRESH` |
 | References after a caret move | 300 ms | `references.rs::REFERENCES` |

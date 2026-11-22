@@ -10,11 +10,17 @@
 //! are watched; with them off it settles in one go. How the canvas wants the graph drawn, its
 //! camera, size and what is lit, goes to the worker as each frame is drawn, and until a picture
 //! of that comes back the last one is moved and scaled to the camera (user decision 2026-11-21),
-//! so panning, zooming and the pointer never wait on the worker.
+//! so panning, zooming and the pointer never wait on the worker. A picture of a camera the reader
+//! moved reaches [`OVERSCAN`] past the canvas's edges, so a pan or a zoom out finds it drawn
+//! there meanwhile, and one that lights another node, or shows the still layout at another zoom,
+//! crossfades in over the one shown (user decision 2026-11-22). The names follow the picture on
+//! screen, placed best first wherever they overlap none placed before.
 
 use std::cell::{Cell, RefCell};
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::time::Duration;
 
 use adw::prelude::*;
 use gtk::subclass::prelude::*;
@@ -26,15 +32,24 @@ use super::raster::{self, Colours, Rgba};
 use super::worker::{Cmd, Picture, Worker};
 use crate::theme;
 
-/// Names show for every node on screen from this zoom up, and below it only round the lit node,
-/// the file in front and the node the keyboard is on.
-const LABEL_ZOOM: f64 = 0.6;
 /// The most names drawn in a frame, a whole vault zoomed in included.
 const LABELS_MAX: usize = 400;
+/// The most names kept laid out: past it only those drawn in the last frame are kept.
+const LABELS_KEPT: usize = 4 * LABELS_MAX;
 /// The widest a name is drawn before it is ellipsized, in pixels.
 const LABEL_WIDTH: i32 = 160;
 /// How far a wheel notch pans, in pixels.
 const NOTCH: f64 = 64.0;
+/// How long a new picture crossfades in over the one shown, in ms: quicker than the app's other
+/// fades, since the pointer brings a new one at every node (user decision 2026-11-22).
+const FADE_MS: u32 = 150;
+/// How long the lit node stays lit after the pointer leaves it, so moving from node to node goes
+/// from one neighbourhood straight to the next (user decision 2026-11-22).
+const LINGER: Duration = Duration::from_millis(150);
+/// How far past each edge a picture of a camera the reader moved is drawn, as a share of the
+/// canvas's width and height: a pan of an eighth of the canvas, or a zoom step out from 50 % up,
+/// still finds the picture there until the next one lands.
+const OVERSCAN: f64 = 0.125;
 
 /// A press and whether it is still a click: where it went down and the node under it.
 #[derive(Clone, Copy)]
@@ -58,6 +73,12 @@ type Open = dyn Fn(usize, bool);
 /// What a key typed over the canvas asks of the tab: the find bar opened, the key forwarded to it.
 type Typed = dyn Fn(&gtk::EventControllerKey);
 
+/// A node's name laid out, and the frame it was last drawn in.
+pub struct Label {
+    layout: pango::Layout,
+    drawn: u64,
+}
+
 mod imp {
     use super::*;
 
@@ -67,8 +88,11 @@ mod imp {
         /// Where each node is, in the layout's units, in the graph's order.
         pub at: RefCell<Vec<[f32; 2]>>,
         pub camera: Cell<Camera>,
-        /// The node under the pointer.
+        /// The node lit: the one under the pointer, kept [`LINGER`] once the pointer left it.
         pub hover: Cell<Option<usize>>,
+        /// The node under the pointer, for the cursor, and the wait before the lit node goes.
+        pub under: Cell<Option<usize>>,
+        pub linger: RefCell<Option<glib::SourceId>>,
         /// The file in front of the window, drawn in the accent, by key: it is no node until the
         /// answer holding it lands.
         pub front: RefCell<Option<String>>,
@@ -85,13 +109,25 @@ mod imp {
         pub picture: RefCell<Option<Picture>>,
         pub asked: RefCell<Option<raster::View>>,
         pub serial: Cell<u64>,
+        /// The picture shown before the last, crossfading out under it while `fade` runs, and
+        /// how far the crossfade has got, eased.
+        pub from: RefCell<Option<Picture>>,
+        pub fade: RefCell<Option<adw::TimedAnimation>>,
+        pub progress: Cell<f64>,
         /// Whether the layout has placed the nodes since it started over: until then they are
         /// all in one spot, and nothing is drawn.
         pub placed: Cell<bool>,
         /// The node a drag holds, by key.
         pub dragging: RefCell<Option<String>>,
-        /// Each name laid out once, by the node's key, until the style changes.
-        pub labels: RefCell<HashMap<String, pango::Layout>>,
+        /// Each name laid out once, by the node's key, until the style changes, and a count of
+        /// the frames whose names were drawn.
+        pub labels: RefCell<HashMap<String, Label>>,
+        pub frame: Cell<u64>,
+        /// The nodes best-linked first, and the generation they are of.
+        pub by_degree: RefCell<(u64, Vec<usize>)>,
+        /// A character's width and a line's height in the names' font, in pixels, until the
+        /// style changes.
+        pub metrics: Cell<Option<[f64; 2]>>,
         pub press: Cell<Option<Press>>,
         /// The pan a wheel notch eases towards: from where to where.
         pub easing: Cell<([f64; 2], [f64; 2])>,
@@ -156,6 +192,7 @@ impl GraphView {
         view.wire_pointer();
         view.wire_wheel();
         view.wire_keys();
+        view.wire_fade();
         view
     }
 
@@ -247,6 +284,7 @@ impl GraphView {
         self.set_camera(Camera::default());
         imp.placed.set(false);
         imp.picture.take();
+        imp.from.take();
         imp.asked.take();
     }
 
@@ -289,13 +327,12 @@ impl GraphView {
             imp.frames.set(imp.frames.get() + 1);
         }
         if let Some(picture) = frame.picture {
-            // A fitting camera is the one the picture was fitted at.
-            if imp.camera.get().fitting && imp.dragging.borrow().is_none() {
-                imp.camera.set(picture.camera);
+            if imp.dragging.borrow().is_none() {
+                imp.camera.set(imp.camera.get().landed(picture.camera));
             }
             #[cfg(feature = "bench")]
             imp.draws.borrow_mut().push(picture.ms);
-            imp.picture.replace(Some(picture));
+            self.land(picture, frame.settled);
         }
         self.queue_draw();
         let current = (imp.picture.borrow().as_ref()).is_some_and(|p| p.serial == imp.serial.get());
@@ -304,6 +341,55 @@ impl GraphView {
             return glib::ControlFlow::Break;
         }
         glib::ControlFlow::Continue
+    }
+
+    /// Show `picture`, crossfading to it from the one shown where it lights another node or, the
+    /// layout `still`, shows it at another zoom: a moving layout's pictures are not faded, which
+    /// would trail its nodes. One landing while a crossfade is less than half way takes the place
+    /// of its end, and one landing later starts it again from that end, so the canvas never jumps
+    /// by more than half a crossfade.
+    fn land(&self, picture: Picture, still: bool) {
+        let imp = self.imp();
+        let Some(shown) = imp.picture.replace(None) else {
+            imp.picture.replace(Some(picture));
+            return;
+        };
+        let differs =
+            shown.lit != picture.lit || (still && shown.camera.zoom != picture.camera.zoom);
+        let early = imp.from.borrow().is_some() && imp.progress.get() < 0.5;
+        imp.picture.replace(Some(picture));
+        if differs && !early {
+            imp.from.replace(Some(shown));
+            imp.progress.set(0.0);
+            // With animations off it skips to its end at once, and nothing fades.
+            let fade = imp.fade.borrow().clone();
+            if let Some(fade) = fade {
+                fade.play();
+            }
+        }
+    }
+
+    /// The crossfade between two pictures, eased out as libadwaita's fades are.
+    fn wire_fade(&self) {
+        let target = adw::CallbackAnimationTarget::new(glib::clone!(
+            #[weak(rename_to = view)]
+            self,
+            move |t| {
+                view.imp().progress.set(t);
+                view.queue_draw();
+            }
+        ));
+        let fade = adw::TimedAnimation::new(self, 0.0, 1.0, FADE_MS, target);
+        fade.set_easing(adw::Easing::EaseOutCubic);
+        fade.connect_done(glib::clone!(
+            #[weak(rename_to = view)]
+            self,
+            move |_| {
+                view.imp().from.take();
+                view.queue_draw();
+            }
+        ));
+        self.imp().fade.replace(Some(fade));
     }
 
     /// Hold node `key` under canvas point `at`, as a drag does: its neighbours follow it as the
@@ -528,6 +614,7 @@ impl GraphView {
     /// The names are laid out again in the new style, and everything drawn in its colours.
     pub fn restyle(&self) {
         self.imp().labels.borrow_mut().clear();
+        self.imp().metrics.set(None);
         self.queue_draw();
     }
 
@@ -547,9 +634,10 @@ impl GraphView {
         [f64::from(self.width()), f64::from(self.height())]
     }
 
-    /// Fitted again to what it shows, and kept so as it settles.
+    /// Fitted again to what it shows, at once, and kept so as it settles.
     pub fn fit(&self) {
-        self.set_camera(Camera::default());
+        let camera = Camera::fit(&self.imp().at.borrow(), self.size());
+        self.set_camera(camera);
     }
 
     /// Zoomed a step in or out round the canvas's middle.
@@ -723,9 +811,33 @@ impl GraphView {
         );
     }
 
+    /// The pointer over `node`, or over none: a node lights at once, and the lit one stays lit
+    /// [`LINGER`] after the pointer left it, unless the pointer reaches another first.
     fn hover(&self, node: Option<usize>) {
-        if self.imp().hover.replace(node) != node {
+        let imp = self.imp();
+        if imp.under.replace(node) != node {
             self.set_cursor_from_name(node.map(|_| "pointer"));
+        }
+        if node.is_some() || imp.hover.get().is_none() {
+            if let Some(wait) = imp.linger.take() {
+                wait.remove();
+            }
+            self.light(node);
+        } else if imp.linger.borrow().is_none() {
+            let view = self.downgrade();
+            let wait = glib::timeout_add_local_once(LINGER, move || {
+                if let Some(view) = view.upgrade() {
+                    view.imp().linger.take();
+                    view.light(None);
+                }
+            });
+            imp.linger.replace(Some(wait));
+        }
+    }
+
+    /// Light `node` and its neighbours, or none.
+    fn light(&self, node: Option<usize>) {
+        if self.imp().hover.replace(node) != node {
             self.queue_draw();
         }
     }
@@ -811,14 +923,20 @@ impl GraphView {
                 (key.borrow().as_deref()).and_then(|key| graph.index_of(key))
             };
             let camera = imp.camera.get();
+            // The worker fits a fitting camera to what it draws, which then holds all of it, and
+            // draws any other OVERSCAN past each edge.
+            let (camera, size) = match camera.fitting {
+                true => (Camera::default(), size),
+                false => {
+                    let m = size.map(|side| (side * OVERSCAN).round());
+                    let offset = [camera.offset[0] + m[0], camera.offset[1] + m[1]];
+                    let size = [size[0] + 2.0 * m[0], size[1] + 2.0 * m[1]];
+                    (Camera { offset, ..camera }, size)
+                }
+            };
             let surface = self.native().and_then(|n| n.surface());
             raster::View {
-                // The worker fits a fitting camera to what it draws.
-                camera: if camera.fitting {
-                    Camera::default()
-                } else {
-                    camera
-                },
+                camera,
                 size,
                 scale: surface.map_or(f64::from(self.scale_factor()), |s| s.scale()),
                 lit: imp.hover.get(),
@@ -845,8 +963,8 @@ impl GraphView {
     }
 
     /// The worker's last picture of the graph, moved and scaled from the camera it was drawn at
-    /// to the canvas's, then the names on top, at the places it was drawn with.
-    /// Whether there was anything to draw.
+    /// to the canvas's, crossfading in over the one before while the fade runs, then the names on
+    /// top, at the places it was drawn with. Whether there was anything to draw.
     fn paint(&self, snapshot: &gtk::Snapshot) -> bool {
         self.ask();
         let imp = self.imp();
@@ -871,81 +989,91 @@ impl GraphView {
         if picture.generation == imp.generation.get() && imp.shown_at.get().is_none() {
             imp.shown_at.set(Some(std::time::Instant::now()));
         }
-        let (drawn, k) = (picture.camera, camera.zoom / picture.camera.zoom);
-        snapshot.append_scaled_texture(
-            &picture.texture,
-            gsk::ScalingFilter::Linear,
-            &graphene::Rect::new(
-                (camera.offset[0] - drawn.offset[0] * k) as f32,
-                (camera.offset[1] - drawn.offset[1] * k) as f32,
-                (picture.size[0] * k) as f32,
-                (picture.size[1] * k) as f32,
-            ),
-        );
-        let ink = self.color();
+        let append = |picture: &Picture| {
+            let (drawn, k) = (picture.camera, camera.zoom / picture.camera.zoom);
+            snapshot.append_scaled_texture(
+                &picture.texture,
+                gsk::ScalingFilter::Linear,
+                &graphene::Rect::new(
+                    (camera.offset[0] - drawn.offset[0] * k) as f32,
+                    (camera.offset[1] - drawn.offset[1] * k) as f32,
+                    (picture.size[0] * k) as f32,
+                    (picture.size[1] * k) as f32,
+                ),
+            );
+        };
+        let from = imp.from.borrow();
+        let fade = (from.as_ref()).map(|from| (from, imp.progress.get()));
+        let fade = fade.filter(|&(_, t)| t < 1.0);
+        match fade {
+            Some((from, t)) => {
+                snapshot.push_cross_fade(t);
+                append(from);
+                snapshot.pop();
+                append(picture);
+                snapshot.pop();
+            }
+            None => append(picture),
+        }
         let screen: Vec<[f64; 2]> = at.iter().map(|&p| camera.to_screen(p)).collect();
         let radius = |i: usize| {
             (f64::from(model::radius(graph.adjacency[i].len())) * camera.zoom)
                 .max(camera::MIN_RADIUS)
         };
-        // A node whose name may reach the canvas.
-        let pad = f64::from(model::radius(usize::MAX)) * camera.zoom + 4.0;
-        let on_screen = |p: [f64; 2]| {
-            (-pad..=size[0] + pad).contains(&p[0]) && (-pad..=size[1] + pad).contains(&p[1])
-        };
-        let lit = imp.hover.get();
-        let near: HashSet<usize> = lit
-            .map(|l| graph.adjacency[l].iter().copied().chain([l]).collect())
-            .unwrap_or_default();
-        let dimmed = |i: usize| lit.is_some() && !near.contains(&i);
-        let front = (imp.front.borrow().as_deref()).and_then(|key| graph.index_of(key));
-        let current = (imp.current.borrow().as_deref()).and_then(|key| graph.index_of(key));
-        // Every name from LABEL_ZOOM up, below it the lit node's neighbourhood's; the front's
-        // and the current node's last, over the rest.
-        let mut named: Vec<usize> = (0..screen.len())
-            .filter(|&i| on_screen(screen[i]) && Some(i) != front)
-            .filter(|i| camera.zoom >= LABEL_ZOOM || near.contains(i))
-            .collect();
-        for i in [front, current].into_iter().flatten() {
-            if on_screen(screen[i]) && !named.contains(&i) {
-                named.push(i);
+        // The node each picture shown lights, a picture of a graph since changed lighting one it
+        // may no longer hold, and its share of the canvas.
+        let lit = |p: &Picture| p.lit.filter(|&l| l < graph.nodes.len());
+        let ends = match fade {
+            Some((from, t)) if lit(from) != lit(picture) => {
+                vec![(lit(from), 1.0 - t), (lit(picture), t)]
             }
-        }
-        self.paint_labels(snapshot, &graph, &screen, &named, &radius, &dimmed, ink);
+            _ => vec![(lit(picture), 1.0)],
+        };
+        self.paint_labels(snapshot, &graph, &screen, &radius, &ends, self.color());
         snapshot.pop();
         true
     }
 
-    /// The names of the nodes `named`, right of each disc, [`LABELS_MAX`] at most.
-    #[allow(clippy::too_many_arguments)]
+    /// The names placed for each lit node of `ends`, drawn at its share, so they crossfade with
+    /// the pictures: a name placed for both at both shares together. Each sits right of its disc,
+    /// dimmed outside the lit node's neighbourhood.
     fn paint_labels(
         &self,
         snapshot: &gtk::Snapshot,
         graph: &Graph,
         screen: &[[f64; 2]],
-        named: &[usize],
         radius: &dyn Fn(usize) -> f64,
-        dimmed: &dyn Fn(usize) -> bool,
+        ends: &[(Option<usize>, f64)],
         ink: gdk::RGBA,
     ) {
-        let mut labels = self.imp().labels.borrow_mut();
-        // A whole vault panned across lays out every name in turn: kept to a few frames' worth.
-        if labels.len() > 4 * LABELS_MAX {
-            labels.clear();
+        let imp = self.imp();
+        let frame = imp.frame.get() + 1;
+        imp.frame.set(frame);
+        // Each name drawn with its alpha, and where it is in that list.
+        let mut names: Vec<(usize, pango::Layout, f32)> = Vec::new();
+        let mut slot: HashMap<usize, usize> = HashMap::new();
+        for &(lit, share) in ends {
+            let near: HashSet<usize> = lit
+                .map(|l| graph.adjacency[l].iter().copied().chain([l]).collect())
+                .unwrap_or_default();
+            for (i, layout) in self.place(graph, screen, radius, lit) {
+                let alpha = match (lit.is_some() && !near.contains(&i), graph.nodes[i].kind) {
+                    (true, _) => theme::GRAPH_DIM_ALPHA,
+                    (false, kind) if model::paint_of(kind) == Paint::Ghost => {
+                        theme::GRAPH_FAINT_ALPHA
+                    }
+                    (false, _) => ink.alpha(),
+                } * share as f32;
+                match slot.entry(i) {
+                    Entry::Occupied(at) => names[*at.get()].2 += alpha,
+                    Entry::Vacant(at) => {
+                        at.insert(names.len());
+                        names.push((i, layout, alpha));
+                    }
+                }
+            }
         }
-        for &i in named.iter().take(LABELS_MAX) {
-            let node = &graph.nodes[i];
-            let layout = labels.entry(node.key.clone()).or_insert_with(|| {
-                let layout = self.create_pango_layout(Some(model::label(node)));
-                layout.set_width(LABEL_WIDTH * pango::SCALE);
-                layout.set_ellipsize(pango::EllipsizeMode::End);
-                layout
-            });
-            let colour = match (dimmed(i), model::paint_of(node.kind)) {
-                (true, _) => theme::at(ink, theme::GRAPH_DIM_ALPHA),
-                (false, Paint::Ghost) => theme::at(ink, theme::GRAPH_FAINT_ALPHA),
-                (false, _) => ink,
-            };
+        for (i, layout, alpha) in names {
             let height = layout.pixel_size().1 as f32;
             let p = screen[i];
             snapshot.save();
@@ -953,9 +1081,117 @@ impl GraphView {
                 (p[0] + radius(i) + 3.0) as f32,
                 p[1] as f32 - height / 2.0,
             ));
-            snapshot.append_layout(layout, &colour);
+            snapshot.append_layout(&layout, &theme::at(ink, alpha));
             snapshot.restore();
         }
+        // A whole vault panned across lays out every name in turn: past a few frames' worth only
+        // the names drawn in this one are kept.
+        let mut labels = imp.labels.borrow_mut();
+        if labels.len() > LABELS_KEPT {
+            labels.retain(|_, label| label.drawn == frame);
+        }
+    }
+
+    /// The names that go on the canvas with `lit` lit, best first, each laid out: the file in
+    /// front, the node the keyboard is on and the lit node always, then the lit node's
+    /// neighbours and the rest, best-linked first, each where its box meets none placed before,
+    /// [`LABELS_MAX`] in all. A name's box is guessed before it is laid out, so one that does not
+    /// fit costs no layout.
+    fn place(
+        &self,
+        graph: &Graph,
+        screen: &[[f64; 2]],
+        radius: &dyn Fn(usize) -> f64,
+        lit: Option<usize>,
+    ) -> Vec<(usize, pango::Layout)> {
+        let imp = self.imp();
+        let index = |key: &RefCell<Option<String>>| {
+            (key.borrow().as_deref()).and_then(|k| graph.index_of(k))
+        };
+        let always = [index(&imp.front), index(&imp.current), lit];
+        let mut near = lit.map_or_else(Vec::new, |l| graph.adjacency[l].clone());
+        near.sort_by_key(|&j| std::cmp::Reverse(graph.adjacency[j].len()));
+        let by_degree = self.by_degree(graph);
+        let [char_width, line] = self.metrics();
+        let frame = imp.frame.get();
+        let mut labels = imp.labels.borrow_mut();
+        let mut taken = camera::Occupied::new(self.size(), imp.camera.get().offset);
+        let mut placed: Vec<(usize, pango::Layout)> = Vec::new();
+        let candidates = always.into_iter().flatten().chain(near);
+        for i in candidates.chain(by_degree.iter().copied()) {
+            if placed.len() == LABELS_MAX {
+                break;
+            }
+            let must = always.contains(&Some(i));
+            if must && placed.iter().any(|&(j, _)| j == i) {
+                continue;
+            }
+            let room = |[width, height]: [f64; 2]| {
+                let (x, y) = (screen[i][0] + radius(i) + 3.0, screen[i][1] - height / 2.0);
+                [x, y, x + width, y + height]
+            };
+            let fits = |b: [f64; 4]| match must {
+                true => taken.shows(b),
+                false => taken.fits(b),
+            };
+            let node = &graph.nodes[i];
+            let name = model::label(node);
+            let guess = name.chars().count() as f64 * char_width;
+            if !fits(room([guess.min(f64::from(LABEL_WIDTH)), line])) {
+                continue;
+            }
+            if !labels.contains_key(&node.key) {
+                let layout = self.create_pango_layout(Some(name));
+                layout.set_width(LABEL_WIDTH * pango::SCALE);
+                layout.set_ellipsize(pango::EllipsizeMode::End);
+                labels.insert(node.key.clone(), Label { layout, drawn: 0 });
+            }
+            let Some(label) = labels.get_mut(&node.key) else {
+                continue;
+            };
+            let (width, height) = label.layout.pixel_size();
+            let b = room([f64::from(width), f64::from(height)]);
+            if !fits(b) {
+                continue;
+            }
+            label.drawn = frame;
+            taken.take(b);
+            placed.push((i, label.layout.clone()));
+        }
+        placed
+    }
+
+    /// The nodes best-linked first, the lower index first where two have as many links, sorted
+    /// once a generation.
+    fn by_degree(&self, graph: &Graph) -> std::cell::Ref<'_, Vec<usize>> {
+        let imp = self.imp();
+        let generation = imp.generation.get();
+        let stale = {
+            let (of, order) = &*imp.by_degree.borrow();
+            *of != generation || order.len() != graph.nodes.len()
+        };
+        if stale {
+            let mut order: Vec<usize> = (0..graph.nodes.len()).collect();
+            order.sort_by_key(|&i| std::cmp::Reverse(graph.adjacency[i].len()));
+            imp.by_degree.replace((generation, order));
+        }
+        std::cell::Ref::map(imp.by_degree.borrow(), |(_, order)| order)
+    }
+
+    /// A character's width and a line's height in the names' font, in pixels, which guess a
+    /// name's box before it is laid out.
+    fn metrics(&self) -> [f64; 2] {
+        if let Some(metrics) = self.imp().metrics.get() {
+            return metrics;
+        }
+        let font = self.pango_context().metrics(None, None);
+        let metrics = [
+            font.approximate_char_width(),
+            font.ascent() + font.descent(),
+        ]
+        .map(|v| f64::from(v) / f64::from(pango::SCALE));
+        self.imp().metrics.set(Some(metrics));
+        metrics
     }
 }
 

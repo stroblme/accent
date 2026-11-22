@@ -69,8 +69,9 @@ pub struct Picture {
     pub texture: gdk::MemoryTexture,
     pub camera: Camera,
     pub size: [f64; 2],
-    /// The view's serial.
+    /// The view's serial, and the node it lit.
     pub serial: u64,
+    pub lit: Option<usize>,
     /// How long it took to draw, in ms, and the generation drawn, for the drill.
     #[cfg(feature = "bench")]
     pub ms: f64,
@@ -406,6 +407,7 @@ fn picture(scene: &Scene, view: &View, camera: Camera, serial: u64) -> Option<Pi
         camera,
         size: view.size,
         serial,
+        lit: view.lit,
         #[cfg(feature = "bench")]
         ms: 0.0,
         #[cfg(feature = "bench")]
