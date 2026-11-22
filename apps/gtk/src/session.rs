@@ -937,6 +937,7 @@ impl App {
             pinned: session.pinned.clone(),
             taken: RefCell::new(taken.iter().map(Rc::downgrade).collect()),
             selecting: Cell::new(false),
+            then: RefCell::default(),
         });
         // Weak: the work waiting on each tab holds it, so it goes once the last one has settled.
         *self.restore.borrow_mut() = Rc::downgrade(&restore);
@@ -1148,6 +1149,16 @@ impl App {
         }
     }
 
+    /// Run `then` once the restore under way has put the session's tabs back; `false` with none
+    /// under way, when it is not kept.
+    pub(crate) fn after_restore(&self, then: impl FnOnce() + 'static) -> bool {
+        let Some(restore) = self.restore.borrow().upgrade() else {
+            return false;
+        };
+        restore.then.borrow_mut().push(Box::new(then));
+        true
+    }
+
     /// Whether current selections come from restoration rather than user navigation.
     /// Selection notifications are shared, so history and [`App::reader_in`] use this guard.
     pub(crate) fn restoring(&self) -> bool {
@@ -1207,6 +1218,17 @@ pub struct Restore {
     taken: RefCell<Vec<std::rc::Weak<Pane>>>,
     /// Set while `put_back` selects, so the notify that fires is not taken for the reader's.
     selecting: Cell<bool>,
+    /// What waits for the tabs to be back, run once the restore is over ([`App::after_restore`]).
+    then: RefCell<Vec<Box<dyn FnOnce()>>>,
+}
+
+impl Drop for Restore {
+    fn drop(&mut self) {
+        // From an idle, since the last tab's work lets go of it with `awaiting` borrowed (Asked).
+        for then in self.then.take() {
+            glib::idle_add_local_once(then);
+        }
+    }
 }
 
 /// Track a pending restored tab and rerun pane restoration if opening fails.

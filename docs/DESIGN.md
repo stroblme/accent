@@ -1737,6 +1737,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   With animations off nothing crossfades, and the lit node still stays lit for those 150 ms.
   While the pointer lights no node, the file in front is lit the same way but milder, the rest dimmed to 60 %, so the graph shows where the note being read sits, and the pointer takes over at once and hands back to it with the same crossfade (user decision 2026-11-22).
   When the file in front changes to a node off the canvas, as a tab picked in another pane makes it, a graph the reader has moved eases over to put that node in the middle, at once with animations off, while a fitted graph stays as it is.
+  It does the same when the canvas narrows from under that node, as the pane a click splits off makes it, but not for a node the reader had moved off the canvas already.
 - Names are placed best first, the file in front, the node the keyboard is on and the lit node always, then the names already shown, so they stay while the nodes move, then the lit node's neighbours and then the rest by how many links each has (user decisions 2026-11-22).
   The pointer's light puts its node's neighbours ahead of the names already shown, so they show as soon as it lights them.
   A name whose box meets one already placed is left out, so how many show follows the zoom, and a pan alone changes none of them.
@@ -1755,7 +1756,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Behind another tab it waits, and catches up once it is shown again.
 - Its menu, a right-click anywhere on the canvas or the button in its top right corner, holds Show Whole Vault, Show Unresolved Links, Show Tags, Show Images and Show Orphans as checks, then Reset Graph, each a palette command too (Keyboard, Graph).
   The button is a disc as opaque as the ring's (PDF), and its popover holds Spread above Reset Graph (user decision 2026-11-22).
-  What it shows and its spread are kept in the vault's session, and a restored graph comes back around the file in front.
+  What it shows and its spread are kept in the vault's session, and a restored graph comes back around the file in front once the session's tabs are back.
 - Like a shell or a comparison it is no file, so it has no backlinks, stays in its window and is no recent file.
 - The status bar names it Graph and counts it, "42 files · 57 links".
 

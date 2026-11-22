@@ -5,30 +5,31 @@ use super::*;
 use crate::graph::GraphTab;
 
 /// `ACCENT_BENCH_GRAPH=check:<rel>` opens `rel`, then Show Graph, and prints the nodes, a ghost's
-/// key ending in `?`, and the links once laid out (`open`). It presses two of them in turn, each
-/// opening beside the graph as the other pane's preview, and prints where each opened and where the
-/// keyboard is (`click`), and the roots and nodes the graph grew to (`grow`). It writes a link to
-/// `d.md` into `c.md` and prints the node that adds and whether every node kept its index
-/// (`update`), then renames `b.md` and prints whether its node kept its index and the ghost the
-/// link to its old name leaves (`rename`). Through the menu's commands it shows tags and images and
-/// prints the nodes each adds (`tags`, `images`), then toggles tags four times in a row and prints
-/// how many questions went to the vault and whether the graph ended as it began (`toggles`); a
-/// press on the ghost prints the name New File offers (`ghost`); it shows the whole vault without
-/// its orphans and then with them (`all`, `orphans`), and prints Reset Graph's roots (`reset`).
-/// Behind another tab of its pane it has `e.md` link its root and prints how many questions went
-/// while it was hidden and once it was shown again, and the node that added (`hidden`). It types
-/// `c.md` over the canvas with real keys (XTEST), the first of which opens the pane's find bar,
-/// and prints what the bar's query holds, the node the keyboard went to and the bar's readout
-/// (`find`), and where the keyboard is once the bar is closed (`find closed`); it presses the four
-/// arrows and prints whether the keyboard moved (`arrows`), then Enter on `c.md` and prints whether
-/// it opened (`enter`).
-/// Then it saves the session and quits. `restored` prints whether the graph came back with the
-/// session, the file it is around (`session`) and what its menu shows (`saved`); opens `lone.md`,
-/// which it does not hold, and with animations off shows the graph again, printing what it started
-/// again around and whether it showed no places between where the nodes were placed and the settled
-/// layout (`still`); then closes it and prints whether the layout's threads ended with it
-/// (`closed`). `drill_graph` writes the notes into a scratch vault. `time` is described at
-/// [`time`].
+/// key ending in `?`, and the links once laid out (`open`). It clicks `b.md` with the pointer,
+/// which splits the window, and narrows the canvas from under it ([`split`]), then presses two
+/// nodes in turn, each opening beside the graph as the other pane's preview, and prints where each
+/// opened and where the keyboard is (`click`), and the roots and nodes the graph grew to (`grow`).
+/// It writes a link to `d.md` into `c.md` and prints the node that adds and whether every node kept
+/// its index (`update`), then renames `b.md` and prints whether its node kept its index and the
+/// ghost the link to its old name leaves (`rename`). Through the menu's commands it shows tags and
+/// images and prints the nodes each adds (`tags`, `images`), then toggles tags four times in a row
+/// and prints how many questions went to the vault and whether the graph ended as it began
+/// (`toggles`); a press on the ghost prints the name New File offers (`ghost`); it shows the whole
+/// vault without its orphans and then with them (`all`, `orphans`), and prints Reset Graph's roots
+/// (`reset`). Behind another tab of its pane it has `e.md` link its root and prints how many
+/// questions went while it was hidden and once it was shown again, and the node that added
+/// (`hidden`). It types `c.md` over the canvas with real keys (XTEST), the first of which opens the
+/// pane's find bar, and prints what the bar's query holds, the node the keyboard went to and the
+/// bar's readout (`find`), and where the keyboard is once the bar is closed (`find closed`); it
+/// presses the four arrows and prints whether the keyboard moved (`arrows`), then Enter on `a.md`
+/// and prints whether it opened (`enter`).
+/// Then it leaves the keyboard on `a.md`, the graph alone in its pane, saves the session and quits.
+/// `restored` prints whether the graph came back with the session, the file it is around
+/// (`session`) and what its menu shows (`saved`); opens `lone.md`, which it does not hold, and with
+/// animations off shows the graph again, printing what it started again around and whether it
+/// showed no places between where the nodes were placed and the settled layout (`still`); then
+/// closes it and prints whether the layout's threads ended with it (`closed`). `drill_graph` writes
+/// the notes into a scratch vault. `time` is described at [`time`].
 pub(super) fn bench_graph(app: &Rc<App>, arg: &str) {
     let app = app.clone();
     let arg = arg.to_string();
@@ -62,6 +63,7 @@ async fn check(app: &Rc<App>, rel: &str) {
         graph.nodes(),
         graph.links()
     );
+    split(app, &graph).await;
     for key in ["c.md", "b.md"] {
         graph.press(key, false);
         if until("graph", key, 10_000, || app.tab_for(key).is_some())
@@ -250,26 +252,89 @@ async fn check(app: &Rc<App>, rel: &str) {
         moved |= graph.current() != from;
     }
     println!("bench graph arrows moved={moved}");
-    // Enter on `c.md` wherever the arrows ended: `a.md`, opened from the graph, would move to the
-    // other pane and leave the graph alone in its own, which a restored session seeds before its
-    // files are back (NOTEPAD, BUG).
-    graph.find("c.md", accent_core::search::Options::default());
-    graph.find_clear();
-    let current = graph.current().unwrap_or_default();
-    graph.press_key(gdk::Key::Return);
-    let shown = || {
-        (app.panes.borrow().iter())
-            .any(|pane| app.doc_of(pane).is_some_and(|doc| doc.key() == current))
-    };
-    let opened = until("graph", "enter", 10_000, shown).await.is_some();
-    println!("bench graph enter opened_current={opened}");
-    // Where the arrows ended depends on the layout's shape: the session is left on one file.
-    app.open_path("c.md");
-    until("graph", "c.md", 10_000, || {
-        app.active_key().as_deref() == Some("c.md")
+    // Enter on `e.md`, which adds `a.md` beside it, then on `a.md`, which moves it from behind the
+    // graph to the other pane and leaves the graph alone in its own: restored, it waits there for
+    // the files to be back before it starts round the one in front.
+    for key in ["e.md", "a.md"] {
+        graph.find(key, accent_core::search::Options::default());
+        graph.find_clear();
+        graph.press_key(gdk::Key::Return);
+        let shown = || {
+            (app.panes.borrow().iter())
+                .any(|pane| app.doc_of(pane).is_some_and(|doc| doc.key() == key))
+        };
+        until("graph", key, 10_000, || shown() && graph.landed()).await;
+    }
+    let pane = app.tab_for("a.md").and_then(|tab| app.pane_of(&tab.page));
+    let alone = app
+        .pane_of(&graph.page)
+        .is_some_and(|p| p.tabs.n_pages() == 1);
+    println!(
+        "bench graph enter a.md moved={} alone={alone}",
+        pane.as_ref()
+            .is_some_and(|p| app.pane_of(&graph.page).is_none_or(|g| !Rc::ptr_eq(p, &g)))
+    );
+    // The session is left on `a.md`.
+    if let Some(pane) = pane {
+        app.focus_document(&pane);
+    }
+    until("graph", "a.md", 10_000, || {
+        app.active_key().as_deref() == Some("a.md")
     })
     .await;
     app.save_session();
+}
+
+/// A real click on `b.md` in a window of one pane, which splits it, on a graph the reader moved,
+/// with the node where the narrower canvas leaves it off: once the split is laid out the canvas
+/// has eased over to the node, the file in front now (`split`). Then, the pointer resting on the
+/// node at the canvas's right edge, the divider moves left from under it, which GTK tells the
+/// canvas nothing of: once laid out the node is lit no more (`narrowed`).
+async fn split(app: &Rc<App>, graph: &GraphTab) {
+    let canvas = graph.key_target();
+    let (w, h) = (f64::from(canvas.width()), f64::from(canvas.height()));
+    let point = |x: f64, y: f64| {
+        let at = gtk::graphene::Point::new(x as f32, y as f32);
+        let at = canvas.compute_point(&app.window, &at).unwrap_or(at);
+        let (dx, dy) = app.window.surface_transform();
+        format!(
+            "{:.0} {:.0}",
+            f64::from(at.x()) + dx,
+            f64::from(at.y()) + dy
+        )
+    };
+    graph.put("b.md", [0.8 * w, 0.5 * h]);
+    let at = point(0.8 * w, 0.5 * h);
+    super::git::xtest_now(&format!("move {at}; down; up")).await;
+    until("graph", "b.md", 10_000, || app.tab_for("b.md").is_some()).await;
+    until("graph", "split", 5_000, || {
+        graph.front_shown() && !graph.easing()
+    })
+    .await;
+    println!(
+        "bench graph split b.md front={} shown={} panes={}",
+        graph.front().unwrap_or_default(),
+        graph.front_shown(),
+        app.panes.borrow().len()
+    );
+    let paned = graph.page.child().ancestor(gtk::Paned::static_type());
+    let Some(paned) = paned.and_downcast::<gtk::Paned>() else {
+        return println!("bench graph narrowed no_split");
+    };
+    let (w, h) = (f64::from(canvas.width()), f64::from(canvas.height()));
+    graph.put("b.md", [w - 40.0, 0.5 * h]);
+    super::git::xtest_now(&format!("move {}", point(w - 40.0, 0.5 * h))).await;
+    let lit = until("graph", "lit", 5_000, || graph.lit()).await;
+    paned.set_position(paned.position() - 120);
+    until("graph", "narrowed", 5_000, || {
+        graph.lit().is_none() && f64::from(canvas.width()) < w
+    })
+    .await;
+    println!(
+        "bench graph narrowed lit_before={} lit={}",
+        lit.as_deref().unwrap_or("none"),
+        graph.lit().as_deref().unwrap_or("none")
+    );
 }
 
 /// Where the keyboard is: on the graph, elsewhere, or nowhere.

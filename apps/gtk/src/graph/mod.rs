@@ -480,6 +480,26 @@ impl GraphTab {
         }
     }
 
+    /// The node lit, by key.
+    pub fn lit(&self) -> Option<String> {
+        self.view.lit()
+    }
+
+    /// Pan so `key`'s node sits at canvas point `at`.
+    pub fn put(&self, key: &str, at: [f64; 2]) {
+        self.view.put(key, at);
+    }
+
+    /// Whether the canvas is easing over to a place.
+    pub fn easing(&self) -> bool {
+        self.view.easing()
+    }
+
+    /// Whether the front's node is on the canvas.
+    pub fn front_shown(&self) -> bool {
+        self.view.front_shown()
+    }
+
     /// Whether it shows the vault's last answer.
     pub fn landed(&self) -> bool {
         loading::shown(&self.holder) && self.answered.get() == self.asked.get()
@@ -727,10 +747,11 @@ impl App {
         graph
     }
 
-    /// The graph came on screen for the first time: seeded with the file in front. Again, it
-    /// asks what changed in the vault while it was hidden.
+    /// The graph came on screen for the first time: seeded with the file in front, once a
+    /// restore under way has put the session's tabs back, that file among them. Again, it asks
+    /// what changed in the vault while it was hidden.
     fn start_graph(self: &Rc<Self>, graph: &Rc<GraphTab>) {
-        if graph.started.replace(true) {
+        if graph.started.get() {
             let stale = std::mem::take(&mut graph.asking.borrow_mut().stale);
             if stale {
                 graph.describe();
@@ -738,6 +759,18 @@ impl App {
             }
             return;
         }
+        let (app, weak) = (Rc::downgrade(self), Rc::downgrade(graph));
+        let restored = move || {
+            if let (Some(app), Some(graph)) = (app.upgrade(), weak.upgrade())
+                && graph.holder.is_mapped()
+            {
+                app.start_graph(&graph);
+            }
+        };
+        if self.after_restore(restored) {
+            return;
+        }
+        graph.started.set(true);
         let front = self.graph_front().map(|(_, key)| key);
         graph.view.set_front(front.clone());
         graph.view.graph_mut().roots = front.into_iter().collect();

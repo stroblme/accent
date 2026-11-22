@@ -1,10 +1,12 @@
 bench graph open front=a.md nodes=["a.md", "b.md", "c.md", "e.md", "gone.md?"] links=5
+bench graph split b.md front=b.md shown=true panes=2
+bench graph narrowed lit_before=b.md lit=none
 bench graph click c.md opened=c.md pane=2 preview=true keyboard=graph tabs=1
-bench graph grow c.md roots=["a.md", "c.md"] nodes=["a.md", "b.md", "c.md", "e.md", "f.md", "gone.md?"] front=c.md
+bench graph grow c.md roots=["a.md", "b.md", "c.md"] nodes=["a.md", "b.md", "c.md", "e.md", "f.md", "gone.md?"] front=c.md
 bench graph click b.md opened=b.md pane=2 preview=true keyboard=graph tabs=1
-bench graph grow b.md roots=["a.md", "c.md", "b.md"] nodes=["a.md", "b.md", "c.md", "e.md", "f.md", "gone.md?"] front=b.md
+bench graph grow b.md roots=["a.md", "b.md", "c.md"] nodes=["a.md", "b.md", "c.md", "e.md", "f.md", "gone.md?"] front=b.md
 bench graph update c.md nodes+=["d.md"] kept=true
-bench graph rename b.md bee.md index_kept=true roots=["a.md", "c.md", "bee.md"] nodes+=["b.md?", "bee.md"]
+bench graph rename b.md bee.md index_kept=true roots=["a.md", "bee.md", "c.md"] nodes+=["b.md?", "bee.md"]
 bench graph tags nodes+=["#topic"]
 bench graph images nodes+=["pic.png"]
 bench graph toggles queries=2 same=true
@@ -16,8 +18,8 @@ bench graph hidden queries=0 shown_again=1 nodes+=["e.md"]
 bench graph find typed="c.md" current=c.md readout="1 of 1"
 bench graph find closed keyboard=graph current=c.md
 bench graph arrows moved=true
-bench graph enter opened_current=true
-bench graph session restored=true front=c.md
+bench graph enter a.md moved=true alone=true
+bench graph session restored=true front=a.md
 bench graph saved all=false unresolved=true tags=true images=true orphans=true
 bench graph still roots=["lone.md"] nodes=["lone.md"] settled_at_once=true
 bench graph closed worker_ended=true

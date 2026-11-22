@@ -146,6 +146,9 @@ mod imp {
         pub open: RefCell<Option<Rc<Open>>>,
         pub typed: RefCell<Option<Rc<Typed>>>,
         pub zoomed: RefCell<Option<Rc<dyn Fn()>>>,
+        /// The canvas's size as last looked at, and whether a new one waits to be.
+        pub size: Cell<[f64; 2]>,
+        pub resizing: Cell<bool>,
         /// How many of the layout's frames have landed since the last change, for the drill.
         #[cfg(feature = "bench")]
         pub frames: Cell<usize>,
@@ -180,6 +183,11 @@ mod imp {
                     .borrow_mut()
                     .push(t.elapsed().as_secs_f64() * 1000.0);
             }
+        }
+
+        fn size_allocate(&self, width: i32, height: i32, baseline: i32) {
+            self.parent_size_allocate(width, height, baseline);
+            self.obj().resized();
         }
     }
 }
@@ -469,24 +477,34 @@ impl GraphView {
         }
     }
 
-    /// Draw the file keyed `key` in the accent, or none.
-    /// A graph the reader moved eases over to put the file's node in the middle when it is off
-    /// the canvas, at once with animations off, and a fitted one stays as it is (user decision
-    /// 2026-11-22).
+    /// Draw the file keyed `key` in the accent, or none, and follow it there.
     pub fn set_front(&self, key: Option<String>) {
         let imp = self.imp();
         if *imp.front.borrow() == key {
             return;
         }
-        let at = (key.as_deref()).and_then(|key| self.graph().index_of(key));
-        let at = at.and_then(|i| imp.at.borrow().get(i).copied());
         imp.front.replace(key);
         self.queue_draw();
+        self.follow_front();
+    }
+
+    /// Where the file in front is, in the layout's units, once the layout has placed it.
+    fn front_at(&self) -> Option<[f32; 2]> {
+        let imp = self.imp();
+        let i = (imp.front.borrow().as_deref()).and_then(|key| self.graph().index_of(key))?;
+        let at = imp.at.borrow().get(i).copied();
+        at.filter(|_| imp.placed.get())
+    }
+
+    /// A graph the reader moved eases over to put the file in front in the middle where it is off
+    /// the canvas, at once with animations off, and a fitted one stays as it is (user decision
+    /// 2026-11-22).
+    fn follow_front(&self) {
+        let imp = self.imp();
         let wheel = imp.wheel.borrow().clone();
-        if let (Some(p), Some(wheel)) = (at, wheel)
-            && imp.placed.get()
+        if let (Some(p), Some(wheel)) = (self.front_at(), wheel)
             && !self.camera().fitting
-            && !self.shows(p)
+            && !self.shows(p, self.size())
         {
             let mut camera = self.camera();
             camera.centre(p, self.size());
@@ -495,11 +513,59 @@ impl GraphView {
         }
     }
 
-    /// Whether world point `p` is on the canvas, [`camera::MARGIN`] inside its edges.
-    fn shows(&self, p: [f32; 2]) -> bool {
-        let (size, s) = (self.size(), self.camera().to_screen(p));
+    /// Whether world point `p` is on a canvas of `size`, [`camera::MARGIN`] inside its edges.
+    fn shows(&self, p: [f32; 2], size: [f64; 2]) -> bool {
+        let s = self.camera().to_screen(p);
         let inside = |v: f64, max: f64| (camera::MARGIN..=max - camera::MARGIN).contains(&v);
         inside(s[0], size[0]) && inside(s[1], size[1])
+    }
+
+    /// The canvas has a new size, looked at once allocation is done. GTK says the pointer left a
+    /// widget only as the pointer moves or the widget leaves the screen, so a node lit as the
+    /// canvas shrinks from under the pointer goes dark here, and the file in front that a
+    /// narrower canvas leaves off it is followed, as a change of the file in front is. A shorter
+    /// one is not, which the find bar sliding in makes it while its match is brought to the
+    /// middle.
+    fn resized(&self) {
+        let imp = self.imp();
+        if imp.size.get() == self.size() || imp.resizing.replace(true) {
+            return;
+        }
+        let view = self.downgrade();
+        glib::idle_add_local_once(move || {
+            let Some(view) = view.upgrade() else {
+                return;
+            };
+            let imp = view.imp();
+            imp.resizing.set(false);
+            let was = imp.size.replace(view.size());
+            if imp.under.get().is_some() && !view.has_pointer() {
+                view.hover(None);
+            }
+            let narrower = view.size()[0] < was[0];
+            if narrower && view.front_at().is_some_and(|p| view.shows(p, was)) {
+                view.follow_front();
+            }
+        });
+    }
+
+    /// Whether the pointer is over the canvas now, asked of the window's surface.
+    fn has_pointer(&self) -> bool {
+        let Some(native) = self.native() else {
+            return false;
+        };
+        let pointer = self
+            .display()
+            .default_seat()
+            .and_then(|seat| seat.pointer());
+        let at =
+            (native.surface().zip(pointer)).and_then(|(surface, p)| surface.device_position(&p));
+        let Some((x, y, _)) = at else {
+            return false;
+        };
+        let (dx, dy) = native.surface_transform();
+        let at = graphene::Point::new((x - dx) as f32, (y - dy) as f32);
+        (native.compute_point(self, &at)).is_some_and(|p| self.contains(p.x().into(), p.y().into()))
     }
 
     /// A file or a folder moved: its nodes keep their places under the new keys.
@@ -545,7 +611,7 @@ impl GraphView {
         let Some(p) = imp.at.borrow().get(i).copied() else {
             return;
         };
-        if centre || !self.shows(p) {
+        if centre || !self.shows(p, self.size()) {
             let mut camera = self.camera();
             camera.centre(p, self.size());
             camera.fitting = false;
@@ -1378,6 +1444,37 @@ impl GraphView {
 
     pub fn front(&self) -> Option<String> {
         self.imp().front.borrow().clone()
+    }
+
+    /// The node lit, by key.
+    pub fn lit(&self) -> Option<String> {
+        let i = self.imp().hover.get()?;
+        self.graph().nodes.get(i).map(|node| node.key.clone())
+    }
+
+    /// Pan so `key`'s node sits at canvas point `at`, as a drag of the background does.
+    pub fn put(&self, key: &str, at: [f64; 2]) {
+        let i = self.graph().index_of(key);
+        let Some(p) = i.and_then(|i| self.imp().at.borrow().get(i).copied()) else {
+            return;
+        };
+        let mut camera = self.camera();
+        let s = camera.to_screen(p);
+        camera.pan([at[0] - s[0], at[1] - s[1]]);
+        self.set_camera(camera);
+    }
+
+    /// Whether the canvas is easing over, as a wheel notch or the file in front has it.
+    pub fn easing(&self) -> bool {
+        let wheel = self.imp().wheel.borrow();
+        wheel
+            .as_ref()
+            .is_some_and(|w| w.state() == adw::AnimationState::Playing)
+    }
+
+    /// Whether the front's node is on the canvas, as [`GraphView::shows`] has it.
+    pub fn front_shown(&self) -> bool {
+        self.front_at().is_some_and(|p| self.shows(p, self.size()))
     }
 }
 
