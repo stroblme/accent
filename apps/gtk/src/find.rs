@@ -156,6 +156,23 @@ fn hide_once_closed(bar: &gtk::SearchBar) {
     ));
 }
 
+/// Hand the key `keys` holds to the widget with the keyboard where that is not on screen yet, to
+/// which GTK sends no key: the bar's box as the bar slides in, whose revealer shows it only from
+/// its first frame on, so a key typed a moment after the one that opened the bar is not lost.
+fn to_unmapped_focus(keys: &gtk::EventControllerKey) -> glib::Propagation {
+    let focus = keys
+        .widget()
+        .and_then(|w| w.root())
+        .and_then(|root| root.focus());
+    match focus.filter(|focus| !focus.is_mapped()) {
+        Some(focus) => {
+            keys.forward(&focus);
+            glib::Propagation::Stop
+        }
+        None => glib::Propagation::Proceed,
+    }
+}
+
 impl Bar {
     pub fn new() -> Rc<Bar> {
         let query = gtk::SearchEntry::builder()
@@ -356,7 +373,8 @@ impl Bar {
         // because `GtkSearchEntry` binds Escape to `stop-search` and would eat it first — so
         // Escape always closes the bar rather than first clearing the query, which is what the
         // key is for here. The window carries the other half, for an Escape pressed with the
-        // focus back in the document (`main.rs`).
+        // focus back in the document (`main.rs`). Any other key goes on to the box with the
+        // keyboard while that is not on screen yet ([`to_unmapped_focus`]).
         let keys = gtk::EventControllerKey::new();
         keys.set_propagation_phase(gtk::PropagationPhase::Capture);
         keys.connect_key_pressed(glib::clone!(
@@ -364,12 +382,12 @@ impl Bar {
             this,
             #[upgrade_or]
             glib::Propagation::Proceed,
-            move |_, key, _, _| match key {
+            move |keys, key, _, _| match key {
                 gdk::Key::Escape => {
                     bar.close();
                     glib::Propagation::Stop
                 }
-                _ => glib::Propagation::Proceed,
+                _ => to_unmapped_focus(keys),
             }
         ));
         this.bar.add_controller(keys);

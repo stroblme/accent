@@ -209,15 +209,14 @@ async fn check(app: &Rc<App>, rel: &str) {
         "bench graph hidden queries={hidden} shown_again={} nodes+={added:?}",
         graph.questions() - asked - hidden
     );
-    // Typed with real keys over the canvas: the first key opens the bar and lands in its query,
-    // and the rest follow once it is up, since a key typed 30 ms after the first is lost now and
-    // then (NOTEPAD, BUG).
+    // Typed with real keys over the canvas, 30 ms apart: the first key opens the bar and lands in
+    // its query, and the next comes while the bar is still sliding in.
     let canvas = graph.key_target();
     canvas.grab_focus();
     let at = gtk::graphene::Point::new(canvas.width() as f32 / 2.0, 8.0);
     let at = canvas.compute_point(&app.window, &at).unwrap_or(at);
     let keys = format!(
-        "move {:.0} {:.0}; focus; type c; sleep 0.3; key period; type md",
+        "move {:.0} {:.0}; focus; type c; key period; type md",
         at.x(),
         at.y()
     );
