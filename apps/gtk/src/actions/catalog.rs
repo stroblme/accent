@@ -460,6 +460,7 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.debug-watch", "Add to Watch", &[]),
     // VS Code's F5 is Presentation Mode's outside a session here.
     ("win.debug-start", "Start Debugging", &["<Primary>F5"]),
+    ("win.debug-run", "Run Without Debugging", &[]),
     // Enabled as the session's state allows (`App::sync_debug`), so the Code pane's strip greys
     // what cannot be done now and the palette's entries do nothing. VS Code's keys, heard only
     // while a session runs ([`SESSION`]).

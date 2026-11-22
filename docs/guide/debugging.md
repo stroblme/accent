@@ -29,10 +29,16 @@ Use `F5` to continue, `F6` to pause, and `F10`, `F11`, or `Shift+F11` to step ov
 Press `Shift+F5` to stop or `Ctrl+Shift+F5` to restart.
 The same controls are in the Code pane and the [command palette](keyboard.md).
 
-Open **Debug Console** from the Code pane to see adapter messages and evaluate Python expressions.
+While a session runs, open **Debug Console** from the Code pane to see adapter messages and evaluate Python expressions.
 Expressions run in the selected stack frame while the program is paused.
 Your program's own input and output stay in its terminal tab.
 
 To debug a notebook's cells, see [Notebooks](notebooks.md#debug-a-cell).
 On a [remote vault](remote.md), install `debugpy` on the host so the program runs there.
 The Flatpak cannot debug a Python file in a local vault yet, though remote debugging and notebook cells work.
+
+## Run without debugging
+
+Press **Play** beside **Debug** in the Code pane, or choose **Run Without Debugging** from the command palette, to run the Python file in front without the debugger.
+It uses the same interpreter and terminal tab as a debug session, so the program runs past its breakpoints, on the host for a remote vault.
+Like debugging, it does not run a local vault's file in the Flatpak yet.

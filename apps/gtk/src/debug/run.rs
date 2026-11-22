@@ -75,6 +75,62 @@ impl App {
         }
     }
 
+    /// Run Without Debugging: the Code pane's Python file in the program's terminal, in the
+    /// interpreter and the folder a session would run it in, the vault's tabs with edits written
+    /// first as Start Debugging writes them. No session starts, so the console stays as it was.
+    pub(crate) fn run_without_debugging(self: &Rc<Self>) {
+        // As debugging a local vault there: the sandbox has neither the vault's interpreter nor
+        // the host's.
+        let remote = self.vault().is_some_and(|v| v.is_remote());
+        if !remote && Path::new("/.flatpak-info").exists() {
+            return self.debug_cannot(
+                "run the program",
+                "the Flatpak cannot run a local vault's program yet",
+            );
+        }
+        // Its terminal would take the debugged program's place, and end it.
+        if self.debugger.running() {
+            return self.debug_cannot("run the program", "a program is being debugged");
+        }
+        let (Some(vault), Some((program, _))) = (self.vault().cloned(), self.code_program()) else {
+            return self.debug_cannot("run the program", "no Python file is in front");
+        };
+        self.save_vault_tabs();
+        let asked = vault.debug_command(&program);
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let Some(app) = weak.upgrade() else {
+                return;
+            };
+            match asked.await {
+                Ok(command) => {
+                    let weak = Rc::downgrade(&app);
+                    app.put_program(terminal::Program {
+                        args: command.args,
+                        cwd: command.cwd,
+                        env: Vec::new(),
+                        title: doc::file_name(&program).to_string(),
+                        link: app
+                            .vault()
+                            .and_then(|v| v.remote())
+                            .map(|r| r.url().clone()),
+                        started: Box::new(move |started| {
+                            if let (Err(why), Some(app)) = (started, weak.upgrade()) {
+                                app.debug_cannot("run the program", why);
+                            }
+                        }),
+                    });
+                }
+                Err(e) => app.debug_cannot("run the program", e),
+            }
+        });
+    }
+
+    /// Whether Run Without Debugging has the Code pane's Python file to run, and no session runs.
+    pub(crate) fn can_run(&self) -> bool {
+        !self.debugger.running() && self.code_program().is_some()
+    }
+
     /// Whether Start Debugging has a program to run, the Code pane's or the last one, and no
     /// session runs.
     pub(crate) fn can_debug(&self) -> bool {
@@ -105,11 +161,7 @@ impl App {
         let Some(vault) = self.vault().cloned() else {
             return;
         };
-        for tab in self.open_tabs() {
-            if !doc::is_loose_key(&tab.rel()) {
-                self.save_tab_now(&tab);
-            }
-        }
+        self.save_vault_tabs();
         let id = self.debugger.next.get() + 1;
         self.debugger.next.set(id);
         let launch = Launch {
@@ -161,6 +213,15 @@ impl App {
                 }
             }
         });
+    }
+
+    /// Write every vault tab with edits: the program runs what is on disk.
+    fn save_vault_tabs(self: &Rc<Self>) {
+        for tab in self.open_tabs() {
+            if !doc::is_loose_key(&tab.rel()) {
+                self.save_tab_now(&tab);
+            }
+        }
     }
 
     /// Stop Debugging: the program and its adapter end, and the session with them.
@@ -742,15 +803,12 @@ impl App {
         sidebar.set_debug_state(line, paused);
     }
 
-    /// The debugged program's tab, while it is open.
+    /// The program's tab, debugged or run without its debugger, while it is open.
     pub(crate) fn program_tab(&self) -> Option<Rc<terminal::Term>> {
         self.terminals().into_iter().find(|term| term.is_program())
     }
 
-    /// The program's terminal, as the adapter asked: where the last session's was, in its place;
-    /// else behind the tab in front of the active pane, or in a pane split off it, as Preferences
-    /// says (`debug_terminal`). The keyboard and the active pane stay where they were, and with
-    /// them the Code pane over the file being debugged.
+    /// The program's terminal, as the adapter asked ([`put_program`](Self::put_program)).
     fn open_program(
         self: &Rc<Self>,
         run: &Run,
@@ -760,7 +818,7 @@ impl App {
         env: Vec<(String, String)>,
     ) {
         let (weak, id) = (Rc::downgrade(self), run.id);
-        let program = terminal::Program {
+        self.put_program(terminal::Program {
             args,
             cwd,
             env,
@@ -783,7 +841,14 @@ impl App {
                     Err(_) => {}
                 }
             }),
-        };
+        });
+    }
+
+    /// A program's terminal, debugged or run without its debugger: where the last one's was, in
+    /// its place; else behind the tab in front of the active pane, or in a pane split off it, as
+    /// Preferences says (`debug_terminal`). The keyboard and the active pane stay where they
+    /// were, and with them the Code pane over the program's file.
+    fn put_program(self: &Rc<Self>, program: terminal::Program) {
         let old = self.program_tab();
         let place = old.as_ref().and_then(|old| {
             let pane = self.pane_of(&old.page)?;

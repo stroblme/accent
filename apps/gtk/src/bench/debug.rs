@@ -41,7 +41,9 @@ const LOGGED: (u32, &str, &str) = (5, "Log Message", "total is {total}");
 /// and called, [`HOLDS`] atop Variables and opened, the hover's value of the first name after the
 /// line's `=`, the line a step over lands on, the session's exit code, the program's output in
 /// its tab, the logpoint's in the Debug Console, that tab kept, and the Code pane shown with the
-/// program's file in front and behind its tab. Timings go on `bench debug_ms …` lines; a step
+/// program's file in front and behind its tab; the strip's slot holding the Debug Console during
+/// the session and Run Without Debugging after it, which runs the program past its breakpoints in
+/// the debugged one's tab, no session starting. Timings go on `bench debug_ms …` lines; a step
 /// that never comes prints `bench debug timeout <what>` and quits. Under
 /// `ACCENT_BENCH_SHOTS=<dir>` it saves the window as `debug-inline.png` there once the inline
 /// values are painted.
@@ -104,6 +106,7 @@ pub(super) fn bench_debug(app: &Rc<App>, arg: &str) {
         }
         let front = app.active_key().unwrap_or_default();
         println!("bench debug front {front}");
+        println!("bench debug slot {}", slot(&app));
         let Some(at) = until(&app, "stopped", || paused_line(&tab)).await else {
             return;
         };
@@ -304,6 +307,36 @@ pub(super) fn bench_debug(app: &Rc<App>, arg: &str) {
         println!("bench debug pane {} {}", code(), shown(&app).0);
         front(&program.page);
         println!("bench debug pane {} behind the program", code());
+
+        // Run Without Debugging, over the program's file: its tab takes the debugged program's
+        // place once that has closed, a turn later.
+        front(&tab.page);
+        println!("bench debug slot {}", slot(&app));
+        let _ = WidgetExt::activate_action(&app.window, "win.debug-run", None);
+        let replaced = || {
+            let programs = app.terminals().into_iter().filter(|t| t.is_program());
+            let programs: Vec<_> = programs.collect();
+            match &programs[..] {
+                [run] if !Rc::ptr_eq(run, &program) => Some(run.clone()),
+                _ => None,
+            }
+        };
+        let Some(run) = until(&app, "run", replaced).await else {
+            return;
+        };
+        front(&run.page);
+        let ended = || text(&run).contains("[Exited with code").then_some(());
+        if until(&app, "run end", ended).await.is_none() {
+            return;
+        }
+        let said = text(&run);
+        let line = |start: &str| said.lines().find(|l| l.starts_with(start)).unwrap_or("");
+        println!(
+            "bench debug run {} {} session={}",
+            line("total "),
+            line("[Exited").trim_end(),
+            app.debugger.running()
+        );
         bench_quit(&app);
     });
 }
@@ -326,6 +359,14 @@ pub(super) fn paused_line(tab: &Tab) -> Option<u32> {
                 .is_empty()
         })
         .map(|line| line as u32)
+}
+
+/// Which of Run Without Debugging and the Debug Console the strip's slot holds.
+fn slot(app: &App) -> &'static str {
+    app.sidebar
+        .get()
+        .and_then(|sidebar| sidebar.debug_slot())
+        .unwrap_or("no strip")
 }
 
 /// What the strip says, the calls and the values the Code pane shows, and why it paused.

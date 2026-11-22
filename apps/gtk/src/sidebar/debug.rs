@@ -528,6 +528,8 @@ impl Debug {
         // Starting, running or stopping, the program is at work until it pauses.
         self.working.say(line, !paused);
         self.controls.session.set_visible(true);
+        self.controls.console.set_visible(true);
+        self.controls.play.set_visible(false);
         self.controls.start.set_visible(false);
         self.controls.resume.set_visible(paused);
         self.controls.pause.set_visible(!paused);
@@ -658,12 +660,28 @@ impl Debug {
         self.controls.session.get_visible()
     }
 
+    /// Which of Run Without Debugging and the Debug Console the strip shows, in their one slot.
+    #[cfg(feature = "bench")]
+    pub(super) fn slot(&self) -> &'static str {
+        match (
+            self.controls.play.get_visible(),
+            self.controls.console.get_visible(),
+        ) {
+            (true, false) => "play",
+            (false, true) => "console",
+            _ => "both or neither",
+        }
+    }
+
     /// No session: nothing of one is left on screen, and while the tab in front can be debugged
-    /// the strip offers Start Debugging (`strip`) over Watch and the breakpoints (`sections`).
+    /// the strip offers Run Without Debugging and Start Debugging (`strip`) over Watch and the
+    /// breakpoints (`sections`).
     pub(super) fn set_idle(&self, strip: bool, sections: bool) {
         self.strip.set_visible(strip);
         self.working.say("Not running", false);
         self.controls.session.set_visible(false);
+        self.controls.console.set_visible(false);
+        self.controls.play.set_visible(true);
         self.controls.start.set_visible(true);
         self.stack.root.set_visible(false);
         self.variables.root.set_visible(false);
@@ -746,20 +764,23 @@ fn watch_body(watched: &Tree, data: &Data) -> gtk::Box {
     body
 }
 
-/// What the strip shows of the session's controls: the session's own while one runs, Start
-/// Debugging while none does.
+/// What the strip shows of the session's controls: the session's own and the Debug Console while
+/// one runs, Run Without Debugging and Start Debugging while none does.
 struct Controls {
     /// Continue or Pause, the steps, Restart and Stop.
     session: gtk::Box,
     resume: gtk::Button,
     pause: gtk::Button,
+    /// The Debug Console and Run Without Debugging, which take turns in one slot.
+    console: gtk::Button,
+    play: gtk::Button,
     start: gtk::Button,
 }
 
 /// The controls, flat icon buttons on the window's actions, which are enabled as the session's
 /// state allows: after a spinner while the program is at work, Continue or Pause, the steps,
-/// Restart and Stop, then the Debug Console, and Start Debugging in their place while no session
-/// runs.
+/// Restart and Stop, then the Debug Console, which is only of use while a session runs; and Run
+/// Without Debugging in the console's slot, then Start Debugging, while none does.
 fn strip() -> (gtk::Box, Working, Controls) {
     let resume = strip_button("media-playback-start-symbolic", "win.debug-continue");
     let pause = strip_button("media-playback-pause-symbolic", "win.debug-pause");
@@ -776,8 +797,8 @@ fn strip() -> (gtk::Box, Working, Controls) {
         session.append(button);
     }
     // The Git pane's Commit: a text button in the accent colour, one word as Commit is, after
-    // the Debug Console and 6 px from it as Commit is from Sync. The greyed steps it replaces had
-    // nothing to offer before a program runs.
+    // Run Without Debugging and 6 px from it as Commit is from Sync. The greyed steps it replaces
+    // had nothing to offer before a program runs.
     let start = gtk::Button::builder()
         .label("Debug")
         .tooltip_text(crate::actions::label_of("win.debug-start"))
@@ -788,9 +809,12 @@ fn strip() -> (gtk::Box, Working, Controls) {
         .valign(gtk::Align::Center)
         .build();
     start.add_css_class("suggested-action");
+    let console = strip_button("dap-console-symbolic", "win.debug-console");
+    let play = strip_button("media-playback-start-symbolic", "win.debug-run");
     let strip = strip_of(&[
         session.clone().upcast(),
-        strip_button("dap-console-symbolic", "win.debug-console").upcast(),
+        console.clone().upcast(),
+        play.clone().upcast(),
         start.clone().upcast(),
     ]);
     // With the session's controls: there is nothing at work without one.
@@ -800,6 +824,8 @@ fn strip() -> (gtk::Box, Working, Controls) {
         session,
         resume,
         pause,
+        console,
+        play,
         start,
     };
     (strip, working, controls)

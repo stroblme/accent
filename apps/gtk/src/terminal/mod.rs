@@ -278,7 +278,7 @@ impl Term {
         }
     }
 
-    /// Whether it runs a debugged program rather than a shell.
+    /// Whether it runs a program, debugged or not, rather than a shell.
     pub fn is_program(&self) -> bool {
         matches!(self.shell, Shell::Program(_))
     }

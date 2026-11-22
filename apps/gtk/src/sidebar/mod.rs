@@ -623,6 +623,13 @@ impl Sidebar {
         self.code.debug.as_ref().map(|debug| debug.shown())
     }
 
+    /// Which of Run Without Debugging and the Debug Console the debugger's strip shows, for
+    /// `ACCENT_BENCH_DEBUG`.
+    #[cfg(feature = "bench")]
+    pub fn debug_slot(&self) -> Option<&'static str> {
+        self.code.debug.as_ref().map(|debug| debug.slot())
+    }
+
     /// Put `divider` back to its default if it is one of the sidebar's own, reporting whether it
     /// was. The window's double-click handler asks every divider owner in turn, so the rule for a
     /// pane lives next to the pane rather than in the shell.

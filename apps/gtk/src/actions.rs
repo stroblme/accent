@@ -91,6 +91,7 @@ impl App {
                     .get()
                     .is_some_and(|panel| panel.path().is_some()),
             debuggable: self.can_debug(),
+            runnable: self.can_run(),
             breakable: tab.is_some_and(|tab| {
                 doc::host_file_path(&tab.rel()).is_none()
                     && accent_api::debug::debuggable(&lang::language_id(tab))
@@ -596,6 +597,7 @@ impl App {
             "debug-remove-breakpoints" => self.remove_all_breakpoints(),
             "debug-watch" => self.watch_at_caret(),
             "debug-start" => self.start_debugging(),
+            "debug-run" => self.run_without_debugging(),
             "debug-continue" => self.debug_resume(),
             "debug-pause" => self.debug_pause(),
             "debug-step-over" => self.debug_step(Step::Over),

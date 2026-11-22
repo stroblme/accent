@@ -89,15 +89,16 @@ pub enum Shell {
         /// ready before attaching: a remote vault's own, or the host's.
         link: ssh::Url,
     },
-    /// A debugged program, run as its debug adapter asked: not held, since the program is its
-    /// session's and must not outlive it.
+    /// A debugged program, run as its debug adapter asked, or one run without its debugger: not
+    /// held, since the program is its session's or its run's and must not outlive its tab.
     Program(Rc<Program>),
     /// The Debug Console, which runs nothing: its transcript and its prompt are fed
     /// (`debug::console`).
     Console,
 }
 
-/// What a debug adapter asked to have run in a terminal (`runInTerminal`).
+/// What a debug adapter asked to have run in a terminal (`runInTerminal`), or Run Without
+/// Debugging runs.
 pub struct Program {
     pub args: Vec<String>,
     pub cwd: String,

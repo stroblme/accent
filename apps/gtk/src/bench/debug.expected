@@ -5,6 +5,7 @@ bench debug row demo.py:2
 bench debug row demo.py:5 1 == 2
 bench debug row demo.py:6 total is {total}
 bench debug front demo.py
+bench debug slot console
 bench debug stopped demo.py:2 breakpoint
 bench debug top double demo.py:2
 bench debug locals x=21
@@ -23,3 +24,5 @@ bench debug log total is 42
 bench debug program kept
 bench debug pane shown Not running spinner=0
 bench debug pane shown behind the program
+bench debug slot play
+bench debug run total 42 [Exited with code 0] session=false

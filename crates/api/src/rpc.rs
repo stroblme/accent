@@ -912,6 +912,7 @@ fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value> {
             vault.debug_start(arg(p, 0)?, &arg::<crate::debug::Launch>(p, 1)?),
         )),
         "debug_stop" => answer(block(vault.debug_stop(arg(p, 0)?))),
+        "debug_command" => answer(block(vault.debug_command(&arg::<String>(p, 0)?))),
         "debug_kernel" => answer(block(
             vault.debug_kernel(arg(p, 0)?, &arg::<crate::debug::Attach>(p, 1)?),
         )),

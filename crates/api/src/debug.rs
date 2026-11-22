@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::kernel::{Cells, Kernels};
-use crate::language::{Pos, Task, in_path, remote_task_then};
+use crate::language::{Pos, Task, in_path, remote_task_then, session_root};
 use crate::registry::Registry;
 use crate::vault::Backend;
 use crate::{Error, Event, Local, Result, Vault};
@@ -47,6 +47,14 @@ pub struct Attach {
     pub kernel: u64,
     pub breakpoints: Vec<(String, Vec<Breakpoint>)>,
     pub exceptions: Vec<ExceptionFilter>,
+}
+
+/// How a program runs without its debugger: the command line and the folder a session would run
+/// it with, both where the vault is.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Command {
+    pub args: Vec<String>,
+    pub cwd: String,
 }
 
 /// A breakpoint as the adapter holds it: maybe on another line than asked, and maybe not bound.
@@ -242,6 +250,17 @@ pub(crate) fn interpreter(root: &Path, program: &Path, configured: &[String]) ->
     vec!["python3".to_string()]
 }
 
+/// `program` run in the interpreter a session would run it in, from the folder a session runs in.
+fn command(root: &Path, program: &Path, configured: &[String]) -> Command {
+    let mut args = interpreter(root, program, configured);
+    args.push(program.to_string_lossy().into_owned());
+    let cwd = session_root(root, program, &[]);
+    Command {
+        args,
+        cwd: cwd.to_string_lossy().into_owned(),
+    }
+}
+
 // ---------------------------------------------------------------- sessions
 
 /// A vault's debug sessions, each a running adapter.
@@ -373,9 +392,24 @@ sessions! {
     debug_dump => dump(code: String) -> String;
 }
 
-/// The two calls the macro does not write: starting reads the vault's config, and stopping a
-/// session already over is no error.
+/// The calls the macro does not write: starting reads the vault's config, as running a program
+/// without its debugger does, and stopping a session already over is no error.
 impl Vault {
+    /// How `program`, vault-relative, runs without its debugger: in the interpreter and the folder
+    /// [`debug_start`](Self::debug_start) would run it in, on the host for a remote vault.
+    pub fn debug_command(&self, program: &str) -> Task<Command> {
+        match &self.backend {
+            Backend::Local(v) => v.debug_command(program),
+            Backend::Remote(r) => remote_task_then(
+                r.clone(),
+                "debug_command",
+                json!([program]),
+                crate::rpc::DEADLINE,
+                |_, answer| Ok(answer),
+            ),
+        }
+    }
+
     /// Debug `launch.program` as `session`, a number the caller picks. Answered once the program
     /// runs, which is after [`News::Terminal`] has been answered and the breakpoints are set.
     pub fn debug_start(&self, session: u64, launch: &Launch) -> Task<()> {
@@ -423,6 +457,12 @@ impl Vault {
 }
 
 impl Local {
+    pub fn debug_command(&self, program: &str) -> Task<Command> {
+        let (root, python) = (self.root().to_path_buf(), self.config().debug.python);
+        let program = root.join(program);
+        Task::blocking(move || Ok(command(&root, &program, &python)))
+    }
+
     pub fn debug_start(&self, session: u64, launch: &Launch) -> Task<()> {
         self.debug
             .start(session, launch.clone(), &self.config().debug)

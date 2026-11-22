@@ -68,6 +68,8 @@ pub struct Context {
     pub bibliography: bool,
     /// Start Debugging has a program to run and no session runs.
     pub debuggable: bool,
+    /// Run Without Debugging has the Code pane's Python file to run and no session runs.
+    pub runnable: bool,
     /// The text tab in front is in a language a debugger runs, and breakpoints are set anywhere.
     pub breakable: bool,
     pub breakpoints: bool,
@@ -266,6 +268,7 @@ pub fn applies(action: &str, cx: &Context) -> bool {
         "win.debug-toggle-breakpoint" | "win.debug-watch" => cx.breakable,
         "win.debug-remove-breakpoints" => cx.breakpoints,
         "win.debug-start" => cx.debuggable,
+        "win.debug-run" => cx.runnable,
         _ => true,
     }
 }

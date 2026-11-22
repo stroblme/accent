@@ -494,7 +494,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A notebook in another language has the Kernel dropdown in its place (user decision 2026-10-27): the same button naming the kernelspec the notebook runs on by its display name, "No R kernel" while none of its language is found, and its popover that language's kernelspecs, asked afresh each time it opens, the one it runs on checked; with none it says where they were looked for. Select Python Environment does not open it.
   While a debug session runs it gives its room to the session's steps, and Select Python Environment says to wait for the session's end (user decision 2026-10-25: two rows left the idle strip mostly empty).
 - **The strip**: Continue or Pause, whichever the program can take, Step Over, Step Into, Step Out, Restart Debugging and Stop Debugging as flat icon buttons on the window's actions, each greyed while the program's state does not allow it, and while starting all but Stop; then Debug Console, always live.
-  With no session Start Debugging stands in for all of them but Debug Console, after it, a text button reading Debug in the accent colour as the Git pane's Commit is (`suggested-action`): a step greyed until a program runs has nothing to offer.
+  With no session Run Without Debugging takes the Debug Console's slot, the console being of use only while a session runs, as a Play icon (`media-playback-start-symbolic`), and Start Debugging stands in for the rest after it, a text button reading Debug in the accent colour as the Git pane's Commit is (`suggested-action`): a step greyed until a program runs has nothing to offer (user decision 2026-11-22).
   Without the dropdown the row is centred in the pane, as the switcher's icons are in the header above it; Debug is centred on the row at its own height, as the icon buttons are.
   A press leaves the keyboard where it was, so stepping keeps the reader in the note.
   No words say what the program does (user decision 2026-10-27): Continue or Pause and the greyed steps say it, and a spinner before Continue or Pause while the program starts, runs or stops, the one the Git pane's Sync shows while it syncs (`AdwSpinner`), in room the session's row keeps while it is away, so the buttons never move.
@@ -893,7 +893,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Its key is `program:<16 hex>`, which no holder and no session restore takes for a shell's.
   It opens where Preferences → Terminal → Debug Terminal says (`debug_terminal`): behind the tab in front of the active pane (Same Pane, the default), or in front in a pane split off it on a side (Split Right, Left, Up, Down); either way the keyboard and the active pane stay where they were, so the file stays in front with its Code pane (user decision 2026-10-25). New Terminal is not this setting's.
   It is titled with the program's file name, and starts at once behind another tab, at VTE's default size, the adapter waiting for it.
-  It stays when the program ends, its output kept and a last line saying how — `[Exited with code N]`, `[Ended by signal N]`, on a host `[Lost the connection to host]` — with no reconnect, and the next session's takes its place in its pane and bar.
+  Run Without Debugging (Debugger) runs its program in such a tab too, the interpreter and the file its command line.
+  It stays when the program ends, its output kept and a last line saying how — `[Exited with code N]`, `[Ended by signal N]`, on a host `[Lost the connection to host]` — with no reconnect, and the next session's or run's takes its place in its pane and bar.
   The Debug Console runs nothing: what it shows is fed to it, and its prompt is a line editor of the window's own over the keys the terminal would send a shell (Debugger). Its key is `debug:console`.
 - Shells a window left held with no session to come back in (a quit, SIGTERM, a logout) are ended at the next start, before the first window: only this machine's holder is asked, and only shells started for the same state directory, which `attach --owner` hands the holder and `held` lists: the Flatpak cannot read a host shell's environment, which holds the host's `XDG_STATE_HOME` anyway.
   A run on scratch state dirs leaves the user's alone, and a native accent and the Flatpak, sharing the host's holder, leave each other's alone.
@@ -1945,6 +1946,9 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   The vault's tabs with edits are written first, as VS Code's `debug.saveBeforeStart` does: the program runs what is on disk.
   One session at a time: a second Start says "Cannot start debugging: a program is already being debugged".
   The sidebar stays on the pane it shows, and hidden if it was: the session is in the Code pane, which its button in the switcher brings up (user decision 2026-10-18).
+- **Run Without Debugging**, the strip's Play, runs the Code pane's Python file without the debugger (user decision 2026-11-22), in the interpreter and from the folder a session would run it in, both worked out where the vault is, once the vault's tabs with edits are written.
+  It runs in the program's terminal (Terminal), which takes the last program's place as the next session's does, its breakpoints passed by and no session started, so the strip and the Debug Console stay as they were.
+  It is not offered while a session runs, since its tab would end the program being debugged, and the Flatpak runs only a remote vault's program, as it debugs only one.
 - **A stop brings the paused call's file to the front**, in the preview tab unless a tab has it already (Tabs), the caret on the line the paused line's mark shows: `go-next-symbolic` in the marks column and the warning's amber across the line.
   The arrow takes the line's cell from a breakpoint's dot or ring, which waits under it until the program moves on, and either from a diagnostic's icon: one drawn over another reads as neither.
   An open tab comes to the front of its own pane and the active pane stays; where the tab it covers had the keyboard, it takes it, as AdwTabView hands the keyboard to the page it selects (user decision 2026-10-17).
@@ -1959,7 +1963,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - A failure is a toast under one key, so the next takes its place: "Cannot start debugging: <why>", the why being the adapter's own last words where it exited before answering — Python's `No module named debugpy`, once — and "The debug session ended: <why>" for an adapter that died under a running program.
   What the adapter marks important is a toast as well, and all its output goes to the Debug Console.
 - **The Debug Console** is a terminal tab (user decision 2026-10-17), not an editor: it has no file, and as a terminal it has the shells' palette, font, zoom, scrollback, menu and links.
-  It opens with the program's tab, after it and behind it, the keyboard staying where it was; a new session clears it, and Debug Console, the strip's last button, brings it to the front with the keyboard, or opens it in the active pane once closed.
+  It opens with the program's tab, after it and behind it, the keyboard staying where it was; a new session clears it, and Debug Console, on the strip while a session runs, brings it to the front with the keyboard, or opens it in the active pane once closed.
 - It says what is debugged ("Debugging demo.py"), prints the adapter's output and what the console's evaluations print — the program's own is its terminal's — and at the end says how the session ended ("Session ended (exit code 0)"), leaving no prompt.
   Its own words and the adapter's are the terminal's ink at 0.6 over its page, as a quote's are (SGR's dim is VTE's darker ink on a light page), stderr is the palette's red and what the adapter marks important bold.
   What it prints is text alone: escape sequences and control characters but newlines and tabs are dropped from output, answers and tracebacks, so nothing a program prints retitles the tab, moves the cursor out from under the prompt, or asks the terminal a question whose answer VTE would type at the prompt.
@@ -2510,7 +2514,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 
 ### Debugging
 
-- Start Debugging `Ctrl+F5`, Toggle Breakpoint `Ctrl+F9`, Remove All Breakpoints and Add to Watch (unbound).
+- Start Debugging `Ctrl+F5`, Toggle Breakpoint `Ctrl+F9`, Run Without Debugging, Remove All Breakpoints and Add to Watch (unbound).
   With a Python notebook in front `Ctrl+F5` is Debug Cell, and `Ctrl+F9` takes the selected cell's caret line.
 - While a session runs, VS Code's keys (user decision 2026-10-17): Continue `F5`, Stop Debugging `Shift+F5`, Restart Debugging `Ctrl+Shift+F5`, Pause `F6`, Step Over `F10`, Step Into `F11`, Step Out `Shift+F11`.
   They are the Code pane's strip and the palette's as well, each greyed on the strip and out of the palette while the session cannot take it.

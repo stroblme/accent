@@ -1054,6 +1054,24 @@ fn stop_and_resume_reach_the_hosts_worker_over_the_wire() {
     );
 }
 
+/// A program run without its debugger takes the host's checkout and venv, as a session would.
+#[test]
+fn a_program_runs_without_its_debugger_as_the_host_finds_it() {
+    let w = Wired::seeded(&|root| {
+        std::fs::create_dir_all(root.join("sub/.git")).unwrap();
+        std::fs::create_dir_all(root.join("sub/.venv/bin")).unwrap();
+        std::fs::write(root.join("sub/.venv/bin/python"), "").unwrap();
+        std::fs::write(root.join("sub/demo.py"), "print(1)\n").unwrap();
+    });
+    let run: crate::debug::Command = w
+        .client
+        .call("debug_command", json!(["sub/demo.py"]))
+        .unwrap();
+    assert!(run.args[0].ends_with("sub/.venv/bin/python"), "{run:?}");
+    assert!(run.args[1].ends_with("sub/demo.py"), "{run:?}");
+    assert!(run.cwd.ends_with("sub"), "{run:?}");
+}
+
 /// The host runs the adapter beside `serve`: the requests reach its sessions, and the news
 /// comes back as the vault's events. The window runs the program, here this test.
 #[test]
