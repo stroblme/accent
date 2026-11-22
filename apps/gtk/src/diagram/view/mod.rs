@@ -528,7 +528,7 @@ impl DiagramView {
             let imp = view.imp();
             let (x, y) = imp.at.get();
             let (w, h) = (f64::from(view.width()), f64::from(view.height()));
-            let by = (scrollable::edge_speed(x, w), scrollable::edge_speed(y, h));
+            let by = (edge_speed(x, w), edge_speed(y, h));
             let dragging = !matches!(*imp.drag.borrow(), None | Some(Drag::Pan { .. }));
             if !dragging || by == (0.0, 0.0) {
                 imp.ticking.set(false);
@@ -547,6 +547,11 @@ impl DiagramView {
                 view.relayout();
             }
             view.set_scroll((sx + by.0, sy + by.1));
+            // At the top or left end, where the canvas does not grow, there is nothing to do.
+            if imp.scroll.scroll() == (sx, sy) {
+                imp.ticking.set(false);
+                return glib::ControlFlow::Break;
+            }
             // The pointer stayed put and the page moved under it.
             imp.pointer.set(view.page_at(x, y));
             view.queue_draw();
@@ -606,6 +611,15 @@ impl DiagramView {
         }
         self.queue_draw();
     }
+}
+
+/// How near the canvas's edge a drag scrolls it, in pixels: draw.io's `scrollPointToVisible`
+/// border, inside the [`GAP`] round a fitted page, so a drag to the sheet's edge stays put.
+const EDGE: f64 = 20.0;
+
+/// How fast a drag at `at` along the canvas `length` long scrolls it ([`scrollable::edge_speed`]).
+fn edge_speed(at: f64, length: f64) -> f64 {
+    scrollable::edge_speed(at, length, EDGE)
 }
 
 /// Where two rectangles overlap, if they do.

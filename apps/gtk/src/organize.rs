@@ -22,6 +22,9 @@ use crate::pdf::geometry::{Layout, PageRect, gap_at, gap_middle, page_at};
 use crate::scrollable::edge_speed;
 use crate::widgets::Hook;
 
+/// How near the strip's top or bottom edge a drag scrolls it, in pixels.
+const EDGE: f64 = 40.0;
+
 /// How far apart the insert and paste buttons stand.
 const INSET: f32 = 6.0;
 
@@ -679,7 +682,8 @@ impl Organize {
         self.bar.set_visible(gap.is_some());
         self.pane.queue_allocate();
         let height = f64::from(self.strip.height());
-        self.speed.set(y.map_or(0.0, |y| edge_speed(y, height)));
+        let speed = y.map_or(0.0, |y| edge_speed(y, height, EDGE));
+        self.speed.set(speed);
         if self.speed.get() != 0.0 {
             self.autoscroll();
         }

@@ -610,8 +610,9 @@ drill_diagram_select() {
 
 # An arrow's waypoints added from the canvas's menu, taken away by a double click on their handle and
 # by the menu's Remove Waypoint, and cleared from a shape the arrow is on, each one undo step; a
-# resize with Shift held keeping the box's proportions; and a move held at the canvas's bottom edge
-# scrolling on past where the canvas ended and landing there (DESIGN.md, Diagram).
+# resize with Shift held keeping the box's proportions; a band held on the fitted sheet's corner
+# scrolling nothing; and a move held at the canvas's bottom edge scrolling on past where the canvas
+# ended and landing there (DESIGN.md, Diagram).
 drill_diagram_handles() {
 	launch 60 ACCENT_BENCH_DIAGRAM=handles:handles.drawio >"$dir/handles"
 	has "$dir/handles" \
@@ -624,6 +625,7 @@ drill_diagram_handles() {
 		'bench diagram handles menu shape ["Clear Waypoints"] picked=true' \
 		'bench diagram handles cleared points=[] history=(true, false)' \
 		'bench diagram handles shift resize s=Some("100,300,120,90")' \
+		'bench diagram handles corner scrolled=false' \
 		'bench diagram handles edge beyond_canvas=true under_pointer=true'
 }
 

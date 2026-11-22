@@ -24,7 +24,8 @@ const HANDLES: &str = r#"<mxfile host="accent">
 /// waypoints as the canvas's menu adds one on its line, a double click on its handle and Remove
 /// Waypoint take it away and Clear Waypoints from a shape it is on clears it, each with the menu
 /// offered and Undo after; then the box a right handle dragged with Shift held leaves, and where
-/// a box lands that was held at the canvas's bottom edge for a second.
+/// a band held on the sheet's corner leaves the canvas, and where a box lands that was held at the
+/// canvas's bottom edge for a second.
 pub(super) fn handles(app: &Rc<App>, rel: &str) {
     std::fs::write(app.root().join(rel), HANDLES).expect("write the diagram");
     let (app, rel) = (app.clone(), rel.to_string());
@@ -118,6 +119,20 @@ pub(super) fn handles(app: &Rc<App>, rel: &str) {
         let (from, to) = (at(x, y), at(x + 40.0, y));
         xtest(&format!("keydown shift; drag {from} {to}; keyup shift")).await;
         println!("bench diagram handles shift resize s={:?}", placed("s"));
+
+        // A band held on the fitted sheet's bottom-right corner, short of the canvas's edge zone,
+        // scrolls nothing.
+        let origin = || tab.to_widget(&accent_drawio::Rect::new(0.0, 0.0, 0.0, 0.0));
+        let still = origin();
+        let steps = format!(
+            "move {}; down; move {}; move {}; sleep 1; up",
+            at(700.0, 400.0),
+            at(750.0, 450.0),
+            at(800.0, 500.0)
+        );
+        xtest(&steps).await;
+        let scrolled = (origin().x, origin().y) != (still.x, still.y);
+        println!("bench diagram handles corner scrolled={scrolled}");
 
         // Box b taken to the canvas's bottom edge and held there: the canvas scrolls on past where
         // it ended and b lands beyond that, under the pointer, the page not moving under the drop.

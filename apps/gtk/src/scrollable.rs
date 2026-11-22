@@ -75,15 +75,15 @@ impl Adjustments {
     }
 }
 
-/// How near a view's edge a drag scrolls it, and how fast at the very edge and past it, in pixels
-/// a frame: the Outline's thumbnail strip's and a diagram canvas's.
-const EDGE: f64 = 40.0;
+/// How fast a drag at a view's very edge, or past it, scrolls the view, in pixels a frame: the
+/// Outline's thumbnail strip and a diagram's canvas alike.
 const EDGE_SPEED: f64 = 12.0;
 
-/// How fast a drag at `at` along a view `length` long scrolls it, in pixels a frame: nothing away
-/// from the edges, up to [`EDGE_SPEED`] at them and past them, negative towards the start.
-pub fn edge_speed(at: f64, length: f64) -> f64 {
-    let into = |edge: f64| (EDGE - edge).clamp(0.0, EDGE) / EDGE * EDGE_SPEED;
+/// How fast a drag at `at` along a view `length` long scrolls it, in pixels a frame: nothing
+/// further than `zone` from the edges, up to [`EDGE_SPEED`] at them and past them, negative
+/// towards the start.
+pub fn edge_speed(at: f64, length: f64, zone: f64) -> f64 {
+    let into = |edge: f64| (zone - edge).clamp(0.0, zone) / zone * EDGE_SPEED;
     into(length - at) - into(at)
 }
 
