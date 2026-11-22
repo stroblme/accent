@@ -167,6 +167,189 @@ pub(super) fn bench_git_switch(app: &Rc<App>) {
     });
 }
 
+/// Time the Git pane's refreshes around each thing it is asked to do on the selected repository,
+/// `rel` being a tracked file of it: an edit on disk, Stage, Unstage, Commit, a Stage while a
+/// refresh is on its way, a Commit pressed as soon as a Stage lets go, the background fetch,
+/// Sync, a branch switch there and back, a commit expanded, Load More, and a pick of a repository
+/// never picked. Each step prints when the pane first showed its outcome, every state it showed
+/// on the way, and how many of those the pane showed let go of with the outcome still missing.
+/// `rels` is `<rel>,<other>`, two tracked files of the repository, which needs an upstream one
+/// commit ahead, a branch `other` and more than a page of history, and the vault a second
+/// repository, for the pick.
+pub(super) fn bench_git_refresh(app: &Rc<App>, rels: &str) {
+    app.show_pane("git");
+    let (rel, other) = rels.split_once(',').unwrap_or((rels, ""));
+    let (app, rel, other) = (app.clone(), rel.to_string(), other.to_string());
+    glib::spawn_future_local(async move {
+        let t = Instant::now();
+        let rows = || app.git.get().is_some_and(|git| git.log_rows() > 0);
+        until("git", "refresh rows", 60000, rows).await;
+        println!("bench git_refresh open ms={}", t.elapsed().as_millis());
+        let Some(git) = app.git.get().cloned() else {
+            return bench_quit(&app);
+        };
+        app.show_pane("git");
+        // The opening's fetch and the walk's looks for repositories, out of the way.
+        glib::timeout_future(Duration::from_millis(6000)).await;
+        let path = app.root().join(&rel);
+        let dir = path.parent().unwrap_or(&path).to_path_buf();
+        let run = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .output();
+            out.map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+                .unwrap_or_default()
+        };
+        let head = || run(&["rev-parse", "--short=7", "HEAD"]);
+        let lists = |shown: &str, list: &str, name: &str| {
+            shown
+                .split_once(&format!("{list}=["))
+                .and_then(|(_, rest)| rest.split_once(']'))
+                .is_some_and(|(paths, _)| paths.split(',').any(|p| p.ends_with(name)))
+        };
+        let name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
+        let (staged, changed) = (
+            |s: &str| lists(s, "staged", &name) && !lists(s, "changes", &name),
+            |s: &str| lists(s, "changes", &name) && !lists(s, "staged", &name),
+        );
+        let edit = |path: &Path| {
+            let text = std::fs::read_to_string(path).unwrap_or_default();
+            let _ = std::fs::write(path, format!("{text}edited\n"));
+        };
+        edit(&path);
+        timed_step(&git, "edit", &changed).await;
+        git.bench_stage(&rel, true);
+        timed_step(&git, "stage", &staged).await;
+        git.bench_stage(&rel, false);
+        timed_step(&git, "unstage", &changed).await;
+        git.bench_stage(&rel, true);
+        timed_step(&git, "stage", &staged).await;
+        let before = head();
+        git.bench_commit("bench git_refresh");
+        let done = |s: &str| {
+            !lists(s, "staged", &name)
+                && field(s, "head") != before
+                && field(s, "log") == field(s, "head")
+        };
+        timed_step(&git, "commit", &done).await;
+
+        // A Stage pressed while a refresh asked before it is still on its way.
+        let other_name = other.rsplit('/').next().unwrap_or(&other).to_string();
+        edit(&path);
+        edit(&app.root().join(&other));
+        let both = |s: &str| changed(s) && lists(s, "changes", &other_name);
+        timed_step(&git, "edit2", &both).await;
+        git.schedule_refresh(crate::git::Depth::Everything);
+        glib::timeout_future(Duration::from_millis(700)).await;
+        git.bench_stage(&rel, true);
+        timed_step(&git, "race_stage", &staged).await;
+        git.bench_stage(&rel, false);
+        timed_step(&git, "unstage", &changed).await;
+        // A Commit pressed the moment a Stage lets go of the pane commits what was staged.
+        git.bench_stage(&rel, true);
+        let let_go = Instant::now();
+        while field(&git.shown(), "held") == "true" && let_go.elapsed() < Duration::from_secs(30) {
+            glib::timeout_future(Duration::from_millis(5)).await;
+        }
+        let before = head();
+        git.bench_commit("stage then commit");
+        timed_step(&git, "stage_commit", &|s| field(s, "head") != before).await;
+        println!(
+            "bench git_refresh stage_commit committed={}",
+            run(&["show", "--name-only", "--format=", "HEAD"]).replace('\n', ",")
+        );
+        run(&["commit", "-qam", "the rest"]);
+        let clean = |s: &str| !lists(s, "changes", &other_name) && !lists(s, "changes", &name);
+        timed_step(&git, "settle", &clean).await;
+
+        // One more commit upstream, pushed by its URL so the remote-tracking branch stays where
+        // it was until the fetch.
+        let url = run(&["remote", "get-url", "origin"]);
+        let ahead = run(&[
+            "commit-tree",
+            "origin/main^{tree}",
+            "-p",
+            "origin/main",
+            "-m",
+            "up",
+        ]);
+        run(&["push", "-q", &url, &format!("{ahead}:refs/heads/main")]);
+        let behind = field(&git.shown(), "counts");
+        git.bench_fetch();
+        let fetched = |s: &str| !field(s, "counts").is_empty() && field(s, "counts") != behind;
+        timed_step(&git, "fetch", &fetched).await;
+        git.sync(None);
+        timed_step(&git, "sync", &|s| field(s, "counts").is_empty()).await;
+        let main = field(&git.shown(), "branch");
+        git.bench_checkout("other");
+        let on = |branch: &str, s: &str| field(s, "branch") == branch && field(s, "head") == head();
+        timed_step(&git, "switch", &|s| on("other", s)).await;
+        git.bench_checkout(&main);
+        timed_step(&git, "switch_back", &|s| on(&main, s)).await;
+
+        let rows: u32 = field(&git.shown(), "rows").parse().unwrap_or(0);
+        git.activate_log_row(0);
+        let more = |s: &str| field(s, "rows").parse().unwrap_or(0) > rows;
+        timed_step(&git, "expand", &more).await;
+        git.activate_log_row(0);
+        timed_step(&git, "collapse", &|s| field(s, "rows").parse() == Ok(rows)).await;
+        git.activate_last_log_row();
+        timed_step(&git, "load_more", &more).await;
+        if let Some(name) = git.repo_names().get(1) {
+            git.select_repo(name);
+            timed_step(&git, "pick", &|s| field(s, "rows") != "0").await;
+        }
+        bench_quit(&app);
+    });
+}
+
+/// The value of `key` in a [`crate::git::Panel::shown`] line.
+fn field(shown: &str, key: &str) -> String {
+    shown
+        .split(' ')
+        .find_map(|kv| kv.strip_prefix(&format!("{key}=")))
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Watch the pane after one step of [`bench_git_refresh`] until `done` holds of what it shows,
+/// then for 2 s more, which the refreshes a step's `.git` writes schedule land in. Prints the
+/// time it took, how many states the pane showed let go of with the step's outcome missing
+/// once it had been held, and each state on the way, from the step itself on.
+async fn timed_step(git: &Rc<crate::git::Panel>, step: &str, done: &dyn Fn(&str) -> bool) {
+    let t = Instant::now();
+    let mut states = vec![(0, git.shown())];
+    let mut at = None;
+    while t.elapsed() < Duration::from_secs(30) {
+        let shown = git.shown();
+        if states.last().is_none_or(|(_, last)| *last != shown) {
+            states.push((t.elapsed().as_millis(), shown.clone()));
+        }
+        if at.is_none() && done(&shown) {
+            at = Some(t.elapsed().as_millis());
+        }
+        if at.is_some_and(|at| t.elapsed().as_millis() > at + 2000) {
+            break;
+        }
+        glib::timeout_future(Duration::from_millis(5)).await;
+    }
+    let held = states.iter().position(|(_, s)| field(s, "held") == "true");
+    let stale = held.map_or(0, |from| {
+        let after = &states[from..];
+        let let_go = after.iter().skip_while(|(_, s)| field(s, "held") == "true");
+        let_go.take_while(|(_, s)| !done(s)).count()
+    });
+    let at = at.map_or("timeout".to_string(), |ms| ms.to_string());
+    println!(
+        "bench git_refresh {step} ms={at} states={} stale={stale}",
+        states.len()
+    );
+    for (ms, shown) in states {
+        println!("bench git_refresh_state {step} +{ms} {shown}");
+    }
+}
+
 /// Whether the sidebar is showing a Git pane at all, which is the whole readout above: the pane
 /// appearing is a switcher icon, and the headless image has no pointer to find it with.
 fn has_git_pane(app: &Rc<App>) -> bool {

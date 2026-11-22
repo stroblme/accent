@@ -46,6 +46,8 @@ impl Source {
     }
 
     pub fn repos(&self) -> Result<Vec<Repo>> {
+        #[cfg(feature = "bench")]
+        crate::bench::hold(&crate::bench::SLOW_GIT_MS);
         match self {
             Self::Vault(vault) => vault.repos(),
             Self::Local(cwd) => Ok(git::toplevel(cwd)?.into_iter().collect()),
@@ -117,6 +119,8 @@ macro_rules! git_methods {
         impl Source {
             $(
                 pub fn $name(&self, $repo: &Repo $(, $arg: $ty)*) -> Result<$out> {
+                    #[cfg(feature = "bench")]
+                    crate::bench::hold(&crate::bench::SLOW_GIT_MS);
                     match self {
                         Self::Vault(vault) => vault.$name($repo $(, $arg)*),
                         Self::Local(_) => Ok(git::$core($repo $(, $arg)*)?),

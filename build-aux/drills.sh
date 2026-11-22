@@ -355,6 +355,43 @@ drill_history_file() {
 		'bench compare_row alone action listed=true ran=true shown=true state=Some(false)'
 }
 
+# The Git pane on a slow link, each git call held 40 ms: a Stage, an Unstage, a Commit, a Sync and
+# a branch switch hold the pane until the refresh after them shows what they did, a Stage pressed
+# while an older refresh is on its way included, and a Commit pressed the moment a Stage lets go
+# commits what was staged. The vault a repository of 210 commits, one behind its upstream, with a
+# branch `other`, and a second repository in it, for a pick.
+drill_git_refresh() {
+	for r in "$vault" "$vault/inner"; do
+		git init -q -b main "$r"
+		git -C "$r" config user.name drill
+		git -C "$r" config user.email drill@invalid
+		git -C "$r" config commit.gpgsign false
+	done
+	for f in note other; do echo "# $f" >"$vault/$f.md"; echo "# $f" >"$vault/inner/$f.md"; done
+	git -C "$vault/inner" add -A
+	git -C "$vault/inner" commit -qm one
+	git -C "$vault" add note.md other.md
+	git -C "$vault" commit -qm one
+	for i in $(seq 2 210); do echo "$i" >>"$vault/other.md"; git -C "$vault" commit -qam "$i"; done
+	git -C "$vault" branch other HEAD~2
+	git clone -q --bare "$vault" "$dir/origin.git"
+	git -C "$vault" remote add origin "$dir/origin.git"
+	git -C "$vault" fetch -q origin
+	git -C "$vault" branch -q -u origin/main
+	git clone -q "$dir/origin.git" "$dir/peer"
+	echo upstream >"$dir/peer/up.md"
+	git -C "$dir/peer" add up.md
+	git -C "$dir/peer" -c user.name=drill -c user.email=drill@invalid -c commit.gpgsign=false commit -qm up
+	git -C "$dir/peer" push -q origin main
+	launch 120 ACCENT_BENCH_SLOW_GIT=40 ACCENT_BENCH_GIT=refresh:note.md,other.md >"$dir/git-refresh"
+	if grep -Eq '^bench git_refresh .*(ms=timeout|stale=[1-9])' "$dir/git-refresh" ||
+		[ "$(grep -c '^bench git_refresh .* stale=0$' "$dir/git-refresh")" -ne 18 ]; then
+		cat "$dir/git-refresh"
+		return 1
+	fi
+	has "$dir/git-refresh" 'bench git_refresh stage_commit committed=note.md'
+}
+
 # On a slow host, each read held 800 ms, a Git row's tab is up before git answers and shows the
 # loading page: one of its own for a file from the history, which opens with its unchanged runs
 # hidden as a quick one does, and the file's own for a change in the working tree. The first read

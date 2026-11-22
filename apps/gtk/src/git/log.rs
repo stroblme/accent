@@ -314,6 +314,15 @@ impl Panel {
         });
     }
 
+    /// The commit the history's first row draws. `ACCENT_BENCH_GIT=refresh` and nothing else.
+    #[cfg(feature = "bench")]
+    pub(super) fn first_commit(&self) -> Option<String> {
+        match boxed(self.log.item(0))? {
+            LogItem::Commit(row) => Some(row.commit.id),
+            _ => None,
+        }
+    }
+
     /// Copy a commit ID and show a toast because the unchanged row offers no visible feedback.
     fn copy_id(&self, oid: &str) {
         self.hooks.window.clipboard().set_text(oid);

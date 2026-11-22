@@ -112,8 +112,8 @@ use folders::{
 };
 use git::{
     bench_git, bench_git_branch, bench_git_close, bench_git_commit_focus, bench_git_focus,
-    bench_git_init, bench_git_markers, bench_git_press, bench_git_rebase, bench_git_scroll,
-    bench_git_switch, bench_git_sync_all, bench_git_sync_over_fetch,
+    bench_git_init, bench_git_markers, bench_git_press, bench_git_rebase, bench_git_refresh,
+    bench_git_scroll, bench_git_switch, bench_git_sync_all, bench_git_sync_over_fetch,
 };
 use goals::bench_goals;
 use image::{bench_image, bench_image_look, bench_preview_look};
@@ -128,6 +128,10 @@ pub(crate) use loading::SLOW_READ_MS;
 /// does: `ACCENT_BENCH_FAIL_GIT_READ`.
 pub(crate) static FAIL_GIT_READ: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+
+/// How long each of the Git pane's calls holds on its worker, as one round trip to a distant
+/// host would: `ACCENT_BENCH_SLOW_GIT`.
+pub(crate) static SLOW_GIT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 use minimap::bench_minimap;
 use notebook::bench_notebook;
 use outline::bench_outline;
@@ -184,7 +188,8 @@ use user_commands::bench_commands;
 ///   `focus` (row keyboard focus), `scroll` (stable scrolled rows), `commit`
 ///   (post-commit focus), `switch` (repository-switch races), `markers:<rel>`
 ///   (conflict resolution), `branch` (branch popover, branch-name validation),
-///   `syncall`.
+///   `syncall`, `refresh:<rel>,<other>` (each refresh's timing and what the pane shows while it
+///   is on its way).
 /// - `ACCENT_BENCH_START=1`: start screen on a `--new-window` launch,
 ///   handled by `start::bench_start` without an `App`.
 /// - `ACCENT_BENCH_KEYS=1`: editor key semantics and completion acceptance.
@@ -357,6 +362,8 @@ use user_commands::bench_commands;
 ///   Remote pin-window/apart modes verify tabs cannot move off the host.
 /// - `ACCENT_BENCH_SLOW_READ=<ms>`: delay reads and fetches on workers, as a slow host would, for
 ///   double-clicks in the `TABS=tree:` drill (`TABS=loading` sets its own).
+/// - `ACCENT_BENCH_SLOW_GIT=<ms>`: delay each of the Git pane's calls, as a round trip to a
+///   distant host would, for `GIT=refresh:`.
 /// - `ACCENT_BENCH_FAIL_GIT_READ=1`: the first comparison a Git row asks for fails to read, for
 ///   its tab's Retry in the `COMPARE=row:` drill.
 /// - `ACCENT_BENCH_FOLLOW=<rel_note>`: Ctrl-hover, missing targets and anchors;
@@ -507,6 +514,12 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         .and_then(|ms| ms.parse().ok())
     {
         SLOW_READ_MS.store(ms, std::sync::atomic::Ordering::Relaxed);
+    }
+    if let Some(ms) = std::env::var("ACCENT_BENCH_SLOW_GIT")
+        .ok()
+        .and_then(|ms| ms.parse().ok())
+    {
+        SLOW_GIT_MS.store(ms, std::sync::atomic::Ordering::Relaxed);
     }
     if std::env::var_os("ACCENT_BENCH_FAIL_GIT_READ").is_some() {
         FAIL_GIT_READ.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1152,6 +1165,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rel) = arg.strip_prefix("markers:") {
                 return bench_git_markers(&app, rel);
+            }
+            if let Some(rel) = arg.strip_prefix("refresh:") {
+                return bench_git_refresh(&app, rel);
             }
             return match (arg.strip_prefix("press:"), arg.as_str()) {
                 (Some(path), _) => bench_git_press(&app, path),

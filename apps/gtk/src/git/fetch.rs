@@ -3,6 +3,9 @@
 use super::refresh::Ask;
 use super::*;
 
+/// How many repositories' statuses a refresh asks at once, beside the selected one's history.
+const AT_ONCE: usize = 8;
+
 /// Autofetch interval for the focused window, matching VS Code's default. Bounds network
 /// activity while keeping upstream history reasonably current; unfocused windows skip fetches.
 const AUTOFETCH: Duration = Duration::from_secs(300);
@@ -24,6 +27,7 @@ impl Panel {
             return;
         };
         self.fetch_busy.set(true);
+        let root = repo.root.clone();
         let (vault, lock) = (self.source(), self.fetch_lock.clone());
         let roots = if vault.is_remote() {
             Vec::new()
@@ -70,8 +74,8 @@ impl Panel {
                 None => return,
             }
             // `.git/refs/remotes` is not among the paths the vault watches, so what a fetch moved
-            // is only seen because we ask.
-            panel.schedule_refresh(Depth::Everything);
+            // is only seen because we ask: at once, and of the repository it fetched alone.
+            panel.refresh(Ask::repos([root]));
         });
     }
 
@@ -164,74 +168,96 @@ pub(super) fn fetch(
     let repos = (against != known).then(|| against.clone());
     // A save outside every repository asks git nothing, and leaves the pane as it is.
     let asked: Vec<bool> = against.iter().map(|repo| ask.asks(repo)).collect();
-    if matches!(ask, Ask::Paths(_)) && !asked.contains(&true) {
+    if matches!(ask, Ask::Paths(..)) && !asked.contains(&true) {
         return None;
     }
-    let statuses: Vec<Option<Status>> = against
-        .iter()
-        .zip(&asked)
-        .map(|(repo, &asked)| {
-            // One not asked keeps its status, as one git did not answer for does.
-            if !asked {
-                return None;
-            }
-            match vault.git_status(repo) {
-                Ok(status) => Some(status),
-                Err(e) => {
-                    // A repository git will not talk about keeps the status it last had and
-                    // raises no dialog: it may be mid-rebase, on a network mount, gone since
-                    // discovery, or on a host too busy with its first index to answer within the
-                    // deadline.
-                    tracing::debug!("git status in {}: {e}", repo.root.display());
-                    None
-                }
-            }
-        })
-        .collect();
     let at = reselect(selected, &known, &against);
     // Everything below is about the repository itself rather than the working tree, so a save
     // does not pay for it: five to seven processes per keystroke were what this cost before.
     let head = (depth >= Depth::Everything)
         .then(|| against.get(at))
         .flatten();
-    let (commits, branches, submodules) = match head {
-        Some(repo) => (
-            Some(vault.git_log(repo, 0, rows).unwrap_or_else(|e| {
-                // An empty page reads as "the history has not moved" in `apply`, so a refused log
-                // leaves the rows that are on screen where they are.
-                tracing::debug!("git log: {e}");
-                Vec::new()
-            })),
-            vault
-                .git_branches(repo)
-                .inspect_err(|e| tracing::debug!("git for-each-ref: {e}"))
-                .ok(),
-            vault
-                .git_submodules(repo)
-                .inspect_err(|e| tracing::debug!("git submodule status: {e}"))
-                .ok(),
-        ),
-        None => (None, None, None),
+    // A repository git will not talk about keeps the status it last had and raises no dialog: it
+    // may be mid-rebase, on a network mount, gone since discovery, or on a host too busy with its
+    // first index to answer within the deadline. One not asked keeps its status the same way.
+    let status_of = |repo: &Repo| {
+        vault
+            .git_status(repo)
+            .inspect_err(|e| tracing::debug!("git status in {}: {e}", repo.root.display()))
+            .ok()
     };
-    // `behind` is the count and this is the same set by oid, so one implies the other: nothing to
-    // pull means no `rev-list` at all, which is what keeps a refresh on every save as cheap as it
-    // was. A non-zero count also means there is an upstream, which the range needs. Without a
-    // status there is no count, and the marks stay as they were.
-    let behind = statuses
-        .get(at)
-        .and_then(Option::as_ref)
-        .map(|s| s.branch.behind > 0);
-    let incoming = head.zip(behind).map(|(repo, behind)| match behind {
-        true => vault
-            .git_incoming(repo)
-            .unwrap_or_else(|e| {
-                tracing::debug!("git rev-list HEAD..@{{u}}: {e}");
-                Vec::new()
+    // Every call at once, each a round trip to a remote vault's host, bar the other repositories'
+    // statuses, which go [`AT_ONCE`] at a time. A refused read is `None`, which leaves what the
+    // pane shows of it alone.
+    let mut statuses: Vec<Option<Status>> = against.iter().map(|_| None).collect();
+    let (mine, commits, branches, submodules) = std::thread::scope(|scope| {
+        let against = &against;
+        // The selected repository's status, and the commits a pull would bring in, asked for only
+        // where the status says there are any: `behind` is the count and this is the same set by
+        // oid, so nothing to pull means no `rev-list` at all. A non-zero count also means there
+        // is an upstream, which the range needs.
+        let mine = (asked.get(at) == Some(&true)).then(|| {
+            scope.spawn(move || {
+                let status = status_of(&against[at]);
+                let behind = status.as_ref().map(|s| s.branch.behind > 0);
+                let incoming = head.zip(behind).and_then(|(repo, behind)| match behind {
+                    true => vault
+                        .git_incoming(repo)
+                        .inspect_err(|e| tracing::debug!("git rev-list HEAD..@{{u}}: {e}"))
+                        .ok()
+                        .map(|oids| oids.into_iter().collect()),
+                    false => Some(HashSet::new()),
+                });
+                (status, incoming)
             })
-            .into_iter()
-            .collect(),
-        false => HashSet::new(),
+        });
+        let log = head.map(|repo| {
+            scope.spawn(move || {
+                vault
+                    .git_log(repo, 0, rows)
+                    .inspect_err(|e| tracing::debug!("git log: {e}"))
+                    .ok()
+            })
+        });
+        let branches = head.map(|repo| {
+            scope.spawn(move || {
+                vault
+                    .git_branches(repo)
+                    .inspect_err(|e| tracing::debug!("git for-each-ref: {e}"))
+                    .ok()
+            })
+        });
+        let submodules = head.map(|repo| {
+            scope.spawn(move || {
+                vault
+                    .git_submodules(repo)
+                    .inspect_err(|e| tracing::debug!("git submodule status: {e}"))
+                    .ok()
+            })
+        });
+        let others: Vec<usize> = (0..against.len())
+            .filter(|&i| asked[i] && i != at)
+            .collect();
+        for chunk in others.chunks(AT_ONCE) {
+            let reads: Vec<_> = chunk
+                .iter()
+                .map(|&i| (i, scope.spawn(move || status_of(&against[i]))))
+                .collect();
+            for (i, read) in reads {
+                statuses[i] = read.join().ok().flatten();
+            }
+        }
+        (
+            joined(mine),
+            joined(log).flatten(),
+            joined(branches).flatten(),
+            joined(submodules).flatten(),
+        )
     });
+    let (status, incoming) = mine.unwrap_or_default();
+    if let Some(slot) = statuses.get_mut(at) {
+        *slot = status;
+    }
     Some(Fetched {
         selected,
         rows,
@@ -243,4 +269,9 @@ pub(super) fn fetch(
         submodules,
         incoming,
     })
+}
+
+/// What a read on a thread of its own answered, `None` for one never asked or that panicked.
+fn joined<T>(read: Option<std::thread::ScopedJoinHandle<'_, T>>) -> Option<T> {
+    read.and_then(|read| read.join().ok())
 }

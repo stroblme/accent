@@ -36,6 +36,7 @@ mod source;
 use branch::{branch_line, branch_model, branch_parts, head_name, local_name};
 use compare::Watch;
 use log::same_head;
+use refresh::Ask;
 pub(crate) use source::Source;
 
 /// Refresh depth: status for worktree changes, repository data for `.git` changes, and discovery
@@ -268,6 +269,11 @@ pub struct Panel {
     /// The debounce timer, replaced rather than stacked.
     pending: crate::widgets::Debounce,
     refresh_gate: RefCell<refresh::RefreshGate>,
+    /// What waits on a refresh being on screen, by the number it started under.
+    waiting: RefCell<Vec<(u64, refresh::Shown)>>,
+    /// The bars over the changes and the history while a refresh is on its way to them.
+    changes_wait: crate::widgets::Pulse,
+    log_wait: crate::widgets::Pulse,
     running_git: RefCell<actions::RunningGit>,
     /// What the debounced refresh has been asked for so far, taken when its timer fires.
     pending_ask: Cell<Option<refresh::Ask>>,
@@ -317,6 +323,9 @@ pub struct Panel {
     /// How many commands [`Panel::run`] has running, which is one at most: what a closing window
     /// waits for ([`Panel::busy`]).
     jobs: Cell<usize>,
+    /// A command has answered and the pane is held until the refresh after it shows what it did,
+    /// which a close does not wait for.
+    settling: Cell<bool>,
     /// A close waiting for those commands to end ([`Panel::when_done`]), told whether they all
     /// went through.
     leaving: RefCell<Option<Leave>>,
@@ -360,6 +369,7 @@ impl Panel {
         self.source.replace(Arc::new(source));
         self.source_generation.set(self.source_generation.get() + 1);
         self.refresh_gate.borrow_mut().invalidate();
+        self.shown_up_to(u64::MAX);
         self.pending.cancel();
         self.pending_ask.take();
         self.asked.set(self.asked.get() + 1);
@@ -458,10 +468,12 @@ impl Panel {
             .sync_create()
             .build();
 
+        let (changes_list, changes_wait) = with_bar(&scroller(&changes_view));
+        let (log_list, log_wait) = with_bar(&scroller(&log_view));
         let divider = gtk::Paned::builder()
             .orientation(gtk::Orientation::Vertical)
-            .start_child(&scroller(&changes_view))
-            .end_child(&scroller(&log_view))
+            .start_child(&changes_list)
+            .end_child(&log_list)
             .resize_start_child(true)
             .resize_end_child(true)
             .shrink_start_child(false)
@@ -532,6 +544,9 @@ impl Panel {
             state: RefCell::new(state),
             pending: crate::widgets::Debounce::new(DEBOUNCE),
             refresh_gate: RefCell::new(refresh::RefreshGate::default()),
+            waiting: RefCell::default(),
+            changes_wait,
+            log_wait,
             running_git: RefCell::new(actions::RunningGit::default()),
             pending_ask: Cell::new(None),
             discovered: Cell::new(glib::monotonic_time()),
@@ -549,6 +564,7 @@ impl Panel {
             fetched_once: Cell::new(false),
             missed_fetch: Cell::new(false),
             jobs: Cell::new(0),
+            settling: Cell::new(false),
             leaving: RefCell::new(None),
             gone: Cell::new(false),
             expanded: RefCell::new(None),
@@ -712,7 +728,14 @@ impl Panel {
             (panel.hooks.picked)();
             panel.draw();
             panel.redraw_log();
-            panel.refresh(Depth::Everything);
+            // Its own, at once: the refresh under way was asked about the one it leaves.
+            let picked = panel
+                .state
+                .borrow()
+                .repos
+                .get(chooser.selected() as usize)
+                .cloned();
+            panel.refresh_now(Ask::repos(picked.map(|repo| repo.root)), |_| ());
             // And ask its remote what it has, rather than leaving the first look at a second
             // repository up to five minutes stale. One round trip per pick, which is what makes
             // this the user's choice rather than a timer's: nobody cycles a chooser for fun.
@@ -953,6 +976,69 @@ impl Panel {
     /// Press the commit button, whatever it reads. `ACCENT_BENCH_GIT` and nothing else.
     #[cfg(feature = "bench")]
     pub fn press_commit(&self) {
+        self.commit.emit_clicked();
+    }
+
+    /// What the pane holds of the selected repository, in one line: its staged and its other
+    /// changes, HEAD's commit and the history's first, the branch and its counts, and whether the
+    /// pane is held. `ACCENT_BENCH_GIT=refresh` and nothing else.
+    #[cfg(feature = "bench")]
+    pub fn shown(&self) -> String {
+        let state = self.state.borrow();
+        let status = state.statuses.get(state.selected);
+        let paths = |entries: Vec<&Entry>| -> String {
+            let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+            paths.join(",")
+        };
+        let staged = status
+            .map(|s| paths(s.staged().collect()))
+            .unwrap_or_default();
+        let changes = status
+            .map(|s| paths(s.changes().collect()))
+            .unwrap_or_default();
+        let head = status
+            .and_then(|s| s.branch.oid.as_deref())
+            .map(short)
+            .unwrap_or_default();
+        format!(
+            "staged=[{staged}] changes=[{changes}] head={head} log={} rows={} branch={} counts={} \
+             held={}",
+            self.first_commit()
+                .as_deref()
+                .map(short)
+                .unwrap_or_default(),
+            self.log.n_items(),
+            self.branch_label.text(),
+            self.counts.text().replace(' ', "/"),
+            self.held()
+        )
+    }
+
+    /// Stage or unstage `path` of the selected repository, as its row's button does.
+    #[cfg(feature = "bench")]
+    pub fn bench_stage(self: &Rc<Self>, path: &str, stage: bool) {
+        match stage {
+            true => self.stage(vec![path.to_string()], None),
+            false => self.unstage(vec![path.to_string()], None),
+        }
+    }
+
+    /// Switch to `branch`, as its row in the branch popover does.
+    #[cfg(feature = "bench")]
+    pub fn bench_checkout(self: &Rc<Self>, branch: &str) {
+        self.checkout(branch.to_string());
+    }
+
+    /// The background fetch, run now.
+    #[cfg(feature = "bench")]
+    pub fn bench_fetch(self: &Rc<Self>) {
+        self.autofetch();
+    }
+
+    /// Commit `message`, as typing it and pressing Commit does.
+    #[cfg(feature = "bench")]
+    pub fn bench_commit(&self, message: &str) {
+        self.message.buffer().set_text(message);
         self.commit.emit_clicked();
     }
 
@@ -1356,6 +1442,20 @@ fn scroller(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
     scroller
 }
 
+/// `list` under a progress bar across its top, faded out until a refresh on its way to the list
+/// has taken long enough to show it (DESIGN.md, Loading), and the bar's pulse. Laid over the list,
+/// so it reserves no height.
+fn with_bar(list: &gtk::ScrolledWindow) -> (gtk::Overlay, crate::widgets::Pulse) {
+    let bar = gtk::ProgressBar::builder()
+        .opacity(0.0)
+        .valign(gtk::Align::Start)
+        .can_target(false)
+        .build();
+    let overlay = gtk::Overlay::builder().child(list).build();
+    overlay.add_overlay(&bar);
+    (overlay, crate::widgets::Pulse::new(&bar))
+}
+
 /// The paned's default split, set once. `map` runs before the first allocation, so the height is
 /// only known an idle later; after that the position is the user's.
 fn place_once(divider: &gtk::Paned) {
@@ -1405,8 +1505,9 @@ type Run = (u32, u32, Vec<glib::BoxedAnyObject>);
 
 impl Fill {
     /// Splice sorted, disjoint `runs` from bottom to top so original positions remain valid.
-    /// Insert later chunks before their following rows, one chunk per turn. Pause while `hold`
-    /// is true; `done` runs when all items land.
+    /// Each chunk takes the place of as many of the rows it replaces, one chunk per turn, so a
+    /// list whose every row changes — a commit renaming the lanes below it — never empties to
+    /// fill again. Pause while `hold` is true; `done` runs when all items land.
     ///
     /// Separate runs retain untouched focus and scroll anchors, unlike replacing one span across
     /// distant changes.
@@ -1421,14 +1522,20 @@ impl Fill {
         let n = i64::from(store.n_items());
         // How many rows the runs below the one being spliced add.
         let mut grown = 0;
+        // Per run still to splice: the rows after it once the runs below are in, how many of the
+        // rows it replaces are still there, and the rows still to come.
         let mut pending = Vec::new();
         for (at, removed, mut items) in runs.into_iter().rev() {
             let tail = n - i64::from(at + removed) + grown;
             grown += items.len() as i64 - i64::from(removed);
             let rest = items.split_off(items.len().min(FILL_CHUNK));
-            store.splice(at, removed, &items);
+            let now = match rest.is_empty() {
+                true => removed,
+                false => removed.min(items.len() as u32),
+            };
+            store.splice(at, now, &items);
             if !rest.is_empty() {
-                pending.push((tail as u32, rest.into_iter()));
+                pending.push((tail as u32, removed - now, rest.into_iter()));
             }
         }
         if pending.is_empty() {
@@ -1440,9 +1547,14 @@ impl Fill {
                 slot.take();
                 return glib::ControlFlow::Break;
             };
-            let (tail, rest) = &mut pending[0];
+            let (tail, old, rest) = &mut pending[0];
             let chunk: Vec<_> = rest.by_ref().take(FILL_CHUNK).collect();
-            store.splice(store.n_items() - *tail, 0, &chunk);
+            let replaced = match rest.len() {
+                0 => *old,
+                _ => (*old).min(chunk.len() as u32),
+            };
+            store.splice(store.n_items() - *tail - *old, replaced, &chunk);
+            *old -= replaced;
             if rest.len() == 0 {
                 pending.remove(0);
             }

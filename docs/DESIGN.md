@@ -617,6 +617,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - Picking one draws the whole pane at once from what it last held about that repository — its status, which every refresh reads for every repository, and its history's first page, branches and submodules from the last time it was picked — and the refresh the pick asks for replaces that once it lands.
   Every row on screen is the picked repository's own; one never picked before shows its history when that refresh lands.
   The changes and the history go into their lists ten rows at a time, the frames drawn in between (`git::Fill`): GTK makes a row's widgets for each of a list's first 200 items, which spliced at once held the window up 80-130 ms on a repository with 2 000 changes.
+  Each ten take the place of ten of the rows they replace, so a list whose every row changes never empties to fill again.
+  A commit on a branch behind its upstream renames the lanes of every commit below it, and the history went down to ten rows and grew back over 450 ms before (Xvfb, 2026-11-22).
 - Picking away from such a repository cannot be spread so, every row having to go at once, so a row makes what most rows leave out — a commit's decorations, its not-pulled arrow and "side branched here", a file's folder — the first time it shows it, and only hides it after (`git::part`): a commit row is 8 widgets where it was 15, and the pick held the window up 23 ms where it held it 30 (medians, release, Xvfb, 2026-10-07, `ACCENT_BENCH_GIT=switch`'s `pick_ms`).
 - Beside the chooser, and only with it, Sync All: Sync's pull and push for every repository, one after another, carrying on past one that fails.
   One toast at the end names each that did not sync and why — git's own `error:` or `fatal:` line — and one stopped in a merge or a rebase is left alone and named with them.
@@ -647,6 +649,9 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - On a remote vault git runs on the host, which finishes a command within its own bounds whatever the link does.
   A command whose link drops part way fails in the link's words and says the host may still finish it, and that the pane shows what it did once the link is back: the reconnect refreshes it, and so does what the host finishes later, which moves a ref the vault watches.
 - While a command runs (a stage, a discard, a commit, a sync, a branch switch) the control it was asked from shows a spinner in place of its icon or label, at its size, and keeps the keyboard; the pane's other actions are insensitive until git answers, so a press on a slow link is answered at once.
+  One that went through holds the pane on until the refresh after it shows what it did, and says so in its toast then.
+  Let go as git answered, the pane showed the rows from before it for as long as that refresh took, a file just committed still staged, and a Commit pressed meanwhile read an empty index off them and committed every change with `-a`.
+  One git refused lets go at once, since it changed nothing to wait for.
   A branch operation spins the branch button, its popover having gone; one asked from the palette or a dialog spins nothing and holds the pane the same.
   One command at a time: one asked meanwhile, from the palette, a comparison's hunk or the merge view, is refused with a toast rather than raced against the first for git's index lock, and the spinning control pressed again does nothing.
 - Sync's pull is a merge (`git pull --no-rebase`): it never rewrites a commit, and a conflict stops in the Merge Conflicts row.
@@ -657,6 +662,10 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - There is no Refresh button: a save, a watcher event and a `.git` write each schedule one — a write, never a read, or the pane's own reads would re-trigger it forever.
   A `git init` in a vault with no repository is such a write, so the pane shows itself unasked; Initialize Git Repository in the palette runs it at the vault root, on the host for a remote vault, and looks for the repository at once.
   A save or a watcher event asks `git status` only of the repositories holding what changed, so a file outside every repository costs no git process: a vault of 37 nested repositories ran 37 statuses for each save of a PDF drawn on at its root.
+  A command, a pick and the background fetch ask about their own repository alone, its status and its history, and the refresh a command or a pick asks for starts at once.
+  A refresh already on its way read git before what that one waits on, so its answer is dropped when it lands and what it asked is asked again after.
+  A refresh's git calls run together, each a round trip on a remote vault, and the other repositories' statuses go eight at a time.
+  On a vault of 37 repositories with each call held 30 ms, as a distant host's round trip, a Stage now shows in 0.12 s where it took 1.6 s, a Commit in 0.23 s where it took 1.8 s and a pick in 0.06 s where it took 1.4 s (`ACCENT_BENCH_GIT=refresh:`, medians of three, local and remote alike, 2026-11-22).
   The repositories are looked for again only after a walk, which a folder moved in with a repository in it gets, when one goes, or a folder holding one, and after a `.git` write, which may be a `git init` in a folder: that look is at most one per 3 s, one asked sooner waiting its turn rather than dropped.
 - The commit message box takes `Ctrl+Return` while it has the keyboard, although the chord is Insert Line Below: the editing chords are bound only while the keyboard is in a tab (Editing).
 - Commit commits what is staged, or `git commit -a` where nothing is (tracked changes in, untracked files out, as VS Code does with an empty index).
@@ -714,6 +723,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - One commit is expanded at a time, and a refresh closes it only where the history moved, so an expanded commit and what Load More added survive the save that scheduled the refresh.
   A refresh reads as many commits as are shown, so what Load More added survives a history that moved too, at the price of a bigger `git log` on every save once it was used.
 - A refresh leaves both lists where they are, as the tree does (Files): only the rows it changed are spliced, each run of them on its own.
+  While a refresh is on its way to a list, the list has the search pane's bar across its top, laid over its first row since nothing above it shares the line, and held back as that one is (Loading).
+  The changes get it for a refresh asking the selected repository's status and the history for one reading it, so a history never shows empty without saying its rows are coming.
   A Stage click half way down a scrolled list takes its row out of Changes and the keyboard to the row now in its place, the rows around it staying put, and a commit goes in above the history on screen.
   One span from the first change to the last scrolled the list up to it, GTK keeping its focus and its scroll inside a span that replaces them.
 
@@ -2672,6 +2683,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
   GTK re-presents a popover only when its parent is allocated, which a widget with its own `size_allocate`, such as `GtkListView`, never is, so a menu hung off one freezes at its first size and scrolls.
 - Loading is the status bar's progress text ("Indexing… 1200/42700 files"): indexing and saving never block the window, so no spinner covers content and no progress bar owns the window.
   Two bars are drawn, and no third without a line here: the sidebar's search progress, held back for its first two pulses so that a requery nobody asked for is over before there is anything to see; and a remote vault's first connection, which a print or an export being made shows too (Layout map, Loading).
+  The third is the search bar's again, over each of the Git pane's two lists while a refresh is on its way to it (Git pane).
   GTK4 has no indeterminate mode, so both pulse on timers of ours, removed when the work ends and when their window closes: a leaked `glib::timeout` keeps firing.
 - **Stopping a first index pauses it:** the status bar keeps indexed files usable and shows Resume; no other walk runs until Resume or the next vault open.
   A stop during the scan writes nothing, since a partial scan would read every file it had not reached as deleted.

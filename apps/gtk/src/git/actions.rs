@@ -88,7 +88,10 @@ impl Panel {
     /// The one way a command runs, with a repository or before there is one ([`Panel::init`]):
     /// one at a time, the pane held meanwhile ([`Panel::hold`]), and `roots` stopped when the
     /// window closes. A Sync or a Sync All also leaves the status bar's branch doing nothing
-    /// through [`Hooks::syncing`].
+    /// through [`Hooks::syncing`]. One that goes through holds the pane on until the refresh of
+    /// `roots` after it shows what it did, its toast coming with it: a pane let go before that
+    /// showed the rows from before it, a file just committed still staged, and Commit read the
+    /// index from them.
     fn run(
         self: &Rc<Self>,
         what: String,
@@ -115,6 +118,7 @@ impl Panel {
         let hold = self.hooks.window.application().map(|app| app.hold());
         let panel = self.clone();
         let vault = self.source();
+        let asked = Ask::repos(roots.iter().cloned());
         let roots = if vault.is_remote() { Vec::new() } else { roots };
         self.running_git.borrow_mut().start(&roots);
         let generation = self.source_generation.get();
@@ -126,17 +130,20 @@ impl Panel {
             if panel.gone.get() {
                 return;
             }
-            // Sync comes back as `sync_state` last left it, which the refresh below brings up to
-            // date.
-            panel.hold();
-            panel.acting.take();
+            let ok = matches!(done, Some(Ok(_)));
+            // Still held, its control spinning, where it went through; let go where git refused,
+            // there being nothing to wait for. Sync comes back as `sync_state` last left it,
+            // which the refresh below brings up to date.
+            panel.settling.set(ok);
+            if !ok {
+                panel.let_go();
+            }
             panel.pushing.store(false, Ordering::Relaxed);
             if sync {
                 (panel.hooks.syncing)(false);
             }
             // A close waiting for git: the last command to go through closes the window, and one
             // that fails keeps it open under the failure said below.
-            let ok = matches!(done, Some(Ok(_)));
             if (!ok || panel.jobs.get() == 0)
                 && let Some(leave) = panel.leaving.take()
             {
@@ -146,12 +153,13 @@ impl Panel {
                 }
             }
             if panel.source_generation.get() != generation {
-                return;
+                panel.settling.set(false);
+                return panel.let_go();
             }
-            match done {
+            let said = match done {
                 Some(Ok(message)) => {
                     then(&panel);
-                    (panel.hooks.toast)(&message);
+                    Some(message)
                 }
                 Some(Err(e)) => {
                     let message = match lost(&e) {
@@ -164,26 +172,48 @@ impl Panel {
                         }
                         _ => panel.failed(&what, &message),
                     }
+                    None
                 }
                 // A command the user pressed a button for: a worker that stopped is reported the
                 // way any other failure of it is, rather than leaving the spinner's reset as the
                 // only sign anything happened.
-                None => panel.failed(&what, "the worker stopped"),
-            }
-            // Straight away, not through the debounce: the user asked for this and is watching
-            // the row it moves. The debounce is there to fold a burst of watcher events into one
-            // query, and the `.git` write this just made will schedule one of those anyway. A
-            // vault that had no repository looks for the one a `git init` made.
-            panel.refresh(match panel.has_repos() {
-                true => Depth::Everything,
-                false => Depth::Discover,
+                None => {
+                    panel.failed(&what, "the worker stopped");
+                    None
+                }
+            };
+            // Straight away, not through the debounce, and of the repositories it ran in alone:
+            // the user asked for this and is watching the row it moves. The debounce is there to
+            // fold a burst of watcher events into one query, and the `.git` write this just made
+            // schedules one of those for every repository anyway. A vault that had no repository
+            // looks for the one a `git init` made.
+            let asked = match panel.has_repos() {
+                true => asked,
+                false => Depth::Discover.into(),
+            };
+            panel.refresh_now(asked, move |panel| {
+                if panel.settling.replace(false) {
+                    panel.let_go();
+                }
+                if let Some(message) = said.filter(|_| panel.source_generation.get() == generation)
+                {
+                    (panel.hooks.toast)(&message);
+                }
             });
         });
     }
 
-    /// Whether a command is running, which is one at a time.
+    /// Whether a command is running, which is one at a time, or the refresh after it has yet to
+    /// show what it did.
     pub(super) fn held(&self) -> bool {
-        self.jobs.get() > 0
+        self.jobs.get() > 0 || self.settling.get()
+    }
+
+    /// The command is over as far as the pane goes: its control stops spinning, and the pane's
+    /// other actions come back.
+    fn let_go(&self) {
+        self.hold();
+        self.acting.take();
     }
 
     /// What a branch operation spins: the branch button, its popover having gone.
@@ -882,10 +912,13 @@ impl Panel {
             if panel.source_generation.get() != generation {
                 return;
             }
+            // The merge's repository, which need not be the one the pane shows by now.
+            let roots = Some(vec![what.repo.root.clone()]);
             let job = move |vault: &Source, _: &Repo| {
                 vault.git_stage(&what.repo, &[what.rel]).map(|()| done)
             };
-            panel.command(format!("mark {name} resolved"), None, Fail::Say, job);
+            let what = format!("mark {name} resolved");
+            panel.command_then(what, None, Fail::Say, roots, job, |_| ());
         };
         match left {
             0 => stage(),
@@ -922,11 +955,13 @@ impl Panel {
             false => ("stage the selected lines", "Staged the selected lines"),
             true => ("unstage the selected lines", "Unstaged the selected lines"),
         };
-        self.command(what.to_string(), None, Fail::Say, move |vault, _| {
+        let roots = Some(vec![repo.root.clone()]);
+        let job = move |vault: &Source, _: &Repo| {
             vault
                 .git_stage_text(&repo, &rel, &text)
                 .map(|()| done.to_string())
-        });
+        };
+        self.command_then(what.to_string(), None, Fail::Say, roots, job, |_| ());
     }
 
     /// [`Panel::command`] for the three that take paths, which have to outlive the borrow.
