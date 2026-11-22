@@ -8,10 +8,10 @@ use vte4::TerminalExt as _;
 
 /// `ACCENT_BENCH_LINKS=1` on a local vault, under a scratch HOME: a shell at the vault root is
 /// fed a screen of paths as Claude Code, a compiler and grep print them, a missing one, a URL, an
-/// OSC 8 `file:` link and an OSC 8 link to a bare path, as Claude Code writes a markdown link.
+/// OSC 8 `file:` link and an OSC 8 link to a bare path, as Claude Code may write a markdown link.
 /// For each the pointer rests on it and the drill prints whether it lit, then a Ctrl+click and
-/// the tab and caret it left in front, the shell brought back after each; then the context menu
-/// over a path. Writes `links/target.rs` in the vault and `outside.md` in HOME.
+/// the tab and caret it left in front, the shell brought back after each; then whether a path
+/// lights on the one motion that reaches it, and the context menu over a path. Writes `links/target.rs` in the vault and `outside.md` in HOME.
 pub(super) fn bench_links(app: &Rc<App>) {
     let app = app.clone();
     glib::spawn_future_local(async move {
@@ -86,6 +86,13 @@ pub(super) fn bench_links(app: &Rc<App>) {
             app.reveal_page(&term.page);
             glib::timeout_future(Duration::from_millis(200)).await;
         }
+        // A path found at once lights on the one motion that reaches it, ahead of VTE's own look.
+        let (x, y) = cell(&term, 3, 1);
+        xtest(&format!("move {}", screen_at(&app, &term, x, y))).await;
+        let (x, y) = cell(&term, 2, 3);
+        xtest(&format!("move {}", screen_at(&app, &term, x, y))).await;
+        let cursor = term.view.cursor().and_then(|c| c.name());
+        println!("bench links first cursor={cursor:?}");
         // The context menu over a path offers it as it offers a URL, the address its absolute path.
         let (x, y) = cell(&term, 1, 6);
         xtest(&format!(

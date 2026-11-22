@@ -937,7 +937,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - `http`, `https` and `mailto` URLs in the output, OSC 8 hyperlinks included, are drawn as links and `Ctrl`+click opens one (a plain click is VTE's selection).
   The three schemes are an allowlist: a shell's output is untrusted, so a `javascript:` URL or any other is never launched, and a `file:` one is never handed to the desktop.
 - **A file path in the output is a link too** (user decision 2026-11-22), an absolute one, one from home (`~/`) or one from the shell's folder, with a `:line` or `:line:col` after it or not, as compilers, grep and Claude Code print them.
-  Claude Code 2.1 prints its tools' paths and its `path:line` references as plain text, and a markdown link to a file as an OSC 8 link, to a `file:` URL or a bare path with `#L12` naming its line, which opens the same way.
+  Claude Code 2.1 prints its tools' paths and its `path:line` references as plain text, as its bundle reads (2.1.330), and may hand a markdown link's target to OSC 8, so an OSC 8 link to a `file:` URL or to a bare path opens the same way, a `#L12` after it naming its line.
   The shell's folder is the one OSC 7 last reported, and for a shell that reports none the holder is asked where its process is, else it is the folder the shell started in.
   A path lights up as a URL does only once its file is found, since VTE lights every match of a pattern it holds, so the pattern is asked under the pointer alone and a path whose file is there is handed to VTE as one of its own.
   `Ctrl`+click opens it at its line and column, in the vault as Go to Definition opens a place and from outside it as Open File opens a file, and Copy Link Address copies its absolute path.

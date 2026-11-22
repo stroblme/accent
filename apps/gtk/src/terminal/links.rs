@@ -25,9 +25,9 @@ const GROUP: &str = "link";
 /// What counts as a link on the screen: an `http`, `https` or `mailto` URL, stopping before the
 /// punctuation that ends a sentence rather than swallowing it.
 const LINK: &str = r"(?:https?://|mailto:)[^\s<>\x22'`]*[^\s<>\x22'`.,:;!?)\]}]";
-/// A file path as a compiler, grep or Claude Code prints one, as plain text: Claude Code 2.1
-/// prints its tools' paths and its `path:line` so, and only a markdown link to a file as OSC 8
-/// ([`osc8_path`]). It is absolute, from home (`~/`), has a folder in
+/// A file path as a compiler, grep or Claude Code prints one, as plain text: Claude Code 2.1.330's
+/// bundle writes its tools' paths and its `path:line` so, and hands only URLs and a markdown
+/// link's target to OSC 8 ([`osc8_path`]). It is absolute, from home (`~/`), has a folder in
 /// it or is a file name with an extension, and may end in `:line` or `:line:col`. Its parts are
 /// anything but spaces, quotes, brackets, the shell's punctuation and the `:` before a line.
 /// It starts a word, so neither a URL's path nor another path's tail is one, and a full stop,
@@ -156,8 +156,9 @@ pub(super) fn install_links(term: &Rc<Term>) {
     });
     view.add_controller(primary);
 
-    // On the scroller round the view, in the capture phase, so the path under the pointer is lit
-    // before VTE's own motion handler looks for what to light: on the view itself VTE goes first.
+    // On the scroller round the view, in the capture phase, which GTK runs before any handler of
+    // the view's, so the path under the pointer is lit before VTE looks for what to light: on the
+    // view itself VTE went first, and a path lit only on the motion after.
     let motion = gtk::EventControllerMotion::new();
     motion.set_propagation_phase(gtk::PropagationPhase::Capture);
     let weak = Rc::downgrade(term);
@@ -401,7 +402,7 @@ fn candidate(term: &Term, x: f64, y: f64) -> Option<String> {
     found.map(|text| text.to_string())
 }
 
-/// The path an OSC 8 link names, as Claude Code writes a markdown link to a file: a `file:` URL,
+/// The path an OSC 8 link names, as Claude Code may write a markdown link's target: a `file:` URL
 /// or a bare path, with a `#L12` naming its line or not. A URL names one on the shell's machine,
 /// on a host whatever host it names and here only this one (`dir_of`), as OSC 7 is read.
 fn osc8_path(uri: &str, remote: bool) -> Option<String> {
