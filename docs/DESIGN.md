@@ -2350,6 +2350,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 ### PDF
 
 - Copy `Ctrl+C`; next and previous page `Space` / `Shift+Space`, `n` / `p`, `Right` / `Left` and `Alt+scroll` a page a notch, as on a diagram (Diagram); `Up` / `Down` scroll a step and are not paging.
+  A page presented alone is turned by them too, and by Page Up, Page Down and the plain wheel (Zoom).
   `Alt+scroll` pages the PDF under the pointer, which need not be the focused pane's.
   Paging on stops at the last page, however far down it the reader is.
 - Next Page and Previous Page are palette commands with no accelerator, fired by those keys as the tab's own: each is a typing key, and an application accelerator is dispatched at the window ahead of whatever has the keyboard, so `Space` in the table would be taken from the editor, the terminal and every entry.
@@ -2441,7 +2442,9 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 - The range is a tenth to eight times for a page or an image, a half to triple for the document font.
 - The readout at the end of the status bar is the Reset control: clicking it is `Ctrl+0` — 100 % for a document, Fit Height for a PDF, though a PDF opens at Fit Width.
 - Fit Height fills the viewport's height with one page, edge to edge, landing on the top of the page being read: any margin would only show the next page.
-  Presented, pages that do not fill it, wide ones or ones fitted beside a taller page of the same file, leave room below the last page, so a turn puts every page at the top, while reading ends at the last page's bottom (user decision 2026-11-19).
+  Presented at Fit Height, each page is shown alone, centred in the view across and down with nothing of the pages before and after it, as Evince and Okular present a page (user decision 2026-11-22), while reading ends at the last page's bottom.
+  Every turn goes a whole page, a wheel's notch or 40 px of a swipe, Up, Down, Page Up and Page Down among them, and a pan or a scrollbar lands on the nearer page, so no two pages ever share the view.
+  Zoomed while presented, the pages read on in one column as they do outside presentation, until Fit Height comes back.
   A turn goes on from the page at the top while the whole of it is on screen, since the middle of the viewport may already lie on the next one, and a presented PDF's count names that page too (Status bar).
   A pane too narrow for that fits the width, so the whole page stays on screen.
 - A PDF always shows its zoom (`Fit Width`, `Fit Height` or `N %`), fitting being a zoom too, and an image likewise (`Fit` or `N %`); a document and a terminal only off 100 %; a status page, a diff and a window with no tab never.
@@ -2582,7 +2585,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 - Toggle Preview `Ctrl+M` (a note's or a notebook's preview tab and back, Preview and Notebook), Toggle Minimap (unbound), Show Graph `Ctrl+Shift+M` (Graph), Presentation `F5`, which is Continue while a debug session runs (Debugging), and Laser Pointer `L` while presenting.
 - Presentation hides the sidebar, the other panes, the tab bars and both header bars, and shows the note rendered.
   The presented pane stays where it is in the pane tree with the branches beside it hidden, so its find bar and its `Ctrl+Tab` card stay its own and every divider is where it was afterwards; the rendered note is the preview laid over the pane's tabs.
-  A tab that draws its own document — a source file, a PDF, a diagram, a notebook, an image, a diff, a terminal, a note's preview tab — is presented as it is; a PDF fits a whole page meanwhile and gets its zoom back afterwards.
+  A tab that draws its own document — a source file, a PDF, a diagram, a notebook, an image, a diff, a terminal, a note's preview tab — is presented as it is; a PDF shows one whole page at a time meanwhile, alone and centred (Zoom), and gets its zoom back afterwards.
   A presented notebook is read only and runs nothing, its cell buttons and the strips that add cells put away, and its markdown cells and markdown outputs rendered as its preview tab renders them (user decision 2026-11-13), their sources back afterwards; the selected code cell's editor keeps the keyboard, and over a rendered cell the notebook reads with the preview tab's reading keys.
   A diagram is a slide deck: each page is fitted as it is shown, Space, Page Down, Right, `n` and a wheel notch down go to the next, Shift+Space, Page Up, Left, `p` and a notch up to the one before, and Home and End to the first and last, and leaving gives back its zoom, and its scroll if the page is the one it began on.
   The drawing ring goes away meanwhile, a PDF's and a diagram's alike, and the tool in hand is put down (a PDF back to reading, a diagram to select), a diagram's label being edited finished and its selection let go, so a click never draws on what is presented; leaving brings the ring back as it was, with no tool in hand.

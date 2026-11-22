@@ -268,9 +268,10 @@ impl PdfTab {
         popover
     }
 
-    /// The keys a reader uses. Page Up, Page Down, Home and End are `GtkScrolledWindow`'s own;
-    /// the arrows are not — it binds a scroll step to `Ctrl+Up`/`Ctrl+Down` and leaves the bare
-    /// arrow keys to move the focus off the page — so they are wired here.
+    /// The keys a reader uses. Page Up, Page Down, Home and End are `GtkScrolledWindow`'s own,
+    /// but for a page presented alone; the arrows are not — it binds a scroll step to
+    /// `Ctrl+Up`/`Ctrl+Down` and leaves the bare arrow keys to move the focus off the page — so
+    /// they are wired here.
     pub(super) fn wire_keys(self: &Rc<Self>) {
         let keys = gtk::EventControllerKey::new();
         keys.connect_key_pressed(glib::clone!(
@@ -372,6 +373,7 @@ impl PdfTab {
                         return glib::Propagation::Stop;
                     }
                 }
+                let alone = bare && tab.view.presents_alone();
                 match key {
                     gtk::gdk::Key::space if shift => tab.page(false),
                     gtk::gdk::Key::space => tab.page(true),
@@ -383,6 +385,15 @@ impl PdfTab {
                     gtk::gdk::Key::Right if bare => tab.page(true),
                     gtk::gdk::Key::Up if bare => tab.view.scroll_step(false),
                     gtk::gdk::Key::Down if bare => tab.view.scroll_step(true),
+                    // A page presented alone turns at once for Page Down and Page Up, and Home and
+                    // End go straight to either end: the scroller eases them through the pages
+                    // between, and the view, kept on one page, would stop that at its first frame.
+                    gtk::gdk::Key::Page_Down if alone => tab.page(true),
+                    gtk::gdk::Key::Page_Up if alone => tab.page(false),
+                    gtk::gdk::Key::Home if alone => tab.view.goto_page(0, None),
+                    gtk::gdk::Key::End if alone => {
+                        tab.view.goto_page(tab.page_count().saturating_sub(1), None)
+                    }
                     _ => return glib::Propagation::Proceed,
                 }
                 glib::Propagation::Stop
@@ -402,12 +413,13 @@ impl PdfTab {
         self.view.add_controller(keys);
     }
 
-    /// Alt+wheel pages as `n` and `p` do, a notch a page, over the reading view and not the strip.
-    /// The tab's own paging rather than the window's command, which pages the active pane's PDF,
-    /// where a wheel goes to the one under the pointer. In bubble phase on the view, ahead of its
-    /// scrolled window, which would scroll as well.
+    /// Alt+wheel pages as `n` and `p` do, a notch a page, over the reading view and not the strip,
+    /// and so does the wheel alone over pages presented one at a time, a slide deck. The tab's own
+    /// paging rather than the window's command, which pages the active pane's PDF, where a wheel
+    /// goes to the one under the pointer. In bubble phase on the view, ahead of its scrolled
+    /// window, which would scroll as well.
     pub(super) fn wire_wheel(self: &Rc<Self>) {
-        // What Alt+wheel has scrolled short of a notch (`zoom::wheel_steps`).
+        // What a paging wheel has scrolled short of a notch (`zoom::wheel_steps`).
         let alt = Rc::new(Cell::new(0.0));
         let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
         wheel.connect_scroll(glib::clone!(
@@ -421,7 +433,9 @@ impl PdfTab {
                 // Ctrl zooms (`zoom::zoom_on_wheel`) and Shift scrolls across.
                 let held = crate::platform::PRIMARY_MODIFIER | gtk::gdk::ModifierType::SHIFT_MASK;
                 let state = wheel.current_event_state();
-                if !state.contains(gtk::gdk::ModifierType::ALT_MASK) || state.intersects(held) {
+                let paging =
+                    state.contains(gtk::gdk::ModifierType::ALT_MASK) || tab.view.presents_alone();
+                if !paging || state.intersects(held) {
                     alt.set(0.0);
                     return glib::Propagation::Proceed;
                 }

@@ -132,9 +132,9 @@ impl PdfView {
         self.set_presenting(self.imp().presenting.get(), zoom);
     }
 
-    /// Present at `zoom`, or stop presenting and go back to it, in one layout. Taking the room
-    /// below the last page away before the zoom goes back would clamp the view first, and lose
-    /// the page at the top when it was one of the last.
+    /// Present at `zoom`, or stop presenting and go back to it, in one layout. Laying the pages
+    /// out for reading before the zoom goes back would clamp the view first, and lose the page
+    /// shown when it was one of the last.
     pub fn set_presenting(&self, on: bool, zoom: PdfZoom) {
         if self.imp().presenting.replace(on) == on && self.imp().zoom.get() == zoom {
             return;
@@ -979,8 +979,10 @@ mod imp {
     use crate::scrollable::Adjustments;
     use std::cell::OnceCell;
 
-    /// The view scrolled: paint what is under it now, and report the page if that changed.
+    /// The view scrolled: paint what is under it now, and report the page if that changed. Pages
+    /// presented one at a time stay whole (`keep_to_slot`).
     fn moved(view: &super::PdfView) {
+        view.keep_to_slot();
         view.queue_draw();
         view.imp().notice_page();
     }
@@ -1023,7 +1025,7 @@ mod imp {
         pub layout: RefCell<super::Layout>,
         pub cache: OnceCell<std::rc::Rc<RefCell<Cache>>>,
         pub zoom: Cell<PdfZoom>,
-        /// Presented, where pages fitted to the height leave room below the last one.
+        /// Presented, where pages fitted to the height are shown one at a time.
         pub presenting: Cell<bool>,
         pub theme: Cell<Theme>,
         pub thumbnails: Cell<bool>,

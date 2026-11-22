@@ -449,6 +449,8 @@ const PAGES: &str = r#"<mxfile host="accent">
 /// Last, `End` and `Left` on the wide deck (`wide end`). The wide deck is read at Fit Height before
 /// it is presented, turned once with `Right` (`wide reading`), and its scroll range and status bar
 /// printed then, presented, and after it is left, at its third page and at its last (`wide range`).
+/// Presented, its page is alone in the view and centred in it (`wide alone`), and stays so through
+/// a wheel's notch either way and through Down, Up, Page Down and Page Up, each a turn.
 pub(super) fn bench_paging(app: &Rc<App>) {
     scratch_only(app, "ACCENT_BENCH_CHROME=paging");
     let root = app.root();
@@ -511,6 +513,7 @@ pub(super) fn bench_paging(app: &Rc<App>) {
             present(&app, rel).await;
             if kind == "wide" {
                 range(&app, "presented");
+                alone(&app, "presented");
             }
             for key in PAGING {
                 // A PDF's Page Down and Page Up scroll most of a screen, as GTK's do, and are no
@@ -547,6 +550,28 @@ pub(super) fn bench_paging(app: &Rc<App>) {
                     presented_page(&app),
                     status(&app)
                 );
+                let turns = [
+                    ("notch_down", "scroll -1"),
+                    ("notch_up", "scroll 1"),
+                    ("Down", "key Down"),
+                    ("Up", "key Up"),
+                    ("Page_Down", "key Page_Down"),
+                    ("Page_Up", "key Page_Up"),
+                ];
+                for (name, step) in turns {
+                    if let Some(pdf) = app.active_pdf() {
+                        pdf.goto_page(middle);
+                    }
+                    glib::timeout_future(Duration::from_millis(400)).await;
+                    let before = presented_page(&app);
+                    super::git::xtest(&format!("{step}; sleep 0.4")).await;
+                    println!(
+                        "bench paging wide {name} {before}>{} status={:?}",
+                        presented_page(&app),
+                        status(&app)
+                    );
+                    alone(&app, name);
+                }
                 if let Some(pdf) = app.active_pdf() {
                     pdf.goto_page(middle);
                 }
@@ -590,8 +615,8 @@ fn status(app: &App) -> String {
 }
 
 /// `bench paging wide range <case> top=<page> room=<bool> status=<count>`: the page at the top,
-/// whether the view scrolls on past the pages' own height, which presenting leaves as room below
-/// the last page, and the page the status bar names. The pixels follow on a `range_px` line.
+/// whether the view scrolls on past the pages' own height, which presenting once left as room
+/// below the last page, and the page the status bar names. The pixels follow on a `range_px` line.
 fn range(app: &App, case: &str) {
     let Some(pdf) = app.active_pdf() else {
         return println!("bench paging wide range {case} no pdf");
@@ -604,6 +629,38 @@ fn range(app: &App, case: &str) {
         status(app)
     );
     println!("bench paging wide range_px {case} upper={upper:.1} content={content:.1}");
+}
+
+/// `bench paging wide alone <case> page=<n> centred=<bool> beside=<pages>`: the page shown,
+/// whether it sits in the middle of the view across and down, to the pixel `widget_rect` rounds
+/// by, and how many other pages show any of themselves in the view.
+fn alone(app: &App, case: &str) {
+    let view = app.active_pdf().and_then(|pdf| {
+        let view = pdf.views()[0].clone().downcast::<pdfview::PdfView>().ok()?;
+        Some((pdf, view))
+    });
+    let Some((pdf, view)) = view else {
+        return println!("bench paging wide alone {case} no pdf");
+    };
+    let (vw, vh) = (view.width(), view.height());
+    let shown = |n: usize| {
+        let (w, h) = pdf.page_size(n)?;
+        view.widget_rect(n, &accent_core::pdf::Rect::from_corners((0.0, 0.0), (w, h)))
+    };
+    let page = pdf.top_page();
+    let centred = shown(page).is_some_and(|r| {
+        let (right, bottom) = (vw - r.x() - r.width(), vh - r.y() - r.height());
+        (r.x() - right).abs() <= 2 && (r.y() - bottom).abs() <= 2
+    });
+    let beside = (0..pdf.page_count())
+        .filter(|&n| n != page)
+        .filter_map(shown)
+        .filter(|r| r.x() < vw && r.x() + r.width() > 0 && r.y() < vh && r.y() + r.height() > 0)
+        .count();
+    println!(
+        "bench paging wide alone {case} page={} centred={centred} beside={beside}",
+        page + 1
+    );
 }
 
 /// Bring `rel`'s tab to the front with the keyboard in it, and present it.

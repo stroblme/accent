@@ -41,6 +41,10 @@ pub struct Layout {
     pub pages: Vec<PageRect>,
     pub width: f32,
     pub height: f32,
+    /// While a page is presented at Fit Height, the view's height: each page alone in a slot
+    /// that tall, centred in it, so a view scrolled to a slot's top shows that page and nothing
+    /// of the pages beside it ([`slotted`]).
+    pub slot: Option<f32>,
 }
 
 impl Layout {
@@ -125,7 +129,20 @@ pub fn layout(sizes: &[(f32, f32)], scale: f32, viewport_w: f32) -> Layout {
         pages,
         width,
         height: y.max(1.0),
+        slot: None,
     }
+}
+
+/// `layout` with each page alone in a slot `slot` tall, one after another, and centred in it:
+/// how pages fitted to the view's height `slot` are presented, one at a time with nothing round
+/// them, as Evince and Okular present them.
+pub fn slotted(mut layout: Layout, slot: f32) -> Layout {
+    for (n, page) in layout.pages.iter_mut().enumerate() {
+        page.y = n as f32 * slot + ((slot - page.h) / 2.0).max(0.0);
+    }
+    layout.height = (layout.pages.len() as f32 * slot).max(1.0);
+    layout.slot = Some(slot);
+    layout
 }
 
 /// The scale a zoom mode asks for, given the viewport it has to fit into.
@@ -177,19 +194,25 @@ pub fn anchor_at(layout: &Layout, x: f64, y: f64) -> Anchor {
         Some(rect) => Anchor {
             page,
             u: ((x - f64::from(rect.x)) / f64::from(rect.w.max(1.0))) as f32,
-            v: ((y - f64::from(rect.y)) / f64::from(rect.h.max(1.0))) as f32,
+            // A page presented alone is shown whole, from its slot's top.
+            v: match layout.slot {
+                Some(_) => 0.0,
+                None => ((y - f64::from(rect.y)) / f64::from(rect.h.max(1.0))) as f32,
+            },
         },
         None => Anchor::default(),
     }
 }
 
-/// Where a reading position sits in the content, or `None` for a page this layout has not got.
+/// Where a reading position sits in the content, or `None` for a page this layout has not got:
+/// a page presented alone at its slot's top, where the view shows all of it.
 pub fn offset_of(layout: &Layout, anchor: Anchor) -> Option<(f64, f64)> {
     let rect = layout.pages.get(anchor.page)?;
-    Some((
-        f64::from(rect.x + anchor.u * rect.w),
-        f64::from(rect.y + anchor.v * rect.h),
-    ))
+    let y = match layout.slot {
+        Some(slot) => f64::from(slot) * anchor.page as f64,
+        None => f64::from(rect.y + anchor.v * rect.h),
+    };
+    Some((f64::from(rect.x + anchor.u * rect.w), y))
 }
 
 /// Where content coordinate `at` lands in a view scrolled to `offset`, on the nearest whole
@@ -200,9 +223,14 @@ pub fn on_grid(at: f32, offset: f64, sf: i32) -> f32 {
     (((f64::from(at) - offset) * sf).round() / sf) as f32
 }
 
-/// Find the page containing a content coordinate, or the nearest page above it. Binary search
-/// keeps per-scroll, per-drag and per-frame lookups cheap in long documents.
+/// Find the page containing a content coordinate, or the nearest page above it, or for pages
+/// presented alone the page whose slot holds it. Binary search keeps per-scroll, per-drag and
+/// per-frame lookups cheap in long documents.
 pub(crate) fn page_at(layout: &Layout, y: f64) -> usize {
+    if let Some(slot) = layout.slot {
+        let last = layout.pages.len().saturating_sub(1);
+        return ((y / f64::from(slot)).floor().max(0.0) as usize).min(last);
+    }
     layout
         .pages
         .partition_point(|rect| f64::from(rect.y) <= y)
@@ -394,5 +422,30 @@ mod tests {
         assert_eq!(on_grid(219.5, 0.0, 1), 220.0);
         assert_eq!(on_grid(143.45, 0.0, 2), 143.5);
         assert_eq!(on_grid(2e6 + 0.25, 1_999_500.0, 2), 500.5);
+    }
+
+    /// Wide slides fitted into a tall view and presented: each alone in a slot the view's height,
+    /// centred across and down, the view at a slot's top showing its page and nothing beside it,
+    /// and every way to a page landing on its slot.
+    #[test]
+    fn a_presented_page_is_alone_and_centred() {
+        let sizes = vec![(842.0, 260.0); 3];
+        let (vw, vh) = (900.0, 700.0);
+        let scale = fit_scale(&sizes, PdfZoom::FitPage, vw, vh);
+        let out = slotted(layout(&sizes, scale, vw), vh);
+        assert_eq!(out.height, 3.0 * vh);
+        for (n, page) in out.pages.iter().enumerate() {
+            let top = n as f32 * vh;
+            assert!(((page.y - top) - (top + vh - (page.y + page.h))).abs() < 1e-3);
+            assert!((page.x - (vw - page.x - page.w)).abs() < 1e-3);
+        }
+        // Scrolled to the second slot, the pages either side lie wholly outside the view.
+        let (above, below) = (out.pages[0], out.pages[2]);
+        assert!(above.y + above.h <= vh && below.y >= 2.0 * vh);
+        assert_eq!(page_at(&out, f64::from(vh) + 1.0), 1);
+        assert_eq!(page_at(&out, f64::from(3.0 * vh) + 50.0), 2);
+        let anchor = anchor_at(&out, 0.0, f64::from(vh));
+        assert_eq!((anchor.page, anchor.v), (1, 0.0));
+        assert_eq!(offset_of(&out, anchor).map(|(_, y)| y), Some(f64::from(vh)));
     }
 }

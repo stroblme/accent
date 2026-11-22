@@ -8,7 +8,7 @@ use gtk::subclass::prelude::*;
 use super::PdfView;
 use crate::pdf::geometry::{
     Anchor, GAP, Layout, PdfZoom, anchor_at, clamp_layout, fit_scale, layout, offset_of, page_at,
-    resume_at,
+    resume_at, slotted,
 };
 
 impl PdfView {
@@ -72,7 +72,8 @@ impl PdfView {
         }
     }
 
-    /// Scroll so `page` starts at the top of the viewport, `top` points down it if given.
+    /// Scroll so `page` starts at the top of the viewport, `top` points down it if given, or show
+    /// it whole while it is presented alone.
     pub fn goto_page(&self, page: usize, top: Option<f32>) {
         if self.after_layout(move |view| view.goto_page(page, top)) {
             return;
@@ -83,8 +84,12 @@ impl PdfView {
         let Some(rect) = layout.pages.get(page) else {
             return;
         };
+        let y = match layout.slot {
+            Some(slot) => slot * page as f32,
+            None => rect.y + v,
+        };
         if let Some(vadj) = self.vadjustment() {
-            vadj.set_value(f64::from(rect.y + v));
+            vadj.set_value(f64::from(y));
         }
     }
 
@@ -99,14 +104,34 @@ impl PdfView {
         true
     }
 
-    /// Scroll one adjustment step for bare arrow keys, which `GtkScrolledWindow` leaves unbound.
-    /// The adjustment clamps at document boundaries.
+    /// Scroll one adjustment step for bare arrow keys, which `GtkScrolledWindow` leaves unbound,
+    /// or turn a page presented alone. The adjustment clamps at document boundaries.
     pub fn scroll_step(&self, down: bool) {
         let Some(vadj) = self.vadjustment() else {
             return;
         };
-        let step = vadj.step_increment();
+        let slot = self.imp().layout.borrow().slot.map(f64::from);
+        let step = slot.unwrap_or(vadj.step_increment());
         vadj.set_value(vadj.value() + if down { step } else { -step });
+    }
+
+    /// Whether pages are presented one at a time, each alone and centred: a slide deck, which the
+    /// wheel turns a page a notch.
+    pub fn presents_alone(&self) -> bool {
+        self.imp().layout.borrow().slot.is_some()
+    }
+
+    /// Keep a view presenting pages one at a time on a whole page: a pan, a scrollbar or a page
+    /// key that leaves it between two lands it on the nearer one.
+    pub(super) fn keep_to_slot(&self) {
+        let slot = self.imp().layout.borrow().slot.map(f64::from);
+        let (Some(slot), Some(vadj)) = (slot, self.vadjustment()) else {
+            return;
+        };
+        let on = (vadj.value() / slot).round() * slot;
+        if (vadj.value() - on).abs() > 0.5 {
+            vadj.set_value(on);
+        }
     }
 
     /// Bring a rectangle of a page into view, for a search match.
@@ -118,6 +143,10 @@ impl PdfView {
         let Some(page_rect) = layout.pages.get(page) else {
             return;
         };
+        // A page presented alone is all on screen once it is the one shown.
+        if layout.slot.is_some() {
+            return self.goto_page(page, None);
+        }
         let Some(vadj) = self.vadjustment() else {
             return;
         };
@@ -265,17 +294,14 @@ impl PdfView {
         if self.imp().layout.borrow().scale != scale {
             self.imp().stale_tiles.borrow_mut().clear();
         }
-        let layout = layout(&sizes, scale, w as f32);
-        let (width, mut height) = (f64::from(layout.width), f64::from(layout.height));
-        // Presented, fitted pages shorter than the viewport (wide ones, or ones beside a taller
-        // page, which the fit is to) leave room below the last one, so a turn puts it at the top
-        // as it puts every other page, and goes on from there. Reading ends at its bottom.
-        if self.imp().presenting.get()
-            && self.imp().zoom.get() == PdfZoom::FitPage
-            && let Some(last) = layout.pages.last()
-        {
-            height = height.max(f64::from(last.y) + f64::from(h));
+        let mut layout = layout(&sizes, scale, w as f32);
+        // Presented at Fit Height, each page is shown alone and centred, the pages beside it out
+        // of the view, as Evince and Okular present (user decision 2026-11-22). Zoomed while
+        // presenting, the pages read on in one column as they do outside it.
+        if self.imp().presenting.get() && self.imp().zoom.get() == PdfZoom::FitPage {
+            layout = slotted(layout, h as f32);
         }
+        let (width, height) = (f64::from(layout.width), f64::from(layout.height));
         *self.imp().layout.borrow_mut() = layout;
         let viewport = (f64::from(w), f64::from(h));
         self.imp().scroll.configure((width, height), viewport);
