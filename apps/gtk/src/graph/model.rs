@@ -2,9 +2,12 @@
 //! nodes, and what each new answer changes in it. Pure, so it is tested without a window.
 //!
 //! An answer is a whole [`Part`]; [`Graph::changes`] diffs it by key against what is shown, so a
-//! node that stays keeps its index, and with it its place in the layout.
+//! node that stays keeps its index, and with it its place in the layout. [`Ready`] does that
+//! beside the vault's query, off the main loop, against the graph as it was when the question
+//! went.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use accent_core::graph::{Edge, EdgeKind, Node, NodeKind, Part};
 use accent_core::query::Doc;
@@ -13,11 +16,30 @@ use accent_core::query::Doc;
 pub struct Graph {
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
+    /// The pairs the layout pulls together, each once whichever way and however many kinds of
+    /// edge join them.
+    pub links: Vec<(usize, usize)>,
     /// Each node's neighbours, by links either way, each once.
     pub adjacency: Vec<Vec<usize>>,
     /// The keys the graph grew from: the file in front and every node clicked since.
     pub roots: Vec<String>,
     index: HashMap<String, usize>,
+    /// Which nodes it holds under which keys: a number of its own each time they change, 0 for
+    /// none.
+    version: u64,
+}
+
+/// Numbers the graphs' versions, each once.
+static VERSIONS: AtomicU64 = AtomicU64::new(1);
+
+/// An answer made ready to show off the main loop: what it changes in the graph of the version
+/// it was made against, and the graph that leaves. It lands as it is while the graph shown is
+/// still that version, else its part is diffed again.
+pub struct Ready {
+    pub version: u64,
+    pub part: Part,
+    pub changes: Changes,
+    pub graph: Graph,
 }
 
 /// What a new answer changes, in the order the canvas and the layout apply it.
@@ -101,6 +123,15 @@ impl Graph {
         self.index.get(key).copied()
     }
 
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
+    /// What [`Ready::new`] diffs an answer against: this graph's version and nodes.
+    pub fn snapshot(&self) -> (u64, Vec<Node>) {
+        (self.version, self.nodes.clone())
+    }
+
     /// What it takes to show `part`: every node of it, a node shown already keeping its index.
     /// A new node is placed beside the one keyed `near` where it links to that, as what a click
     /// adds slides out of the node clicked, else beside any node it links to.
@@ -124,8 +155,10 @@ impl Graph {
             removed,
             ..Changes::default()
         };
-        // Each of the part's nodes' index after the change, and whether it was shown before.
+        // Each of the part's nodes' index after the change, and whether it was shown before: a
+        // new one goes after the survivors and the new ones before it.
         let mut new = Vec::with_capacity(part.nodes.len());
+        let mut next = order.len();
         for node in &part.nodes {
             match self.index_of(&node.key) {
                 Some(was) => {
@@ -134,10 +167,10 @@ impl Graph {
                     }
                     new.push((moved[was], true));
                 }
-                None => new.push((
-                    order.len() + new.iter().filter(|(_, old)| !old).count(),
-                    false,
-                )),
+                None => {
+                    new.push((next, false));
+                    next += 1;
+                }
             }
         }
         let mut neighbours = vec![Vec::new(); part.nodes.len()];
@@ -216,16 +249,6 @@ impl Graph {
         });
     }
 
-    /// The pairs the layout pulls together, each once whichever way and however many kinds of
-    /// edge join them.
-    pub fn links(&self) -> Vec<(usize, usize)> {
-        let mut seen = HashSet::new();
-        (self.edges.iter())
-            .map(|e| (e.from.min(e.to) as usize, e.from.max(e.to) as usize))
-            .filter(|pair| seen.insert(*pair))
-            .collect()
-    }
-
     /// "42 files · 57 links": the files among the nodes and the links and imports among them, a
     /// tag's edges being no link.
     pub fn facts(&self) -> String {
@@ -243,13 +266,39 @@ impl Graph {
     }
 
     fn reindex(&mut self) {
+        self.version = VERSIONS.fetch_add(1, Ordering::Relaxed);
         self.index = (self.nodes.iter().enumerate())
             .map(|(i, n)| (n.key.clone(), i))
             .collect();
+        let mut seen = HashSet::new();
+        self.links = (self.edges.iter())
+            .map(|e| (e.from.min(e.to) as usize, e.from.max(e.to) as usize))
+            .filter(|pair| seen.insert(*pair))
+            .collect();
         self.adjacency = vec![Vec::new(); self.nodes.len()];
-        for (a, b) in self.links() {
+        for &(a, b) in &self.links {
             self.adjacency[a].push(b);
             self.adjacency[b].push(a);
+        }
+    }
+}
+
+impl Ready {
+    /// `part` diffed against the graph `snapshot` gave, `near` as [`Graph::changes`] takes it,
+    /// and the graph it leaves, the roots aside.
+    pub fn new((version, nodes): (u64, Vec<Node>), part: Part, near: Option<&str>) -> Ready {
+        let mut graph = Graph {
+            nodes,
+            ..Graph::default()
+        };
+        graph.reindex();
+        let changes = graph.changes(&part, near);
+        graph.apply(&changes);
+        Ready {
+            version,
+            part,
+            changes,
+            graph,
         }
     }
 }
@@ -322,6 +371,46 @@ mod tests {
         );
     }
 
+    /// New nodes among the survivors take the indices after them in the answer's order, and one
+    /// that links only new ones is placed beside the one added before it.
+    #[test]
+    fn new_nodes_follow_the_survivors_in_order() {
+        let mut graph = shown(&part(&["a", "b", "c"], &[(0, 1)]));
+        let next = part(&["x", "a", "y", "c", "z"], &[(0, 2), (2, 4), (1, 3)]);
+        let changes = graph.changes(&next, None);
+        assert_eq!(changes.removed, [1]);
+        assert_eq!(
+            changes.added,
+            [
+                (note("x"), None),
+                (note("y"), Some(2)),
+                (note("z"), Some(3))
+            ]
+        );
+        assert_eq!(changes.edges, [link(2, 3), link(3, 4), link(0, 1)]);
+        graph.apply(&changes);
+        assert_eq!(keys(&graph), ["a", "c", "x", "y", "z"]);
+    }
+
+    /// An answer made ready against the graph shown is the diff the graph would make, and the
+    /// graph that leaves; a rename meanwhile gives it a version of its own.
+    #[test]
+    fn an_answer_made_ready_lands_as_the_graph_would_diff_it() {
+        let mut graph = shown(&part(&["a.md", "b.md", "c.md", "d.md"], &[(0, 1)]));
+        let next = part(&["d.md", "a.md", "e.md", "c.md"], &[(1, 2), (2, 3)]);
+        let ready = Ready::new(graph.snapshot(), next.clone(), Some("c.md"));
+        assert_eq!(ready.version, graph.version());
+        assert_eq!(ready.changes, graph.changes(&next, Some("c.md")));
+        graph.apply(&ready.changes);
+        assert_eq!(keys(&ready.graph), keys(&graph));
+        assert_eq!(ready.graph.adjacency, graph.adjacency);
+        let version = graph.version();
+        graph.rename("a.md", "z.md");
+        assert_ne!(graph.version(), version);
+        // Nothing shown is version 0, whatever was shown before.
+        assert_eq!(Graph::default().version(), 0);
+    }
+
     /// Several removals, each index its node's when its turn comes.
     #[test]
     fn removals_go_highest_first() {
@@ -368,7 +457,7 @@ mod tests {
     fn the_layout_gets_each_pair_once() {
         let mut both = part(&["a.md", "b.md"], &[(0, 1), (1, 0)]);
         both.edges[1].kind = EdgeKind::Embed;
-        assert_eq!(shown(&both).links(), [(0, 1)]);
+        assert_eq!(shown(&both).links, [(0, 1)]);
     }
 
     #[test]

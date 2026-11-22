@@ -11,13 +11,17 @@ use crate::graph::GraphTab;
 /// `d.md` into `c.md` and prints the node that adds and whether every node kept its index
 /// (`update`), then renames `b.md` and prints whether its node kept its index and the ghost the
 /// link to its old name leaves (`rename`). Through the menu's commands it shows tags and images and
-/// prints the nodes each adds (`tags`, `images`); a press on the ghost prints the name New File
-/// offers (`ghost`); it shows the whole vault without its orphans and then with them (`all`,
-/// `orphans`), and prints Reset Graph's roots (`reset`). It types `c.md` over the canvas with real
-/// keys (XTEST), the first of which opens the pane's find bar, and prints what the bar's query
-/// holds, the node the keyboard went to and the bar's readout (`find`), and where the keyboard is
-/// once the bar is closed (`find closed`); it presses the four arrows and prints whether the
-/// keyboard moved (`arrows`), then Enter and prints whether the node it is on opened (`enter`).
+/// prints the nodes each adds (`tags`, `images`), then toggles tags four times in a row and prints
+/// how many questions went to the vault and whether the graph ended as it began (`toggles`); a
+/// press on the ghost prints the name New File offers (`ghost`); it shows the whole vault without
+/// its orphans and then with them (`all`, `orphans`), and prints Reset Graph's roots (`reset`).
+/// Behind another tab of its pane it has `e.md` link its root and prints how many questions went
+/// while it was hidden and once it was shown again, and the node that added (`hidden`). It types
+/// `c.md` over the canvas with real keys (XTEST), the first of which opens the pane's find bar,
+/// and prints what the bar's query holds, the node the keyboard went to and the bar's readout
+/// (`find`), and where the keyboard is once the bar is closed (`find closed`); it presses the four
+/// arrows and prints whether the keyboard moved (`arrows`), then Enter on `c.md` and prints whether
+/// it opened (`enter`).
 /// Then it saves the session and quits. `restored` prints whether the graph came back with the
 /// session, the file it is around (`session`) and what its menu shows (`saved`); opens `lone.md`,
 /// which it does not hold, and with animations off shows the graph again, printing what it started
@@ -133,6 +137,18 @@ async fn check(app: &Rc<App>, rel: &str) {
             .collect();
         println!("bench graph {what} nodes+={added:?}");
     }
+    // Four toggles in a row, faster than an answer comes: one question goes, the newest of the
+    // other three waits for it, and the graph ends as it began.
+    let (before, asked) = (graph.nodes(), graph.questions());
+    for _ in 0..4 {
+        command(app, "win.graph-tags");
+    }
+    until("graph", "toggles", 10_000, || graph.landed()).await;
+    println!(
+        "bench graph toggles queries={} same={}",
+        graph.questions() - asked,
+        graph.nodes() == before
+    );
     graph.press("gone.md", false);
     let dialog = until("graph", "new file", 10_000, || app.window.visible_dialog()).await;
     let offered = (dialog.as_ref())
@@ -166,13 +182,42 @@ async fn check(app: &Rc<App>, rel: &str) {
     let Some(pane) = app.pane_of(&graph.page) else {
         return;
     };
-    // Typed with real keys over the canvas: the first key opens the bar and lands in its query.
+    // Behind another tab of its pane the graph asks nothing as the vault changes, and once shown
+    // again it asks once: `e.md` now links `bee.md`, the root.
+    let behind = (app.tab_for("a.md").map(|tab| tab.page.clone()))
+        .filter(|page| app.pane_of(page).is_some_and(|p| Rc::ptr_eq(&p, &pane)));
+    let Some(behind) = behind else {
+        return println!("bench graph hidden no_tab_behind");
+    };
+    pane.tabs.set_selected_page(&behind);
+    let (asked, before) = (graph.questions(), graph.nodes());
+    if let Err(e) = std::fs::write(root.join("e.md"), "[[a]] [[bee]]\n") {
+        return println!("bench graph hidden failed {e}");
+    }
+    // Past the watcher's delay and the graph's own.
+    glib::timeout_future(Duration::from_millis(1500)).await;
+    let hidden = graph.questions() - asked;
+    pane.tabs.set_selected_page(&graph.page);
+    until("graph", "shown again", 10_000, || {
+        graph.index_of("e.md").is_some() && graph.landed()
+    })
+    .await;
+    let added: Vec<String> = (graph.nodes().into_iter())
+        .filter(|n| !before.contains(n))
+        .collect();
+    println!(
+        "bench graph hidden queries={hidden} shown_again={} nodes+={added:?}",
+        graph.questions() - asked - hidden
+    );
+    // Typed with real keys over the canvas: the first key opens the bar and lands in its query,
+    // and the rest follow once it is up, since a key typed 30 ms after the first is lost now and
+    // then (NOTEPAD, BUG).
     let canvas = graph.key_target();
     canvas.grab_focus();
     let at = gtk::graphene::Point::new(canvas.width() as f32 / 2.0, 8.0);
     let at = canvas.compute_point(&app.window, &at).unwrap_or(at);
     let keys = format!(
-        "move {:.0} {:.0}; focus; type c; key period; type md",
+        "move {:.0} {:.0}; focus; type c; sleep 0.3; key period; type md",
         at.x(),
         at.y()
     );
@@ -206,6 +251,11 @@ async fn check(app: &Rc<App>, rel: &str) {
         moved |= graph.current() != from;
     }
     println!("bench graph arrows moved={moved}");
+    // Enter on `c.md` wherever the arrows ended: `a.md`, opened from the graph, would move to the
+    // other pane and leave the graph alone in its own, which a restored session seeds before its
+    // files are back (NOTEPAD, BUG).
+    graph.find("c.md", accent_core::search::Options::default());
+    graph.find_clear();
     let current = graph.current().unwrap_or_default();
     graph.press_key(gdk::Key::Return);
     let shown = || {
@@ -294,11 +344,12 @@ async fn laid_out(app: &Rc<App>) -> Option<Rc<GraphTab>> {
 }
 
 /// A case's budget (plan, 2026-11-21, the whole vault's tightened from its first run): the first
-/// paint and a frame's paint, the worst gap in the main loop, and how many of the layout's frames
-/// it settles in, two at most with animations off (where the nodes were placed, then settled).
+/// paint and a window frame's median, the worst gap in the main loop, and how many of the
+/// layout's frames it settles in, two at most with animations off (where the nodes were placed,
+/// then settled).
 struct Budget {
     first_ms: Option<f64>,
-    paint_ms: Option<f64>,
+    frame_ms: Option<f64>,
     worst_ms: f64,
     frames: Frames,
 }
@@ -309,32 +360,66 @@ enum Frames {
     Any,
 }
 
+/// `v`'s median, 90th percentile and longest, as `median/p90/max`; `-` for none.
+fn spread(mut v: Vec<f64>) -> String {
+    v.sort_by(f64::total_cmp);
+    match v.len() {
+        0 => "-".to_string(),
+        n => format!(
+            "{:.1}/{:.1}/{:.1}",
+            v[n / 2],
+            v[(n * 9 / 10).min(n - 1)],
+            v[n - 1]
+        ),
+    }
+}
+
+/// `v`'s median, or `-1` for none.
+fn median(mut v: Vec<f64>) -> f64 {
+    v.sort_by(f64::total_cmp);
+    v.get(v.len() / 2).copied().unwrap_or(-1.0)
+}
+
+/// What tells two answers apart: a hash of all of `part`, its order included.
+fn digest(part: &accent_core::graph::Part) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    format!("{part:?}").hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
 /// `ACCENT_BENCH_GRAPH=time`, on the generated vault: the graph round its best-linked note, grown
 /// by the neighbour that adds the most (as a click grows it, without the file's open), the whole
-/// vault, then the local graph and the whole vault again with animations off, and [`input`] while
-/// the local graph and the whole vault build. First it prints what the vault's two answers cost on
-/// their worker (`vault`). Each case prints its nodes and links, the first paint from the command
-/// (the first picture of what it shows on screen) and the part of it until the answer landed
-/// (`query_ms`), the settle, the layout's frames, the median and the longest paint, each window
-/// frame (`frame_ms`, frame clock to frame clock), the worker's draws, the answer's landing, the
-/// main loop's worst gap and busy time (`native::Beat`), the main thread's CPU time and its wait
-/// for a CPU (`native::schedstat`), the RSS, and whether that kept to the case's [`Budget`].
+/// vault, then its tags shown and hidden again (300 tag nodes and their edges added, then removed),
+/// then the local graph and the whole vault again with animations off, [`input`] while the local
+/// graph and the whole vault build, and [`hover`] over each once settled. Run it again with
+/// `GDK_SCALE=2` for a 2× display, which every line names as `scale`.
 ///
-/// On AMCOMP (2026-11-21, Xvfb, cairo, `nice -n 19`, load 5–7, three runs): the vault answers
-/// round the note in 30–61 ms and with the whole vault in 109–233 ms. Round the note (668 nodes,
-/// 1889 links) the first paint takes 103–141 ms (query 56–91), the layout settles in 5.1 s over
-/// 234–273 frames, a frame takes 17 ms median and 47 at most, a third of it the names, a draw
-/// 16 ms, and the worst gap is 45–51 ms. Grown (926, 3457) a draw takes 25 ms and the worst gap
-/// is 116–125 ms, between frames, where the opened note's text view highlights in idle callbacks
-/// (NOTEPAD, PERF). The whole vault (7711, 48889) first paints in 300–334 ms, settles in 5.6 s,
-/// draws in 110 ms (237 at most), its frames 0 ms median and 38 at most, worst gap 43–45 ms. With
-/// animations off round the note it paints in 64–66 ms and settles in 0.3 s, worst gap 25–32 ms,
-/// and the whole vault in 201–242 ms and 4.3 s, worst gap 44 ms. An input while the note's graph
-/// settles shows in 16–19 ms (37 at most) and its picture in 69–82 ms; while the whole vault
-/// builds in 19–28 ms (47) and 236–257 ms (414). RSS stays at 256–335 MB. GL on llvmpipe is no
-/// better here: 21 ms frames round the note. So round the note the first paint and the worst gap
-/// are over budget, the names costing cairo a frame's budget on their own, and the whole vault
-/// keeps to its own. Drawn with cairo under Xvfb, so a paint costs more than a GL renderer's.
+/// First it prints what the vault's three answers cost on their worker and a digest of each, to
+/// tell two builds' answers apart (`vault`), and [`concurrent`]. Each case prints its nodes before
+/// (`was`) and after, links, the first paint from the command (the first window frame presented
+/// after a picture of what it shows went into a snapshot, `first_paint_ms`, and that snapshot,
+/// `first_snapshot_ms`) and the part of it until the answer landed (`query_ms`), the settle, the
+/// layout's frames, the canvas's snapshots (`snapshot_ms`), each window frame (`frame_ms`, its
+/// frame clock's before-paint to after-paint: the layout's frame taken, layout, snapshot and
+/// render), the worker's draws, the answer's landing on the main loop and the diff part of it, the
+/// questions that went to the vault, the main loop's worst gap and busy time (`native::Beat`), the
+/// main thread's CPU time and its wait for a CPU (`native::schedstat`), the RSS, and whether that
+/// kept to the case's [`Budget`]. A spread is `median/p90/max`.
+///
+/// On AMCOMP (2026-11-22, main ede76acc, Xvfb, cairo, `nice -n 19`, load 6–10, five runs, the
+/// medians): the vault answers round the note in 11 ms, grown in 16 and with the whole vault in
+/// 113, and a search, the file tree and backlinks wait for none of them (54, 0.2 and 0.3 ms
+/// meanwhile). Round the note (668 nodes, 1889 links) the first frame shows it 101 ms after Show
+/// Graph (query 39), a window frame takes 9 ms and a draw 16 ms, and the worst gap, 115 ms, is the
+/// opened note's highlighting (NOTEPAD, PERF). Grown (926, 3457) it shows in 72 ms. The whole
+/// vault (7711, 48889) shows in 283 ms, its answer landing on the main loop in 1.3 ms with a worst
+/// gap of 29 ms, and its tags (8017, 81193) shown or hidden again land in 4 ms. With animations
+/// off round the note it shows in 45 ms, and the whole vault in 226 ms. The pointer over a node
+/// of the settled graph has its picture on screen in 36 ms round the note and in 133 ms for the
+/// whole vault. At 2× (`GDK_SCALE=2`, three runs) a draw takes three times as long (51 ms round
+/// the note, 278 for the whole vault) and a window frame up to 75–98 ms. RSS stays at 270–310 MB.
+/// Drawn with cairo under Xvfb, so a frame costs more than a GL renderer's.
 async fn time(app: &Rc<App>) {
     let Some(vault) = app.vault().cloned() else {
         return println!("bench graph time no_vault");
@@ -370,42 +455,72 @@ async fn time(app: &Rc<App>) {
         .filter(|&j| part.nodes[j].kind == note)
         .max_by_key(|&j| adds(j))
         .map(|j| part.nodes[j].key.clone());
-    // What the vault's answers cost on their worker, which each first paint waits for: the
-    // fastest of three.
-    let (Some(vault), roots) = (app.vault().cloned(), vec![best.clone()]) else {
+    // What the vault's answers cost on their worker, which each first paint waits for, five times
+    // each.
+    let Some(vault) = app.vault().cloned() else {
         return;
     };
+    let roots = vec![best.clone()];
+    let grown_roots: Vec<String> = roots.iter().cloned().chain(grow_by.clone()).collect();
     let shown = accent_core::graph::Shown::default();
     let timed = work::off_thread("graph", move || {
-        let fastest = |f: &dyn Fn()| {
-            (0..3)
-                .map(|_| {
-                    let t = Instant::now();
-                    f();
-                    ms_since(t)
-                })
-                .fold(f64::MAX, f64::min)
+        let timed = |f: &dyn Fn() -> String| {
+            let mut ms = Vec::new();
+            let mut answer = String::new();
+            for _ in 0..5 {
+                let t = Instant::now();
+                answer = f();
+                ms.push(ms_since(t));
+            }
+            (spread(ms), answer)
         };
-        let around = fastest(&|| {
-            let _ = vault.graph_around(&roots, shown);
+        let around = timed(&|| match vault.graph_around(&roots, shown) {
+            Ok(part) => digest(&part),
+            Err(e) => format!("error:{e}"),
         });
-        let all = fastest(&|| {
-            let _ = vault.graph_all(shown);
+        let grown = timed(&|| match vault.graph_around(&grown_roots, shown) {
+            Ok(part) => digest(&part),
+            Err(e) => format!("error:{e}"),
         });
-        (around, all)
+        let all = timed(&|| match vault.graph_all(shown) {
+            Ok(part) => digest(&part),
+            Err(e) => format!("error:{e}"),
+        });
+        // And with tags and images shown, once.
+        let every = accent_core::graph::Shown {
+            tags: true,
+            images: true,
+            ..shown
+        };
+        let tagged = match vault.graph_around(&grown_roots, every) {
+            Ok(part) => digest(&part),
+            Err(e) => format!("error:{e}"),
+        };
+        ([around, grown, all], tagged)
     })
     .await;
-    if let Some((around, all)) = timed {
-        println!("bench graph vault around_ms={around:.0} all_ms={all:.0}");
+    if let Some(([around, grown, all], tagged)) = timed {
+        println!(
+            "bench graph vault scale={} around_ms={} grown_ms={} all_ms={} around={} grown={} \
+             all={} grown_tagged={tagged}",
+            app.window.scale_factor(),
+            around.0,
+            grown.0,
+            all.0,
+            around.1,
+            grown.1,
+            all.1
+        );
     }
+    concurrent(app, &best).await;
     app.open_path(&best);
     until("graph", "note", 30_000, || app.tab_for(&best).is_some()).await;
     // The note's text view lays out and highlights in idle callbacks at first, holding the loop
     // up to ~190 ms (NOTEPAD, PERF): the graph is timed once that is done.
     glib::timeout_future(Duration::from_secs(2)).await;
-    let budget = |first_ms, paint_ms, worst_ms, frames| Budget {
+    let budget = |first_ms, frame_ms, worst_ms, frames| Budget {
         first_ms,
-        paint_ms,
+        frame_ms,
         worst_ms,
         frames,
     };
@@ -422,11 +537,16 @@ async fn time(app: &Rc<App>) {
         measure(app, "grow", grow, || app.bench_grow(&graph, &next)).await;
     }
     input(app, "settling", || command(app, "win.graph-reset")).await;
-    let all = budget(Some(500.0), Some(4.0), 50.0, Frames::Any);
-    measure(app, "all", all, || command(app, "win.graph-all")).await;
+    let all = || budget(Some(500.0), Some(16.0), 50.0, Frames::Any);
+    measure(app, "all", all(), || command(app, "win.graph-all")).await;
     input(app, "vault", || {
         command(app, "win.graph-reset");
         command(app, "win.graph-all");
+    })
+    .await;
+    measure(app, "all_tags", all(), || command(app, "win.graph-tags")).await;
+    measure(app, "all_untagged", all(), || {
+        command(app, "win.graph-tags")
     })
     .await;
     if let Some(settings) = gtk::Settings::default() {
@@ -437,12 +557,75 @@ async fn time(app: &Rc<App>) {
         command(app, "win.graph-reset")
     })
     .await;
+    hover(app, "local").await;
     let still = budget(Some(500.0), None, 50.0, Frames::AtMost(2));
     measure(app, "all_still", still, || command(app, "win.graph-all")).await;
+    hover(app, "all").await;
 }
 
-/// `input`: `act`, a cold layout round the file in front or the whole vault, then a pan, a zoom
-/// or the pointer over a node every 50 ms while it settles and draws, 30 in all. Prints the main
+/// `concurrent`: what the Search pane, the file tree and the backlinks of `best` wait while the
+/// graph's question is on its way, each alone and then started 2 ms after the graph round `best`
+/// or the whole vault's, five times each, as `median/p90/max` in ms.
+async fn concurrent(app: &Rc<App>, best: &str) {
+    let Some(vault) = app.vault().cloned() else {
+        return;
+    };
+    let best = best.to_string();
+    let lines = work::off_thread("graph", move || {
+        let word = accent_core::path::basename(&best);
+        let word = word.split('.').next().unwrap_or(word).to_string();
+        let shown = accent_core::graph::Shown::default();
+        let roots = vec![best.clone()];
+        let calls: [(&str, &(dyn Fn() + Sync)); 3] = [
+            ("search", &|| {
+                let _ = vault.search(&word, 50, false);
+            }),
+            ("list", &|| {
+                let _ = vault.list_dir("");
+            }),
+            ("backlinks", &|| {
+                let _ = vault.backlinks(&best);
+            }),
+        ];
+        let mut lines = Vec::new();
+        for during in ["alone", "around", "all"] {
+            let mut line = format!("bench graph concurrent {during}");
+            for (name, call) in calls {
+                let mut ms = Vec::new();
+                for _ in 0..5 {
+                    std::thread::scope(|s| {
+                        match during {
+                            "around" => {
+                                s.spawn(|| vault.graph_around(&roots, shown));
+                            }
+                            "all" => {
+                                s.spawn(|| vault.graph_all(shown));
+                            }
+                            _ => {}
+                        }
+                        if during != "alone" {
+                            std::thread::sleep(Duration::from_millis(2));
+                        }
+                        let t = Instant::now();
+                        call();
+                        ms.push(ms_since(t));
+                    });
+                }
+                line += &format!(" {name}_ms={}", spread(ms));
+            }
+            lines.push(line);
+        }
+        lines
+    })
+    .await;
+    for line in lines.unwrap_or_default() {
+        println!("{line}");
+    }
+}
+
+/// `input`: `act`, a cold layout round the file in front or the whole vault, then once its answer
+/// landed a pan, a zoom or the pointer over a node every 50 ms while it settles and draws, 30 in
+/// all, so the inputs meet the same layout however fast the vault answered. Prints the main
 /// loop's worst gap meanwhile, how long each input took to show (`shown_ms`, the next frame,
 /// with the last picture moved and scaled), and how long until the worker's picture of it was
 /// on screen (`drawn_ms`).
@@ -463,6 +646,7 @@ async fn input(app: &Rc<App>, phase: &str, act: impl FnOnce()) {
     });
     let beat = super::native::Beat::start();
     act();
+    until("graph", "input landed", 30_000, || graph.landed()).await;
     let mut inputs = Vec::new();
     for k in 0..30 {
         glib::timeout_future(Duration::from_millis(50)).await;
@@ -483,17 +667,71 @@ async fn input(app: &Rc<App>, phase: &str, act: impl FnOnce()) {
             drawn.push((done - t).as_secs_f64() * 1e3);
         }
     }
-    let sorted = |mut v: Vec<f64>| {
-        v.sort_by(f64::total_cmp);
-        let median = v.get(v.len() / 2).copied().unwrap_or(-1.0);
-        (median, v.last().copied().unwrap_or(-1.0), v.len())
-    };
-    let ((s_median, s_max, s_n), (d_median, d_max, d_n)) = (sorted(shown), sorted(drawn));
     println!(
-        "bench graph input {phase} inputs={} worst_ms={worst:.0} shown_ms_median={s_median:.0} \
-         shown_ms_max={s_max:.0} shown={s_n} drawn_ms_median={d_median:.0} drawn_ms_max={d_max:.0} \
-         drawn={d_n} nodes={}",
+        "bench graph input {phase} scale={} inputs={} worst_ms={worst:.0} shown={} shown_ms={} \
+         drawn={} drawn_ms={} nodes={}",
+        app.window.scale_factor(),
         inputs.len(),
+        shown.len(),
+        spread(shown.clone()),
+        drawn.len(),
+        spread(drawn.clone()),
+        graph.node_count()
+    );
+}
+
+/// `hover`: the pointer over one node of the settled graph after another, 20 in all, each once
+/// the last one's picture was on screen. Prints how long until the worker's picture of each was
+/// (`drawn_ms`), and the main loop's worst gap meanwhile; a node the pointer finds lit already
+/// asks for no picture and is left out.
+async fn hover(app: &Rc<App>, case: &str) {
+    let Some(graph) = app.graphs().into_iter().next() else {
+        return;
+    };
+    let Some(clock) = graph.frame_clock() else {
+        return;
+    };
+    let frames = Rc::new(RefCell::new(Vec::<(Instant, u64)>::new()));
+    let hook = clock.connect_after_paint({
+        let (frames, graph) = (frames.clone(), graph.clone());
+        move |_| {
+            frames
+                .borrow_mut()
+                .push((Instant::now(), graph.serials().1))
+        }
+    });
+    let beat = super::native::Beat::start();
+    let mut drawn = Vec::new();
+    for k in 0..20 {
+        let before = graph.serials().0;
+        let t = Instant::now();
+        graph.bench_input(3 * k + 2);
+        // The view is asked of the worker as the next frame is drawn.
+        let mut asked = None;
+        while asked.is_none() && t.elapsed() < Duration::from_millis(500) {
+            glib::timeout_future(Duration::from_millis(1)).await;
+            asked = Some(graph.serials().0).filter(|&s| s > before);
+        }
+        let Some(asked) = asked else {
+            continue;
+        };
+        let shown = until("graph", "hover drawn", 5_000, || {
+            (frames.borrow().iter())
+                .find(|f| f.0 > t && f.1 >= asked)
+                .map(|f| f.0)
+        })
+        .await;
+        if let Some(at) = shown {
+            drawn.push((at - t).as_secs_f64() * 1e3);
+        }
+    }
+    let (worst, _) = beat.stop();
+    clock.disconnect(hook);
+    println!(
+        "bench graph hover {case} scale={} hovers={} drawn_ms={} worst_ms={worst:.0} nodes={}",
+        app.window.scale_factor(),
+        drawn.len(),
+        spread(drawn.clone()),
         graph.node_count()
     );
 }
@@ -507,11 +745,15 @@ fn command(app: &App, action: &str) {
 /// (the layout's frame taken, layout, snapshot and render), the first three of the whole vault's
 /// printed as they come, since one can take long.
 async fn measure(app: &Rc<App>, case: &str, budget: Budget, act: impl FnOnce()) {
-    if let Some(graph) = app.graphs().first() {
-        graph.take_paints();
-        graph.take_draws();
-        graph.take_landing_ms();
-    }
+    let (was, asked) = match app.graphs().first() {
+        Some(graph) => {
+            graph.take_paints();
+            graph.take_draws();
+            graph.take_landing_ms();
+            (graph.node_count(), graph.questions())
+        }
+        None => (0, 0),
+    };
     println!("bench graph {case} start");
     let beat = super::native::Beat::start();
     let cpu = super::native::schedstat();
@@ -520,8 +762,9 @@ async fn measure(app: &Rc<App>, case: &str, budget: Budget, act: impl FnOnce()) 
     // The command itself, on the main loop: a new tab and the window's syncs for the first.
     let act_ms = ms_since(t);
     let frame_ms = Rc::new(RefCell::new(Vec::new()));
+    // The first frame presented once a picture of what is shown went into a snapshot.
+    let first = Rc::new(Cell::new(None::<f64>));
     let mut hooked = None;
-    let mut first = None;
     let settled = loop {
         let graph = app.graphs().into_iter().next();
         if let Some(graph) = &graph {
@@ -534,7 +777,12 @@ async fn measure(app: &Rc<App>, case: &str, budget: Budget, act: impl FnOnce()) 
                     move |_| start.set(Some(Instant::now()))
                 });
                 let (frames, case) = (frame_ms.clone(), case.to_string());
+                let (first, shown) = (first.clone(), Rc::downgrade(graph));
                 let after = clock.connect_after_paint(move |_| {
+                    let drawn = (shown.upgrade()).and_then(|g| g.shown_at());
+                    if first.get().is_none() && drawn.is_some_and(|at| at > t) {
+                        first.set(Some(ms_since(t)));
+                    }
                     if let Some(t) = start.take() {
                         let mut frames = frames.borrow_mut();
                         frames.push(ms_since(t));
@@ -549,12 +797,7 @@ async fn measure(app: &Rc<App>, case: &str, budget: Budget, act: impl FnOnce()) 
                 });
                 hooked = Some((clock, before, after));
             }
-            if first.is_none()
-                && let Some(at) = graph.shown_at().filter(|&at| at > t)
-            {
-                first = Some((at - t).as_secs_f64() * 1e3);
-            }
-            if graph.laid_out() && first.is_some() {
+            if graph.laid_out() && first.get().is_some() {
                 break Some(ms_since(t));
             }
         }
@@ -573,25 +816,21 @@ async fn measure(app: &Rc<App>, case: &str, budget: Budget, act: impl FnOnce()) 
     let Some(graph) = app.graphs().into_iter().next() else {
         return;
     };
-    let sorted = |mut v: Vec<f64>| {
-        v.sort_by(f64::total_cmp);
-        let median = v.get(v.len() / 2).copied().unwrap_or(0.0);
-        (median, v.last().copied().unwrap_or(0.0))
-    };
-    let (median, longest) = sorted(graph.take_paints());
-    let (frame_median, frame_max) = sorted(frame_ms.take());
-    let (draw_median, draw_max) = sorted(graph.take_draws());
+    let snapshots = graph.take_paints();
+    let frames_ms = frame_ms.take();
+    let frame_median = median(frames_ms.clone());
+    let since = |at: Option<Instant>| at.map_or(-1.0, |at| (at - t).as_secs_f64() * 1000.0);
     // The first paint split into the vault's answer landing and the rest, its first picture.
-    let query_ms = graph
-        .landed_at()
-        .map_or(-1.0, |at| (at - t).as_secs_f64() * 1000.0);
-    let landing_ms = graph.take_landing_ms();
+    let query_ms = since(graph.landed_at());
+    let first_snapshot_ms = since(graph.shown_at().filter(|&at| at > t));
+    let (landing_ms, diff_ms) = graph.take_landing_ms();
     let frames = graph.frames();
+    let first = first.get();
     let ok = settled.is_some()
         && budget
             .first_ms
             .is_none_or(|ms| first.is_some_and(|f| f <= ms))
-        && budget.paint_ms.is_none_or(|ms| median <= ms)
+        && budget.frame_ms.is_none_or(|ms| frame_median <= ms)
         && worst <= budget.worst_ms
         && match budget.frames {
             Frames::AtLeast(n) => frames >= n,
@@ -599,16 +838,20 @@ async fn measure(app: &Rc<App>, case: &str, budget: Budget, act: impl FnOnce()) 
             Frames::Any => true,
         };
     println!(
-        "bench graph {case} nodes={} links={} first_paint_ms={:.0} query_ms={query_ms:.0} \
-         settle_ms={:.0} frames={frames} \
-         paint_ms_median={median:.1} paint_ms_max={longest:.1} frame_ms_median={frame_median:.0} \
-         frame_ms_max={frame_max:.0} draw_ms_median={draw_median:.1} draw_ms_max={draw_max:.1} \
-         act_ms={act_ms:.0} landing_ms={landing_ms:.0} worst_ms={worst:.0} busy_ms={busy:.0} \
-         cpu_ms={cpu:.0} wait_ms={wait:.0} rss_mb={} budget={}",
+        "bench graph {case} scale={} was={was} nodes={} links={} first_paint_ms={:.0} \
+         first_snapshot_ms={first_snapshot_ms:.0} query_ms={query_ms:.0} settle_ms={:.0} \
+         frames={frames} snapshot_ms={} frame_ms={} draw_ms={} act_ms={act_ms:.0} \
+         landing_ms={landing_ms:.1} diff_ms={diff_ms:.1} queries={} worst_ms={worst:.0} \
+         busy_ms={busy:.0} cpu_ms={cpu:.0} wait_ms={wait:.0} rss_mb={} budget={}",
+        app.window.scale_factor(),
         graph.node_count(),
         graph.links(),
         first.unwrap_or(-1.0),
         settled.unwrap_or(-1.0),
+        spread(snapshots),
+        spread(frames_ms),
+        spread(graph.take_draws()),
+        graph.questions() - asked,
         super::notebook::rss_mb(),
         if ok { "ok" } else { "over" }
     );

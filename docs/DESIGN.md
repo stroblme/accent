@@ -1709,6 +1709,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Until the next picture is drawn the last one is moved and scaled, and one drawn for a view the reader moved reaches an eighth of the canvas past each edge, so the edges stay filled through a pan of that much and through a zoom step out from 90 % up, or from 50 % up round the middle.
   A picture of the settled graph at another zoom crossfades in over the scaled one, as a newly lit node's does, which softens the edges a larger step leaves empty for a moment.
 - It follows the vault 300 ms after the last change, a note saved here or by another program and a file added, renamed or deleted, each node keeping its place, a renamed one too.
+  Behind another tab it waits, and catches up once it is shown again.
 - Its menu, a right-click anywhere on the canvas or the button in its top right corner, holds Show Whole Vault, Show Unresolved Links, Show Tags, Show Images and Show Orphans as checks, then Reset Graph, each a palette command too (Keyboard, Graph).
   The button is a disc as opaque as the ring's (PDF), and its popover holds Spread above Reset Graph (user decision 2026-11-22).
   What it shows and its spread are kept in the vault's session, and a restored graph comes back around the file in front.

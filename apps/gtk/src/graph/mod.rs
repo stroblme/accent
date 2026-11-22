@@ -198,6 +198,59 @@ enum Ask {
     Again,
 }
 
+impl Ask {
+    /// One question for two, the older's answer not shown: starting afresh wins over a grow, and
+    /// a grow over asking again.
+    fn and(self, newer: Ask) -> Ask {
+        match (self, newer) {
+            (Ask::Fresh, _) | (_, Ask::Fresh) => Ask::Fresh,
+            (_, Ask::Grow(key)) => Ask::Grow(key),
+            (older, Ask::Again) => older,
+        }
+    }
+}
+
+/// The tab's questions to the vault, one on its way at a time: whatever is asked meanwhile waits
+/// for it as one question, the newest, and the answer on its way is then not shown. So toggles
+/// pressed in a row or saves in a burst leave no backlog on the vault's workers, which go on with
+/// a question once it is asked.
+#[derive(Default)]
+struct Asking {
+    /// What the question on its way is for.
+    running: Option<Ask>,
+    /// The question asked since, for all those it stands for.
+    waiting: Option<Ask>,
+    /// The vault changed while the graph was hidden: it asks again once it is shown.
+    stale: bool,
+}
+
+impl Asking {
+    /// `ask` asked: what to ask the vault now, or nothing while a question is on its way.
+    fn ask(&mut self, ask: Ask) -> Option<Ask> {
+        self.stale = false;
+        if self.running.is_some() {
+            self.waiting = Some(match self.waiting.take() {
+                Some(waiting) => waiting.and(ask),
+                None => ask,
+            });
+            return None;
+        }
+        self.running = Some(ask.clone());
+        Some(ask)
+    }
+
+    /// The question on its way answered: nothing to show its answer, else what to ask instead,
+    /// for what both were for.
+    fn answered(&mut self) -> Option<Ask> {
+        let (running, waiting) = (self.running.take(), self.waiting.take());
+        self.running = match (running, waiting) {
+            (Some(running), Some(waiting)) => Some(running.and(waiting)),
+            (_, waiting) => waiting,
+        };
+        self.running.clone()
+    }
+}
+
 pub struct GraphTab {
     pub page: adw::TabPage,
     /// The page's child: blank, then loading, then the canvas, the empty page or a failure.
@@ -208,8 +261,8 @@ pub struct GraphTab {
     shown: Cell<Shown>,
     /// The spread slider's value, which the canvas lays the nodes out at.
     spread: gtk::Adjustment,
-    /// The vault's answer on its way, which the next question stops.
-    query: RefCell<Option<glib::JoinHandle<()>>>,
+    /// The question on its way to the vault and the one waiting for it.
+    asking: RefCell<Asking>,
     /// Counts the questions asked, so only the last one's answer lands.
     asked: Cell<u64>,
     /// Whether it has been seeded, which waits until it is first on screen.
@@ -227,6 +280,12 @@ pub struct GraphTab {
     /// When the first answer since the landings were last taken landed, for the drill.
     #[cfg(feature = "bench")]
     landed_at: Cell<Option<std::time::Instant>>,
+    /// How much of `landing_ms` was the diff, for the drill.
+    #[cfg(feature = "bench")]
+    diff_ms: Cell<f64>,
+    /// How many questions went to the vault, for the drill.
+    #[cfg(feature = "bench")]
+    questions: Cell<usize>,
 }
 
 impl GraphTab {
@@ -354,7 +413,7 @@ impl GraphTab {
     /// Show the empty page: no file to start from, and not the whole vault.
     fn show_empty(&self) {
         let none = self.view.graph().changes(&Part::default(), None);
-        self.view.apply(&none);
+        self.view.apply(&none, None);
         self.holder.set_visible_child_name(EMPTY);
     }
 
@@ -436,10 +495,16 @@ impl GraphTab {
         self.view.frames()
     }
 
-    /// How long the answers since the last call took to land on the main loop, in ms.
-    pub fn take_landing_ms(&self) -> f64 {
+    /// How long the answers since the last call took to land on the main loop, in ms, and how
+    /// much of that was the diff.
+    pub fn take_landing_ms(&self) -> (f64, f64) {
         self.landed_at.take();
-        self.landing_ms.replace(0.0)
+        (self.landing_ms.replace(0.0), self.diff_ms.replace(0.0))
+    }
+
+    /// How many questions went to the vault so far.
+    pub fn questions(&self) -> usize {
+        self.questions.get()
     }
 
     /// When the first answer since [`GraphTab::take_landing_ms`] landed.
@@ -572,7 +637,7 @@ impl App {
             all: Cell::new(saved.all),
             shown: Cell::new(saved.shown),
             spread,
-            query: RefCell::new(None),
+            asking: RefCell::default(),
             asked: Cell::new(0),
             started: Cell::new(false),
             refresh: widgets::Debounce::new(REFRESH),
@@ -582,6 +647,10 @@ impl App {
             landing_ms: Cell::new(0.0),
             #[cfg(feature = "bench")]
             landed_at: Cell::new(None),
+            #[cfg(feature = "bench")]
+            diff_ms: Cell::new(0.0),
+            #[cfg(feature = "bench")]
+            questions: Cell::new(0),
         });
         graph.describe();
         let weak = Rc::downgrade(&graph);
@@ -658,9 +727,15 @@ impl App {
         graph
     }
 
-    /// The graph came on screen for the first time: seeded with the file in front.
+    /// The graph came on screen for the first time: seeded with the file in front. Again, it
+    /// asks what changed in the vault while it was hidden.
     fn start_graph(self: &Rc<Self>, graph: &Rc<GraphTab>) {
         if graph.started.replace(true) {
+            let stale = std::mem::take(&mut graph.asking.borrow_mut().stale);
+            if stale {
+                graph.describe();
+                self.query_graph(graph, Ask::Again);
+            }
             return;
         }
         let front = self.graph_front().map(|(_, key)| key);
@@ -736,58 +811,92 @@ impl App {
     }
 
     /// Ask the vault for what `graph` shows, off the main loop, and show the answer as `ask`
-    /// says.
+    /// says: at once, or once the question on its way is answered ([`Asking`]).
     fn query_graph(self: &Rc<Self>, graph: &Rc<GraphTab>, ask: Ask) {
-        let Some(vault) = self.vault().cloned() else {
-            return;
-        };
-        let (all, shown) = (graph.all.get(), graph.shown.get());
-        let roots = graph.view.graph().roots.clone();
-        if !all && roots.is_empty() {
-            graph.show_empty();
-            graph.describe();
+        if self.vault().is_none() {
             return;
         }
         let asked = graph.asked.get() + 1;
         graph.asked.set(asked);
+        if !graph.all.get() && graph.view.graph().roots.is_empty() {
+            graph.asking.borrow_mut().waiting = None;
+            graph.show_empty();
+            graph.describe();
+            return;
+        }
         // A graph started afresh is kept until the answer lands, and gives way to the loading
         // page if that takes a while, as an open does.
         if ask == Ask::Fresh && loading::shown(&graph.holder) {
             let weak = Rc::downgrade(graph);
             glib::timeout_add_local_once(loading::OPENING, move || {
-                let waiting = |g: &Rc<GraphTab>| g.asked.get() == asked && g.answered.get() < asked;
+                let waiting =
+                    |g: &Rc<GraphTab>| g.answered.get() < asked && loading::shown(&g.holder);
                 if let Some(graph) = weak.upgrade().filter(waiting) {
                     graph.holder.set_visible_child_name(loading::LOADING);
                 }
             });
         }
+        let now = graph.asking.borrow_mut().ask(ask);
+        if let Some(ask) = now {
+            self.send_graph_query(graph, ask);
+        }
+    }
+
+    /// Put the question for what `graph` shows now on its way, and once it is answered show the
+    /// answer, or ask the question that waited for it instead.
+    fn send_graph_query(self: &Rc<Self>, graph: &Rc<GraphTab>, ask: Ask) {
+        let Some(vault) = self.vault().cloned() else {
+            *graph.asking.borrow_mut() = Asking::default();
+            return;
+        };
+        let (all, shown) = (graph.all.get(), graph.shown.get());
+        let roots = graph.view.graph().roots.clone();
+        let asked = graph.asked.get();
+        // The answer is diffed beside the query, against the graph shown now, or against none
+        // for a fresh start, which empties the graph as it lands.
+        let snapshot = match ask {
+            Ask::Fresh => (0, Vec::new()),
+            _ => graph.view.graph().snapshot(),
+        };
+        let near = match &ask {
+            Ask::Grow(key) => Some(key.clone()),
+            Ask::Fresh | Ask::Again => None,
+        };
+        #[cfg(feature = "bench")]
+        graph.questions.set(graph.questions.get() + 1);
         let (app, weak) = (Rc::downgrade(self), Rc::downgrade(graph));
-        let task = glib::spawn_future_local(async move {
-            let answer = work::off_thread("graph", move || match all {
-                true => vault.graph_all(shown),
-                false => vault.graph_around(&roots, shown),
+        glib::spawn_future_local(async move {
+            let answer = work::off_thread("graph", move || {
+                let part = match all {
+                    true => vault.graph_all(shown),
+                    false => vault.graph_around(&roots, shown),
+                };
+                part.map(|part| model::Ready::new(snapshot, part, near.as_deref()))
             })
             .await;
-            let Some(app) = app.upgrade() else {
+            let (Some(app), Some(graph)) = (app.upgrade(), weak.upgrade()) else {
                 return;
             };
-            let Some(graph) = weak.upgrade().filter(|g| g.asked.get() == asked) else {
+            let next = graph.asking.borrow_mut().answered();
+            if let Some(next) = next {
+                return app.send_graph_query(&graph, next);
+            }
+            // The empty page went up meanwhile.
+            if graph.asked.get() != asked {
                 return;
-            };
+            }
             graph.answered.set(asked);
             match answer {
-                Some(Ok(part)) => app.land_graph(&graph, &part, &ask),
+                Some(Ok(ready)) => app.land_graph(&graph, ready, &ask),
                 Some(Err(why)) => app.graph_failed(&graph, &why.to_string()),
                 None => app.graph_failed(&graph, "the worker stopped"),
             }
         });
-        if let Some(old) = graph.query.replace(Some(task)) {
-            old.abort();
-        }
     }
 
-    /// The vault's answer: what changed shown, the canvas up if it was not.
-    fn land_graph(self: &Rc<Self>, graph: &Rc<GraphTab>, part: &Part, ask: &Ask) {
+    /// The vault's answer: what changed shown, the canvas up if it was not. Made ready against
+    /// a graph that has changed since, by a rename say, it is diffed again here.
+    fn land_graph(self: &Rc<Self>, graph: &Rc<GraphTab>, ready: model::Ready, ask: &Ask) {
         #[cfg(feature = "bench")]
         let t = std::time::Instant::now();
         #[cfg(feature = "bench")]
@@ -801,8 +910,17 @@ impl App {
             Ask::Grow(key) => Some(key.as_str()),
             Ask::Fresh | Ask::Again => None,
         };
-        let changes = graph.view.graph().changes(part, near);
-        graph.view.apply(&changes);
+        #[cfg(feature = "bench")]
+        let d = std::time::Instant::now();
+        let (changes, next) = match ready.version == graph.view.graph().version() {
+            true => (ready.changes, Some(ready.graph)),
+            false => (graph.view.graph().changes(&ready.part, near), None),
+        };
+        #[cfg(feature = "bench")]
+        graph
+            .diff_ms
+            .set(graph.diff_ms.get() + d.elapsed().as_secs_f64() * 1000.0);
+        graph.view.apply(&changes, next);
         loading::show(&graph.holder);
         graph.describe();
         if matches!(self.active_doc(), Some(Doc::Graph(_))) {
@@ -1010,13 +1128,19 @@ impl App {
         }
     }
 
+    /// Hidden behind another tab, the graph asks once it is shown again ([`App::start_graph`]).
     fn refresh_graph_soon(self: &Rc<Self>, graph: &Rc<GraphTab>) {
         let (app, weak) = (Rc::downgrade(self), Rc::downgrade(graph));
         graph.refresh.call(move || {
-            if let (Some(app), Some(graph)) = (app.upgrade(), weak.upgrade()) {
-                graph.describe();
-                app.query_graph(&graph, Ask::Again);
+            let (Some(app), Some(graph)) = (app.upgrade(), weak.upgrade()) else {
+                return;
+            };
+            if !graph.holder.is_mapped() {
+                graph.asking.borrow_mut().stale = true;
+                return;
             }
+            graph.describe();
+            app.query_graph(&graph, Ask::Again);
         });
     }
 
@@ -1025,5 +1149,35 @@ impl App {
         for graph in self.graphs() {
             graph.view.restyle();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Ask, Asking};
+
+    /// One question on its way at a time: those asked meanwhile wait as one, for what each was
+    /// for, and the answer on its way gives way to it.
+    #[test]
+    fn questions_asked_meanwhile_wait_as_one() {
+        let mut asking = Asking::default();
+        assert_eq!(asking.ask(Ask::Again), Some(Ask::Again));
+        // A burst of saves.
+        for _ in 0..5 {
+            assert_eq!(asking.ask(Ask::Again), None);
+        }
+        assert_eq!(asking.answered(), Some(Ask::Again));
+        assert_eq!(asking.answered(), None);
+        // A grow on its way keeps its node to slide out of, and a fresh start wins.
+        assert_eq!(
+            asking.ask(Ask::Grow("a.md".into())),
+            Some(Ask::Grow("a.md".into()))
+        );
+        asking.ask(Ask::Again);
+        assert_eq!(asking.answered(), Some(Ask::Grow("a.md".into())));
+        asking.ask(Ask::Fresh);
+        asking.ask(Ask::Again);
+        assert_eq!(asking.answered(), Some(Ask::Fresh));
+        assert_eq!(asking.answered(), None);
     }
 }

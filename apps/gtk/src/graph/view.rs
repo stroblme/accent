@@ -231,8 +231,9 @@ impl GraphView {
     }
 
     /// Show what `changes` change, the nodes staying in place and the new ones placed beside the
-    /// node they slide out of, and set the layout moving.
-    pub fn apply(&self, changes: &Changes) {
+    /// node they slide out of, and set the layout moving. `next` is the graph they leave where
+    /// that was made ready already, the roots aside.
+    pub fn apply(&self, changes: &Changes, next: Option<Graph>) {
         let imp = self.imp();
         if changes.is_empty() && changes.edges == imp.graph.borrow().edges {
             return;
@@ -247,7 +248,14 @@ impl GraphView {
                 at.push(near.unwrap_or_default());
             }
         }
-        imp.graph.borrow_mut().apply(changes);
+        match next {
+            Some(mut next) => {
+                let mut graph = imp.graph.borrow_mut();
+                next.roots = std::mem::take(&mut graph.roots);
+                *graph = next;
+            }
+            None => imp.graph.borrow_mut().apply(changes),
+        }
         imp.hover.set(None);
         let generation = imp.generation.get() + 1;
         imp.generation.set(generation);
@@ -260,7 +268,7 @@ impl GraphView {
         let (links, paints) = {
             let graph = imp.graph.borrow();
             let paints = graph.nodes.iter().map(|n| model::paint_of(n.kind));
-            (graph.links(), paints.collect())
+            (graph.links.clone(), paints.collect())
         };
         let animate = self.animations();
         imp.worker
