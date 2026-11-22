@@ -119,13 +119,14 @@ impl Default for CodePane {
     }
 }
 
-/// What the Graph tab shows, as its menu was left (DESIGN.md, Graph).
+/// What the Graph tab shows and how far apart, as its menu was left (DESIGN.md, Graph).
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GraphView {
     /// The whole vault, rather than the file in front and its neighbours.
     pub all: bool,
     pub shown: crate::graph::Shown,
+    pub spread: crate::graph::layout::Spread,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

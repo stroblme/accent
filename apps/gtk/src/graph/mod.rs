@@ -15,6 +15,7 @@ mod worker;
 
 use super::*;
 use accent_core::config::GraphView as Saved;
+use accent_core::graph::layout::Spread;
 use accent_core::graph::{NodeKind, Part, Shown};
 use accent_core::search::{self, Options};
 use view::GraphView;
@@ -32,6 +33,10 @@ const EMPTY: &str = "empty";
 /// of saves, a sync or a folder moved, costs one question.
 const REFRESH: Duration = Duration::from_millis(300);
 
+/// The spread slider's ends, from half d3's spacing to three times it, and the step it moves in,
+/// which keeps each value exact, the default's 1 among them.
+const SPREAD: (f64, f64, f64) = (0.5, 3.0, 0.25);
+
 pub(crate) fn is_key(key: &str) -> bool {
     key == KEY
 }
@@ -45,25 +50,110 @@ struct Find {
     current: Option<usize>,
 }
 
-/// The graph's menu: Show Whole Vault; what is shown, Show Orphans while the whole vault is;
-/// Reset Graph. A toggle is drawn as a check, its action carrying its state.
-fn graph_menu(all: bool) -> gio::Menu {
+/// The graph's menu: Show Whole Vault; what is shown, Show Orphans while the whole vault is,
+/// its action being off otherwise; Reset Graph. A toggle is drawn as a check, its action carrying
+/// its state.
+fn graph_menu() -> gio::Menu {
     let section = |actions: &[&str]| {
         let section = gio::Menu::new();
         for action in actions {
-            section.append(Some(crate::actions::label_of(action)), Some(action));
+            let item = gio::MenuItem::new(Some(crate::actions::label_of(action)), Some(action));
+            if *action == "win.graph-orphans" {
+                item.set_attribute_value("hidden-when", Some(&"action-disabled".to_variant()));
+            }
+            section.append_item(&item);
         }
         section
     };
-    let mut shown = vec!["win.graph-unresolved", "win.graph-tags", "win.graph-images"];
-    if all {
-        shown.push("win.graph-orphans");
-    }
     let menu = gio::Menu::new();
     menu.append_section(None, &section(&["win.graph-all"]));
-    menu.append_section(None, &section(&shown));
+    menu.append_section(
+        None,
+        &section(&[
+            "win.graph-unresolved",
+            "win.graph-tags",
+            "win.graph-images",
+            "win.graph-orphans",
+        ]),
+    );
     menu.append_section(None, &section(&["win.graph-reset"]));
     menu
+}
+
+/// The menu's button over the canvas's top right corner, a disc as opaque as the ring's buttons
+/// over a page (DESIGN.md, PDF). Its menu holds Spread above Reset Graph, `spread` being the
+/// slider's value, and hangs from `host` as the right-click's does, pointing at the button: once
+/// closed, a popover of the button's own left the keyboard on the button rather than where it
+/// was.
+fn menu_button(spread: &gtk::Adjustment, host: &gtk::Box) -> gtk::Button {
+    let button = gtk::Button::builder()
+        .icon_name("view-more-symbolic")
+        .tooltip_text("Graph Menu")
+        .focus_on_click(false)
+        .halign(gtk::Align::End)
+        .valign(gtk::Align::Start)
+        .margin_top(12)
+        .margin_end(12)
+        .build();
+    // Added, so the class the icon gave the button stays.
+    for class in ["circular", "opaque", "accent-floating"] {
+        button.add_css_class(class);
+    }
+    button.update_property(&[
+        gtk::accessible::Property::Label("Graph Menu"),
+        gtk::accessible::Property::HasPopup(true),
+    ]);
+    let spread = spread.clone();
+    button.connect_clicked(glib::clone!(
+        #[weak]
+        host,
+        move |button| {
+            let Some(at) = button.compute_bounds(&host) else {
+                return;
+            };
+            let menu = graph_menu();
+            let item = gio::MenuItem::new(None, None);
+            item.set_attribute_value("custom", Some(&"spread".to_variant()));
+            let slider = gio::Menu::new();
+            slider.append_item(&item);
+            menu.insert_section(2, None, &slider);
+            let at = gdk::Rectangle::new(
+                at.x() as i32,
+                at.y() as i32,
+                at.width() as i32,
+                at.height() as i32,
+            );
+            let popover = widgets::popup_menu(&host, &menu, Some(at));
+            popover.add_child(&spread_row(&spread), "spread");
+        }
+    ));
+    button
+}
+
+/// Spread's row in the menu: its name in line with the items' labels, past where their checks
+/// go (Adwaita's 12 px padding and 22 px check), and the slider, the default marked.
+fn spread_row(spread: &gtk::Adjustment) -> gtk::Box {
+    let scale = gtk::Scale::builder()
+        .adjustment(spread)
+        .width_request(128)
+        .hexpand(true)
+        .build();
+    scale.add_mark(Spread::default().0.into(), gtk::PositionType::Bottom, None);
+    // A drag stops on the steps the keyboard takes, so it can land on the default again.
+    scale.connect_change_value(|scale, _, value| {
+        let step = SPREAD.2;
+        scale.set_value((value / step).round() * step);
+        glib::Propagation::Stop
+    });
+    scale.update_property(&[gtk::accessible::Property::Label("Spread")]);
+    let row = gtk::Box::builder()
+        .spacing(12)
+        .margin_start(34)
+        .margin_end(12)
+        .build();
+    row.append(&gtk::Label::new(Some("Spread")));
+    row.append(&scale);
+    row
 }
 
 /// What a question to the vault is for, which says how its answer is shown.
@@ -87,6 +177,8 @@ pub struct GraphTab {
     /// The whole vault rather than the roots and their neighbours.
     all: Cell<bool>,
     shown: Cell<Shown>,
+    /// The spread slider's value, which the canvas lays the nodes out at.
+    spread: gtk::Adjustment,
     /// The vault's answer on its way, which the next question stops.
     query: RefCell<Option<glib::JoinHandle<()>>>,
     /// Counts the questions asked, so only the last one's answer lands.
@@ -139,11 +231,12 @@ impl GraphTab {
         self.view.graph().facts()
     }
 
-    /// What the session keeps of it: what its menu shows.
+    /// What the session keeps of it: what its menu shows and its spread.
     pub fn saved(&self) -> Saved {
         Saved {
             all: self.all.get(),
             shown: self.shown.get(),
+            spread: Spread(self.spread.value() as f32),
         }
     }
 
@@ -403,10 +496,17 @@ impl App {
     /// preview; a restored one goes where the session put it. It is seeded once on screen.
     pub(crate) fn open_graph(self: &Rc<Self>, how: Opened) -> Rc<GraphTab> {
         let view = GraphView::new();
-        // In a box its menu hangs from: a popover on the canvas itself would be allocated by a
+        // What the vault's session keeps of the graph, taken before anything saves it again.
+        let saved = (self.vault().map(|vault| vault.session().graph)).unwrap_or_default();
+        let (lower, upper, step) = SPREAD;
+        let spread = gtk::Adjustment::new(saved.spread.0.into(), lower, upper, step, step, 0.0);
+        view.set_spread(Spread(spread.value() as f32));
+        // In a box its menus hang from: a popover on the canvas itself would be allocated by a
         // widget with no layout manager (DESIGN.md, States).
         let host = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        host.append(&view);
+        let canvas = gtk::Overlay::builder().child(&view).build();
+        canvas.add_overlay(&menu_button(&spread, &host));
+        host.append(&canvas);
         let holder = loading::holder();
         loading::put(&holder, &host);
         let empty = widgets::status_page(
@@ -440,8 +540,9 @@ impl App {
             page,
             holder,
             view,
-            all: Cell::new(false),
-            shown: Cell::new(Shown::default()),
+            all: Cell::new(saved.all),
+            shown: Cell::new(saved.shown),
+            spread,
             query: RefCell::new(None),
             asked: Cell::new(0),
             started: Cell::new(false),
@@ -482,19 +583,28 @@ impl App {
             self,
             move || app.refresh_zoom()
         ));
-        // Its menu, anywhere on the canvas, built at each press: Show Orphans is the whole
-        // vault's alone.
+        let weak = Rc::downgrade(&graph);
+        graph.spread.connect_value_changed(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |spread| {
+                if let Some(graph) = weak.upgrade() {
+                    graph.view.set_spread(Spread(spread.value() as f32));
+                    app.save_session_soon();
+                }
+            }
+        ));
+        // Its menu, anywhere on the canvas.
         let menu = gtk::GestureClick::builder()
             .button(gdk::BUTTON_SECONDARY)
             .build();
-        let weak = Rc::downgrade(&graph);
         menu.connect_pressed(move |menu, _, x, y| {
-            let (Some(graph), Some(host)) = (weak.upgrade(), menu.widget()) else {
+            let Some(host) = menu.widget() else {
                 return;
             };
             menu.set_state(gtk::EventSequenceState::Claimed);
             let anchor = gdk::Rectangle::new(x as i32, y as i32, 1, 1);
-            widgets::popup_menu(&host, &graph_menu(graph.all.get()), Some(anchor));
+            widgets::popup_menu(&host, &graph_menu(), Some(anchor));
         });
         host.add_controller(menu);
         graph.holder.connect_map(glib::clone!(
@@ -523,11 +633,6 @@ impl App {
         let front = self.graph_front().map(|(_, key)| key);
         graph.view.set_front(front.clone());
         graph.view.graph_mut().roots = front.into_iter().collect();
-        if let Some(vault) = self.vault() {
-            let saved = vault.session().graph;
-            graph.all.set(saved.all);
-            graph.shown.set(saved.shown);
-        }
         self.sync_graph_actions();
         self.query_graph(graph, Ask::Fresh);
     }

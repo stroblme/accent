@@ -1696,16 +1696,19 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - Names are placed best first, the file in front, the node the keyboard is on and the lit node always, then the lit node's neighbours and the rest by how many links each has (user decision 2026-11-22).
   A name whose box meets one already placed is left out, so how many show follows the zoom.
 - **The layout is a live force layout** worked out off the main loop (user decision 2026-11-21), so the nodes settle as they are watched, a dragged node pulls its neighbours along and what a click adds slides out of the node clicked.
-  A dragged node is held only while the pointer holds it, and settles back with the rest once let go.
+  A dragged node is held only while the pointer holds it, and settles back with the rest once let go, however long it was held.
   With animations off the settled layout shows at once, and a drag moves the one node until it is let go.
+- **Spread sets how far apart the nodes settle**, one slider from half d3's spacing to three times it in quarter steps, marked at d3's own (user decision 2026-11-22).
+  A link's length grows with it and the push between nodes with its square, so the layout keeps its shape and only the room between its nodes changes, and the nodes move to the new spacing as the slider moves.
 - Dragging the background or with the middle button pans, and so do the wheel and the touchpad, while `Ctrl+scroll`, a pinch and the zoom chords zoom as over a diagram (Zoom).
   Until the reader pans or zooms, the graph is kept fitted as it settles, never past 100 %, and the readout says Fit as an image's does.
   `Ctrl+0` fits it again at once.
   Until the next picture is drawn the last one is moved and scaled, and one drawn for a view the reader moved reaches an eighth of the canvas past each edge, so the edges stay filled through a pan of that much and through a zoom step out from 90 % up, or from 50 % up round the middle.
   A picture of the settled graph at another zoom crossfades in over the scaled one, as a newly lit node's does, which softens the edges a larger step leaves empty for a moment.
 - It follows the vault 300 ms after the last change, a note saved here or by another program and a file added, renamed or deleted, each node keeping its place, a renamed one too.
-- Its menu, a right-click anywhere on the canvas, holds Show Whole Vault, Show Unresolved Links, Show Tags, Show Images and Show Orphans as checks, then Reset Graph, each a palette command too (Keyboard, Graph).
-  What it shows is kept in the vault's session, and a restored graph comes back around the file in front.
+- Its menu, a right-click anywhere on the canvas or the button in its top right corner, holds Show Whole Vault, Show Unresolved Links, Show Tags, Show Images and Show Orphans as checks, then Reset Graph, each a palette command too (Keyboard, Graph).
+  The button is a disc as opaque as the ring's (PDF), and its popover holds Spread above Reset Graph (user decision 2026-11-22).
+  What it shows and its spread are kept in the vault's session, and a restored graph comes back around the file in front.
 - Like a shell or a comparison it is no file, so it has no backlinks, stays in its window and is no recent file.
 - The status bar names it Graph and counts it, "42 files · 57 links".
 

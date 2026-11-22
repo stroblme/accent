@@ -16,7 +16,7 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use accent_core::graph::layout::Layout as Force;
+use accent_core::graph::layout::{Layout as Force, Spread};
 use gtk::{gdk, glib};
 
 use super::camera::Camera;
@@ -48,6 +48,8 @@ pub enum Cmd {
     Unpin(usize),
     /// Settle at once and hand the places over once: a drag let go with animations off.
     Settle,
+    /// The nodes spread anew, moving there as the layout steps, or at once without animations.
+    Spread(Spread),
 }
 
 /// The places the layout reached, for the generation of the canvas's graph they are of, and
@@ -140,14 +142,15 @@ struct Shape {
 }
 
 impl Worker {
-    pub fn start() -> Worker {
+    /// The threads, the layout spread as `spread` says.
+    pub fn start(spread: Spread) -> Worker {
         let (tx, rx) = mpsc::channel();
         let shared = Arc::new(Shared::default());
         let (layout, drawing) = (shared.clone(), shared.clone());
         std::thread::Builder::new()
             .name("accent-graph".into())
             .spawn(move || {
-                lay_out(&rx, &layout);
+                lay_out(&rx, &layout, spread);
                 lock(&layout.draw).done = true;
                 layout.wake.notify_all();
             })
@@ -198,8 +201,9 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 /// The layout's thread, until the canvas drops its sender.
-fn lay_out(rx: &Receiver<Cmd>, shared: &Shared) {
+fn lay_out(rx: &Receiver<Cmd>, shared: &Shared, spread: Spread) {
     let mut force = Force::new();
+    force.set_spread(spread);
     let mut shape = Arc::new(Shape {
         links: Vec::new(),
         paints: Vec::new(),
@@ -265,6 +269,10 @@ fn lay_out(rx: &Receiver<Cmd>, shared: &Shared) {
                     cold |= len == 0;
                     for i in removed {
                         force.remove(i);
+                        // The node a drag holds moves as the layout's own does.
+                        let last = force.positions().len();
+                        held = (held.filter(|&(h, _)| h != i))
+                            .map(|(h, at)| (if h == last { i } else { h }, at));
                     }
                     for near in added {
                         force.add(near);
@@ -298,6 +306,10 @@ fn lay_out(rx: &Receiver<Cmd>, shared: &Shared) {
                 }
                 Cmd::Pin(..) | Cmd::Unpin(_) => {}
                 Cmd::Settle => settle = true,
+                Cmd::Spread(spread) => {
+                    force.set_spread(spread);
+                    settle |= !animate;
+                }
             }
         }
         // A change shows where its nodes were placed, before a step.
@@ -465,7 +477,7 @@ mod tests {
     /// frame, and the threads end with the sender.
     #[test]
     fn the_thread_steps_draws_settles_and_ends() {
-        let worker = Worker::start();
+        let worker = Worker::start(Spread::default());
         worker.send(change(1, 3, 3, true));
         let first = frame(&worker);
         assert_eq!((first.generation, first.at.len()), (1, 3));
@@ -491,6 +503,11 @@ mod tests {
         assert_eq!(drawn.serial, 7);
         std::thread::sleep(Duration::from_millis(50));
         assert!(worker.take().is_none(), "one frame a settle");
+        // A new spread, animations still off, settles at once with the nodes further apart.
+        worker.send(Cmd::Spread(Spread(2.0)));
+        let spread = frame(&worker);
+        let apart = |at: &[[f32; 2]]| (at[0][0] - at[1][0]).hypot(at[0][1] - at[1][1]);
+        assert!(spread.settled && apart(&spread.at) > 1.5 * apart(&settled.at));
         let life = worker.life();
         drop(worker);
         let t = Instant::now();
@@ -503,7 +520,7 @@ mod tests {
     /// A cold layout settled at once shows its nodes, then a settled frame with its links.
     #[test]
     fn a_cold_layout_settled_at_once_gets_its_links() {
-        let worker = Worker::start();
+        let worker = Worker::start(Spread::default());
         let view = View {
             size: [400.0, 300.0],
             ..view()

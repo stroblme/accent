@@ -31,6 +31,7 @@ use super::model::{self, Changes, Graph, Paint};
 use super::raster::{self, Colours, Rgba};
 use super::worker::{Cmd, Picture, Worker};
 use crate::theme;
+use accent_core::graph::layout::Spread;
 
 /// The most names drawn in a frame, a whole vault zoomed in included.
 const LABELS_MAX: usize = 400;
@@ -102,6 +103,8 @@ mod imp {
         /// Counts the changes sent to the layout, so only places of what is shown land.
         pub generation: Cell<u64>,
         pub worker: RefCell<Option<Worker>>,
+        /// How far apart the layout spreads the nodes, a new worker's too.
+        pub spread: Cell<Spread>,
         pub ticking: RefCell<Option<gtk::TickCallbackId>>,
         /// Whether the places shown are the settled layout of what is shown.
         pub settled: Cell<bool>,
@@ -255,7 +258,7 @@ impl GraphView {
         let animate = self.animations();
         imp.worker
             .borrow_mut()
-            .get_or_insert_with(Worker::start)
+            .get_or_insert_with(|| Worker::start(imp.spread.get()))
             .send(Cmd::Change {
                 generation,
                 removed: changes.removed.clone(),
@@ -433,6 +436,22 @@ impl GraphView {
         }
         imp.settled.set(false);
         self.run();
+    }
+
+    /// Spread the nodes as `spread` says: the layout moves them to the new spacing.
+    pub fn set_spread(&self, spread: Spread) {
+        let imp = self.imp();
+        if imp.spread.replace(spread) == spread {
+            return;
+        }
+        if let Some(worker) = imp.worker.borrow().as_ref() {
+            worker.send(Cmd::Spread(spread));
+        }
+        // No frame comes for no nodes.
+        if !imp.at.borrow().is_empty() {
+            imp.settled.set(false);
+            self.run();
+        }
     }
 
     /// Draw the file keyed `key` in the accent, or none.

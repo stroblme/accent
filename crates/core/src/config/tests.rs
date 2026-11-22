@@ -675,6 +675,7 @@ fn session_roundtrips_as_json() {
         kernels: BTreeMap::from([("r.ipynb".to_string(), "ir".to_string())]),
         graph: GraphView {
             all: true,
+            spread: crate::graph::layout::Spread(2.5),
             ..GraphView::default()
         },
     };
