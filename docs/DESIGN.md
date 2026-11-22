@@ -1696,6 +1696,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   While the pointer lights no node, the file in front is lit the same way but milder, the rest dimmed to 60 %, so the graph shows where the note being read sits, and the pointer takes over at once and hands back to it with the same crossfade (user decision 2026-11-22).
   When the file in front changes to a node off the canvas, as a tab picked in another pane makes it, a graph the reader has moved eases over to put that node in the middle, at once with animations off, while a fitted graph stays as it is.
 - Names are placed best first, the file in front, the node the keyboard is on and the lit node always, then the names already shown, so they stay while the nodes move, then the lit node's neighbours and then the rest by how many links each has (user decisions 2026-11-22).
+  The pointer's light puts its node's neighbours ahead of the names already shown, so they show as soon as it lights them.
   A name whose box meets one already placed is left out, so how many show follows the zoom, and a pan alone changes none of them.
   Each sits on a soft rounded backdrop in the canvas's colour, so it reads over the discs and links beneath it without covering its own disc.
 - **The layout is a live force layout** worked out off the main loop (user decision 2026-11-21), so the nodes settle as they are watched, a dragged node pulls its neighbours along and what a click adds slides out of the node clicked.

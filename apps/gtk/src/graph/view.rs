@@ -1125,7 +1125,7 @@ impl GraphView {
             let near: HashSet<usize> = lit
                 .map(|l| graph.adjacency[l].iter().copied().chain([l]).collect())
                 .unwrap_or_default();
-            for (i, layout) in self.place(graph, screen, radius, lit) {
+            for (i, layout) in self.place(graph, screen, radius, light) {
                 let dim = light.filter(|_| !near.contains(&i)).map(|l| l.dim);
                 let alpha = match (dim, graph.nodes[i].kind) {
                     (Some(dim), _) => dim,
@@ -1145,8 +1145,8 @@ impl GraphView {
         }
         let shown = names.iter().map(|(i, ..)| graph.nodes[*i].key.clone());
         imp.shown.replace(shown.collect());
-        // The backdrops first, so none covers a name: a rounded colour each, which GL and Vulkan
-        // draw directly, where a filled path is drawn into a mask first, every frame.
+        // The backdrops first, so none covers a name: a rounded colour each, which took GL on
+        // llvmpipe 10 ms a frame round the note where one filled path of them all took 14.
         let page = crate::highlight::page(adw::StyleManager::default().is_dark());
         let [x, y] = BACKDROP_PAD;
         let mut texts = Vec::with_capacity(names.len());
@@ -1181,20 +1181,22 @@ impl GraphView {
         }
     }
 
-    /// The names that go on the canvas with `lit` lit, best first, each laid out: the file in
+    /// The names that go on the canvas with `light`, best first, each laid out: the file in
     /// front, the node the keyboard is on and the lit node always, then the names drawn in the
     /// last frame, so they stay while the nodes move, the lit node's neighbours and the rest,
     /// best-linked first, each where its box meets none placed before, [`LABELS_MAX`] in all
-    /// (user decisions 2026-11-22). A name's box is guessed before it is laid out, so one that
-    /// does not fit costs no layout.
+    /// (user decisions 2026-11-22). The pointer's light, which dims the most, puts its node's
+    /// neighbours before the last frame's names, so they show at once. A name's box is guessed
+    /// before it is laid out, so one that does not fit costs no layout.
     fn place(
         &self,
         graph: &Graph,
         screen: &[[f64; 2]],
         radius: &dyn Fn(usize) -> f64,
-        lit: Option<usize>,
+        light: Option<Light>,
     ) -> Vec<(usize, pango::Layout)> {
         let imp = self.imp();
+        let lit = light.map(|l| l.node);
         let index = |key: &RefCell<Option<String>>| {
             (key.borrow().as_deref()).and_then(|k| graph.index_of(k))
         };
@@ -1207,9 +1209,14 @@ impl GraphView {
         let mut labels = imp.labels.borrow_mut();
         let mut taken = camera::Occupied::new(self.size(), imp.camera.get().offset);
         let mut placed: Vec<(usize, pango::Layout)> = Vec::new();
-        let shown = imp.shown.borrow();
-        let shown = shown.iter().filter_map(|key| graph.index_of(key));
-        let candidates = always.into_iter().flatten().chain(shown).chain(near);
+        let shown: Vec<usize> = (imp.shown.borrow().iter())
+            .filter_map(|key| graph.index_of(key))
+            .collect();
+        let (first, then) = match light.is_some_and(|l| l.dim == theme::GRAPH_DIM_ALPHA) {
+            true => (near, shown),
+            false => (shown, near),
+        };
+        let candidates = always.into_iter().flatten().chain(first).chain(then);
         for i in candidates.chain(by_degree.iter().copied()) {
             if placed.len() == LABELS_MAX {
                 break;
