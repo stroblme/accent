@@ -3,10 +3,11 @@
 use super::pdf::{labels, online, opened, render_threads, settled, written};
 use super::*;
 
-/// The Outline pane following the reader: the bookmark the page is under as `rel` is scrolled
-/// through (a scroll, not a jump), then the list after a page edit, which must be the same list
-/// refilled; with `,<rel_diagram>` a diagram's pages as it turns to each. Every line says which
-/// row is selected, whether it is on screen and who has the keyboard, which a follow never takes.
+/// The Outline pane following the reader: what the pane holds, then the bookmark the page is
+/// under as `rel` is scrolled through (a scroll, not a jump), then the list after a page edit,
+/// which must be the same list refilled; with `,<rel_diagram>` a diagram's pages as it turns to
+/// each. Every line says which row is selected, whether it is on screen and who has the
+/// keyboard, which a follow never takes.
 pub(super) fn bench_pdf_bookmarks(app: &Rc<App>, arg: &str) {
     let (rel, diagram) = match arg.split_once(',') {
         Some((rel, diagram)) => (rel.to_string(), Some(diagram.to_string())),
@@ -22,6 +23,9 @@ pub(super) fn bench_pdf_bookmarks(app: &Rc<App>, arg: &str) {
         app.show_pane("outline");
         pdf.key_target().grab_focus();
         glib::timeout_future(Duration::from_millis(300)).await;
+        // The bookmarks over the thumbnail strip, a `GtkPaned`, or with neither bookmarks nor
+        // comments the strip alone, a `GtkOverlay`.
+        println!("bench bookmarks pane={}", super::panes::bench_outline(&app));
         let list = outline_view(&app);
         for page in [0, 1, 2, 3, 4, 2, 0] {
             pdf.scroll_to(pdfview::Anchor {

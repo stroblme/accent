@@ -697,8 +697,8 @@ impl App {
             // The bar speaks for the tab in front, so with none it says nothing: the last
             // document's "Markdown · 2 words" used to stay under an empty document column,
             // because this path returned before either readout was asked again. The Outline
-            // pane is the same: a closed PDF left its "No Bookmarks" page and its thumbnail
-            // strip in the sidebar, and `sync_outline` already says "No Outline" for no
+            // pane is the same: a closed PDF left its bookmarks or its thumbnail strip in the
+            // sidebar, and `sync_outline` already says "No Outline" for no
             // document at all. So are the progress slot, where a PDF closed while it was still
             // opening left "Opening the document…", and the presented preview, which kept the last
             // note.
@@ -801,10 +801,11 @@ impl App {
         let Some(doc) = self.side_doc() else {
             return sidebar.set_outline(None);
         };
-        // A PDF's outline is its bookmarks, with the page thumbnails under them.
+        // A PDF's outline is its bookmarks, with the page thumbnails under them, or the
+        // thumbnails alone where it has neither bookmarks nor comments.
         if let Some(pdf) = doc.pdf() {
-            // Still being opened on the render thread, so there is nothing to say yet and
-            // "No Bookmarks" would be a guess; or it never opened, and has no pages to list.
+            // Still being opened on the render thread, so there is nothing to say yet and the
+            // thumbnails alone would be a guess; or it never opened, and has no pages to list.
             if pdf.page_count() == 0 {
                 let (title, body) = match pdf.opening() {
                     true => ("Opening…", "Reading the document."),
@@ -824,12 +825,7 @@ impl App {
                 .collect();
             rows.extend(pdf.comment_rows());
             if rows.is_empty() {
-                let thumbs = pdf.thumbnails();
-                if !sidebar.shows_below(&thumbs) {
-                    let none = sidebar::outline_note("No Bookmarks", "This PDF has no outline.");
-                    sidebar.set_outline(Some(&sidebar::above(&none, &thumbs)));
-                }
-                return;
+                return sidebar.set_outline_strip(&pdf.thumbnails());
             }
             let jump = glib::clone!(
                 #[weak]

@@ -276,7 +276,7 @@ use user_commands::bench_commands;
 ///   `insert:<rel_path>,<source>` (drop insertion; put scratch copies of
 ///   generated `Attachments/pages.pdf` and `Attachments/comments.pdf` at root),
 ///   `strip:<rel_path>` (40 s XTEST hover/drag),
-///   `bookmarks:<rel_path>[,<rel_diagram>]` (outline following),
+///   `bookmarks:<rel_path>[,<rel_diagram>]` (what the Outline pane holds, outline following),
 ///   `render:<rel_path>` (tiles/thumbnail bursts; hundreds of heavy pages),
 ///   `zoom:<rel_path>[,<shot_directory>]` (immediate zoom quality and time to sharp tiles),
 ///   `pinch:<rel_path>` (a pinch after an Outline row's jump, after a scroll, and while the

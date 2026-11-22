@@ -23,7 +23,7 @@ pub use debug::Shown as DebugShown;
 pub use debug::Why as DebugWhy;
 pub use debug::{Data as DebugData, Watched};
 pub use details::{Fact, Group};
-pub use outline::{Line, above, line_number, outline_note};
+pub use outline::{Line, line_number, outline_note};
 pub use ports::Data as PortsData;
 pub use python::{Data as PythonData, KernelChoices};
 pub(crate) use search::hit_text;
@@ -839,14 +839,16 @@ impl Sidebar {
         }
     }
 
-    /// Whether the pane shows `below` under a sentence ([`above`]), as it shows a PDF's
-    /// thumbnail strip under "No Bookmarks": a refill leaves that be, since taking the strip out
-    /// from under the pointer ends its hover.
-    pub fn shows_below(&self, below: &gtk::Widget) -> bool {
-        self.outline_list.borrow().is_none()
-            && below
-                .parent()
-                .is_some_and(|split| self.outline_bin.child() == Some(split))
+    /// Show `strip` alone, a PDF's thumbnails where it has no bookmarks and no comments to list
+    /// over them (user decision 2026-11-22). A refill leaves one already shown alone be, since
+    /// taking the strip out from under the pointer ends its hover.
+    pub fn set_outline_strip(&self, strip: &gtk::Widget) {
+        if self.outline_list.borrow().is_none() && self.outline_bin.child().as_ref() == Some(strip)
+        {
+            return;
+        }
+        outline::detach(strip);
+        self.set_outline(Some(strip));
     }
 
     /// Show the outline of the document `key` as rows that jump, each showing the page or line

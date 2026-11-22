@@ -451,7 +451,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 
 **Outline**
 
-- What the open tab outlines: a text file's symbols from the language layer (a note's or an org file's headings, a source file's functions and types, nested as the server nests them), a PDF's bookmarks, comments and thumbnail strip (see PDF), a diagram's pages and their thumbnail strip (see Diagram), a notebook's headings (its markdown cells', in the cells' order), or an empty state.
+- What the open tab outlines: a text file's symbols from the language layer (a note's or an org file's headings, a source file's functions and types, nested as the server nests them), a PDF's bookmarks, comments and thumbnail strip (see PDF), the strip alone where a PDF has neither bookmarks nor comments (user decision 2026-11-22), a diagram's pages and their thumbnail strip (see Diagram), a notebook's headings (its markdown cells', in the cells' order), or an empty state.
 - A code file no language server has answered with symbols for — none is installed, or it has not answered yet — is outlined from the index's declarations (Architecture, Code declarations), and a server's first symbols replace them: one inside another's span is nested under it, and a run of a type's methods declared outside it (a Rust `impl`) goes under a row naming the type, as rust-analyzer's `impl Index` does.
   The index holds the file as it was last saved, so its rows are asked for again when a save of it lands, a walk ends or it changes elsewhere, never per keystroke: an edit reaches them with its autosave.
   A server that answers with nothing, or fails before it gave anything, leaves them.

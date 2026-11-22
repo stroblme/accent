@@ -28,15 +28,9 @@ pub fn outline_note(title: &str, body: &str) -> gtk::Widget {
 }
 
 /// `top` over `below` — a PDF's bookmarks over its thumbnail strip — split where the reader drags
-/// it. `below` is one widget kept for its document's whole life, so it is taken out of wherever it
-/// was first: a widget with two parents is a GTK critical.
-pub fn above(top: &gtk::Widget, below: &gtk::Widget) -> gtk::Widget {
-    if let Some(parent) = below.parent() {
-        match parent.downcast_ref::<gtk::Paned>() {
-            Some(paned) => paned.set_end_child(gtk::Widget::NONE),
-            None => below.unparent(),
-        }
-    }
+/// it.
+fn above(top: &gtk::Widget, below: &gtk::Widget) -> gtk::Widget {
+    detach(below);
     let paned = gtk::Paned::builder()
         .orientation(gtk::Orientation::Vertical)
         .resize_start_child(true)
@@ -46,6 +40,22 @@ pub fn above(top: &gtk::Widget, below: &gtk::Widget) -> gtk::Widget {
         .end_child(below)
         .build();
     paned.upcast()
+}
+
+/// Take `strip`, a thumbnail strip kept for its document's whole life, out of wherever it was,
+/// under rows or in the pane alone, so it can go elsewhere: a widget with two parents is a GTK
+/// critical.
+pub(super) fn detach(strip: &gtk::Widget) {
+    let Some(parent) = strip.parent() else {
+        return;
+    };
+    if let Some(paned) = parent.downcast_ref::<gtk::Paned>() {
+        paned.set_end_child(gtk::Widget::NONE);
+    } else if let Some(bin) = parent.downcast_ref::<adw::Bin>() {
+        bin.set_child(gtk::Widget::NONE);
+    } else {
+        strip.unparent();
+    }
 }
 
 /// The one run of rows a refill changes: where it starts, how many old rows it covers and how
