@@ -428,7 +428,7 @@ EOF
 	launch 60 ACCENT_BENCH_TEMPLATE=commands >"$dir/template-commands"
 	has "$dir/template-commands" \
 		'bench template_commands rows=[("New Inbox Note", "win.new-template-Templates-2fInbox-20Note.md"), ("New Meta", "win.new-template-Templates-2fMeta.md")]' \
-		'bench template_commands run made=true used=Some("win.new-template-Templates-2fMeta.md")' \
+		'bench template_commands run made=true used=None' \
 		'bench template_commands chord opened=true made=true' \
 		'bench template_commands deleted gone=true rows=[("New Meta", "win.new-template-Templates-2fMeta.md")] stored=true front=Some("Meta.md")' \
 		'bench template_commands restored accels=Some([])'

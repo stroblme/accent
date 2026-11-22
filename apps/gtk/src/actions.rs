@@ -1211,10 +1211,7 @@ pub fn install_actions(app: &Rc<App>) {
             action.connect_activate(glib::clone!(
                 #[weak]
                 app,
-                move |_, _| {
-                    app.command_used(full);
-                    app.run_action(name);
-                }
+                move |_, _| app.run_action(name)
             ));
             app.window.add_action(&action);
         }

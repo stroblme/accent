@@ -156,9 +156,6 @@ impl Changed {
 
 impl Shell {
     /// Register application actions that can open or close windows and therefore outlive them.
-    ///
-    /// Record actions in the active window's recent-command list so palette ranking learns
-    /// from them, matching the window-action trampoline in [`install_actions`].
     pub fn install_app_actions(self: &Rc<Self>, gtk_app: &adw::Application) {
         // GNOME Shell offers New Window in the launcher's context menu only when it finds an
         // `app.new-window` action, the `new-window` desktop action, or one of the SingleWindow
@@ -175,10 +172,7 @@ impl Shell {
             let action = gio::SimpleAction::new(name, None);
             action.connect_activate({
                 let (shell, gtk_app) = (self.clone(), gtk_app.clone());
-                move |_, _| {
-                    shell.record(&gtk_app, &format!("app.{name}"));
-                    run(&shell, &gtk_app);
-                }
+                move |_, _| run(&shell, &gtk_app)
             });
             gtk_app.add_action(&action);
         }
@@ -187,28 +181,21 @@ impl Shell {
     /// Quit by closing windows so `close-request` can save buffers or refuse failed saves.
     ///
     /// Direct application quit bypasses this protection. The process ends after the last window
-    /// closes; record the command first so each window's session save includes it.
+    /// closes, so the palette records a pick of Quit before running it, and each window's session
+    /// save includes it.
     fn quit(self: &Rc<Self>, gtk_app: &adw::Application) {
         for window in gtk_app.windows() {
             window.close();
         }
     }
 
-    /// Resolve the active window state for application actions and their usage recording.
+    /// Resolve the active window state for application actions.
     pub(crate) fn app_at(&self, window: &gtk::Window) -> Option<Rc<App>> {
         self.windows
             .borrow()
             .iter()
             .find(|app| app.window.upcast_ref::<gtk::Window>() == window)
             .cloned()
-    }
-
-    /// Record an `app.` action in the active window's recently-run commands. Nothing happens from
-    /// the start screen, which has no session to remember it in.
-    fn record(&self, gtk_app: &adw::Application, action: &str) {
-        if let Some(app) = gtk_app.active_window().and_then(|w| self.app_at(&w)) {
-            app.command_used(action);
-        }
     }
 
     /// Apply shared preferences to every window, comparing prior values to avoid unnecessary restyling.

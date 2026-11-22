@@ -1058,6 +1058,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - Its file list is kept warm in the background, not fetched when the dialog opens: a palette that is not instant is not a palette.
   The list is read again as it opens all the same, and one that lands while the dialog is up, that one or the reconcile's, is ranked again under the query typed, the highlight staying on its row if that is still there: a note saved since, with a new link or alias, is in it on that opening, and a vault opened a moment ago fills it as the index does.
 - Command mode lists the user's own commands (Terminal) by name after the table's commands, each with its shortcut, rebound from its row as any command is (Keyboard, Rebinding).
+- **Command mode ranks the commands picked in it lately first** (user decision 2026-11-22), and only a pick counts, since a command run by its chord, a menu or a button is one the reader reaches without the palette.
 - **Command mode lists only what applies** to the window as it stands, read afresh as it opens: what the tab in front can take (Export as PDF… over a PDF, not over a note), the vault, its repository, a debug session and a kernel (`actions::applies`).
   Every other action is disabled, so a menu leaves it out and its chord goes on to the focused widget.
   Go to Source and Show in PDF without SyncTeX data and Initialize Git Repository in a repository stay listed, greyed and saying why.
@@ -2208,7 +2209,7 @@ The `Ctrl` chords for application and document commands use GTK's `<Primary>` mo
 - Print… and the exports act on the tab the menu was opened on, else the tab in front (Preview, Notebook, PDF, Diagram); over any tab but a note, a notebook, a PDF or a diagram they do nothing, as Save As… does, and one a tab has no such file for (PDF, PNG and SVG for a note or a notebook, HTML for a PDF or a diagram, PNG and SVG for a PDF) does nothing over it.
   Open in Browser acts the same way on a note or a notebook alone.
   Each is disabled where it would do nothing, so the palette leaves it out.
-- Open Local…, Open Remote…, Close Vault and Quit are `app.` actions, since each outlives the window that fired it; they still enter the palette's recently-run list.
+- Open Local…, Open Remote…, Close Vault and Quit are `app.` actions, since each outlives the window that fired it; picked in the palette, they still count among its recent commands (Palette).
 - **Reload Window** closes the window the way closing it does — every edit written or asked about, the session saved — and opens what it showed again: the same vault (a remote one connecting afresh), the same files from outside a vault, the same terminal session, with its tabs, panes and shells, at its size and maximized or fullscreen as it was.
   The shells are detached rather than ended, an unnamed window's too, and taken up again.
   A close given up at a question leaves the window as it was.

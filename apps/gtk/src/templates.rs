@@ -147,7 +147,6 @@ impl App {
                 #[weak(rename_to = app)]
                 self,
                 move |_, _| {
-                    app.command_used(&action(&rel));
                     if let Some(ops) = app.need_ops("create a note from a template") {
                         fileops::note_from_template(ops, &rel);
                     }

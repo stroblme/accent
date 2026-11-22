@@ -266,7 +266,11 @@ impl App {
                     // Followed as the link would be: New File, unless the note has been written
                     // since the list was read.
                     palette::Item::Missing(rel) => app.open_target(rel),
-                    palette::Item::Command { action, .. } => {
+                    // Remembered first: Quit and Close Vault save the session on their way out.
+                    palette::Item::Command { action, why, .. } => {
+                        if why.is_none() {
+                            app.command_used(action);
+                        }
                         let _ = WidgetExt::activate_action(&app.window, action, None);
                     }
                     palette::Item::Tag(tag) => app.show_tag(tag),
@@ -389,7 +393,8 @@ impl App {
         });
     }
 
-    /// Remember a command by full action name, whichever surface fired it.
+    /// Remember a command picked in the palette, by full action name: one run by its chord, a
+    /// menu or a button is reachable without the palette's recents.
     pub fn command_used(self: &Rc<Self>, action: &str) {
         accent_core::config::touch(
             &mut self.recent_commands.borrow_mut(),

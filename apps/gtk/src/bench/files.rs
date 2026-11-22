@@ -61,11 +61,11 @@ pub(super) fn bench_templates(app: &Rc<App>) {
     });
 }
 
-/// `=commands`: each template that names a target is a Run Command row, New and its name, which
-/// makes its note run as a pick runs it; a chord given another through the palette's rebind runs
-/// it through XTEST; with that template deleted its row and action go and the chord stays stored,
-/// opening nothing; and Restore Default takes the chord out of the application's table. Deletes a
-/// template, so a scratch vault under `/tmp`.
+/// `=commands`: each template that names a target is a Run Command row, New and its name, whose
+/// action makes its note, run outside the palette and so no recent command; a chord given another
+/// through the palette's rebind runs it through XTEST; with that template deleted its row and
+/// action go and the chord stays stored, opening nothing; and Restore Default takes the chord out
+/// of the application's table. Deletes a template, so a scratch vault under `/tmp`.
 fn bench_template_commands(app: &Rc<App>) {
     scratch_only(app, "ACCENT_BENCH_TEMPLATE=commands");
     let app = app.clone();

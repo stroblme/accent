@@ -100,9 +100,11 @@ async fn run(app: &Rc<App>) {
         }
         None => (None, false),
     };
+    // Run by its chord, it is no recent command: those are the palette's picks.
     println!(
-        "bench commands shortcut opened={:?} ended={fail} said={said:?} at_root={at_root}",
-        titles(&opened)
+        "bench commands shortcut opened={:?} ended={fail} said={said:?} at_root={at_root} used={:?}",
+        titles(&opened),
+        app.recent_commands.borrow().first()
     );
 
     // From the shell that has the keyboard: a Ctrl+Shift chord is the window's there.

@@ -93,10 +93,7 @@ impl App {
             run.connect_activate(glib::clone!(
                 #[weak(rename_to = app)]
                 self,
-                move |_, _| {
-                    app.command_used(&action(i));
-                    app.run_command(i);
-                }
+                move |_, _| app.run_command(i)
             ));
             self.window.add_action(&run);
         }
