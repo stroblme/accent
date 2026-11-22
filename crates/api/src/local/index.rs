@@ -237,27 +237,37 @@ impl Local {
         Ok(self.index().unresolved_links()?)
     }
 
+    /// Read on the graph's own connection, as [`graph_all`](Self::graph_all) is.
     pub fn graph_around(&self, keys: &[String], shown: Shown) -> Result<Part> {
-        let part = self.index().graph_around(keys, shown)?;
-        Ok(self.unignored(part, keys))
+        let part = self.grapher().graph_around(keys, shown)?;
+        Ok(self.unignored(part, keys, false))
     }
 
-    /// The whole graph, read on the connection the other whole-table reads take.
+    /// The whole graph, read on the graph's own connection.
     pub fn graph_all(&self, shown: Shown) -> Result<Part> {
-        let part = self.searcher().graph_all(shown)?;
-        Ok(self.unignored(part, &[]))
+        let part = self.grapher().graph_all(shown)?;
+        Ok(self.unignored(part, &[], !shown.orphans))
     }
 
     /// `part` without the ghosts of notes the folders git ignores hold, which
-    /// [`missing_notes`](Self::missing_notes) leaves out too, but the ones `keys` name.
-    fn unignored(&self, mut part: Part, keys: &[String]) -> Part {
+    /// [`missing_notes`](Self::missing_notes) leaves out too, but the ones `keys` name. With
+    /// `joined` the files that leaves with no edge go too, as core left out the orphans.
+    fn unignored(&self, mut part: Part, keys: &[String], joined: bool) -> Part {
         if part.nodes.iter().any(|n| n.kind == NodeKind::Missing) {
             let ignored = self.lang.ignored.listing(false);
+            let before = part.nodes.len();
             part.retain(|_, n| {
                 n.kind != NodeKind::Missing
                     || keys.contains(&n.key)
                     || ignored.resolve(&n.key).is_none()
             });
+            if joined && part.nodes.len() < before {
+                let mut edged = vec![false; part.nodes.len()];
+                for e in &part.edges {
+                    (edged[e.from as usize], edged[e.to as usize]) = (true, true);
+                }
+                part.retain(|i, _| edged[i]);
+            }
         }
         part
     }
@@ -563,6 +573,32 @@ mod tests {
             assert!(second.join().unwrap().is_err());
             assert_eq!(third.join().unwrap().unwrap(), "third");
         });
+    }
+
+    /// With orphans off, a note whose only link names a note in a folder git ignores goes with
+    /// that note's ghost, as an orphan does.
+    #[test]
+    fn a_note_linking_only_an_ignored_note_is_no_orphan_of_the_whole_graph() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join(".gitignore"), "build/\n").unwrap();
+        std::fs::create_dir(root.path().join("build")).unwrap();
+        std::fs::write(root.path().join("build/out.md"), "built\n").unwrap();
+        std::fs::write(root.path().join("a.md"), "[[out]]\n").unwrap();
+        std::fs::write(root.path().join("b.md"), "[[c]] [[gone]]\n").unwrap();
+        std::fs::write(root.path().join("c.md"), "c\n").unwrap();
+        let f = Fixture::open_dir(root, VaultConfig::default());
+        let keys = |orphans| {
+            let shown = accent_core::graph::Shown {
+                orphans,
+                ..Default::default()
+            };
+            let part = f.vault.graph_all(shown).unwrap();
+            let mut keys: Vec<String> = part.nodes.into_iter().map(|n| n.key).collect();
+            keys.sort();
+            keys
+        };
+        assert_eq!(keys(false), ["b.md", "c.md", "gone.md"]);
+        assert!(keys(true).contains(&"a.md".to_string()));
     }
 
     #[test]

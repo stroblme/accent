@@ -50,7 +50,6 @@ enum Seed {
 
 /// One link a file writes, as [`Index::links_out`] reads it.
 struct Out {
-    kind: i64,
     target: String,
     /// `(id, rel_path, doc)` of the file it resolves to.
     file: Option<(i64, String, i64)>,
@@ -69,6 +68,8 @@ struct Builder {
     missing: HashMap<String, u32>,
     tags: HashMap<String, u32>,
     edges: HashSet<Edge>,
+    /// The ghosts keyed as they were handed in, which keep that spelling.
+    pinned: HashSet<u32>,
 }
 
 /// The node `map` holds under `k`, pushed onto `nodes` as `node()` the first time.
@@ -92,14 +93,26 @@ impl Builder {
         })
     }
 
-    /// The ghost for the missing note `rel`, one however its links spell it: the first spelling
-    /// met is its key.
+    /// The ghost for the missing note `rel`, one however its links spell it.
     fn missing(&mut self, rel: String) -> u32 {
         let key = link_key(&rel);
+        if let Some(&i) = self.missing.get(&key) {
+            self.respell(i, rel);
+            return i;
+        }
         once(&mut self.missing, &mut self.part.nodes, key, || Node {
             key: rel,
             kind: NodeKind::Missing,
         })
+    }
+
+    /// Ghost `i` keyed by `rel` where that spells it less: a ghost is keyed by the least spelling
+    /// of its links whichever the answer meets first, so it keeps its key from answer to answer.
+    fn respell(&mut self, i: u32, rel: String) {
+        let node = &mut self.part.nodes[i as usize];
+        if rel < node.key && !self.pinned.contains(&i) {
+            node.key = rel;
+        }
     }
 
     fn tag(&mut self, name: String) -> u32 {
@@ -120,6 +133,10 @@ impl Builder {
 
 type Row = (i64, String, i64);
 
+/// A link as an edge needs it: its kind, the file it resolved to, or its target where it is
+/// [`DANGLING`].
+type Link = (i64, Option<i64>, Option<String>);
+
 fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
     Ok((r.get(0)?, r.get(1)?, r.get(2)?))
 }
@@ -129,7 +146,8 @@ impl Index {
     /// them and the keys: what a Graph tab shows of the file in front and the nodes it has opened,
     /// the same for the same keys and index. A key is a file's path (a second path's answering as
     /// its row's), `#` and a tag's name, or a missing note's path, and is in the answer whatever
-    /// `shown` leaves out; a neighbour is only where `shown` and [`shown_file`] take it.
+    /// `shown` leaves out; a neighbour is only where `shown` and [`shown_file`] take it. A ghost
+    /// is keyed as in the whole vault's graph, by the least spelling of the links naming it.
     pub fn graph_around(&self, keys: &[String], shown: Shown) -> Result<Part> {
         let mut b = Builder::default();
         let mut seeds = Vec::new();
@@ -152,7 +170,8 @@ impl Index {
                     Seed::Tag(name.to_string())
                 }
                 (None, None) => {
-                    b.missing(key.clone());
+                    let ghost = b.missing(key.clone());
+                    b.pinned.insert(ghost);
                     Seed::Missing(key.clone())
                 }
             });
@@ -181,7 +200,9 @@ impl Index {
                     for file in st.query_map([id], row)? {
                         b.file(file?);
                     }
-                    for (file, taken) in self.imports_out(*id, shown.images)? {
+                    for (file, taken) in
+                        (self.imports_out(&[*id], shown.images)?.remove(id)).unwrap_or_default()
+                    {
                         if taken {
                             b.file(file);
                         }
@@ -190,7 +211,7 @@ impl Index {
                         b.file(file);
                     }
                     if shown.tags {
-                        for name in self.tags_of_file(*id)? {
+                        for name in self.tags_of_files(&[*id])?.remove(id).unwrap_or_default() {
                             b.tag(name);
                         }
                     }
@@ -227,32 +248,40 @@ impl Index {
             }
         }
 
-        // Every edge among the nodes is a link, an import or a tag one of the files writes.
+        self.respell_ghosts(&mut b, shown.images)?;
+
+        // Every edge among the nodes is a link, an import or a tag one of the files writes, read
+        // for all of them at once and taken file by file in the nodes' order.
         let mut files: Vec<(i64, u32)> = b.files.iter().map(|(&id, &i)| (id, i)).collect();
         files.sort_unstable_by_key(|&(_, i)| i);
+        let ids: Vec<i64> = files.iter().map(|&(id, _)| id).collect();
+        let mut links = self.links_among(&ids)?;
+        let mut imports = self.imports_out(&ids, shown.images)?;
+        let mut tags = match b.tags.is_empty() {
+            true => HashMap::new(),
+            false => self.tags_of_files(&ids)?,
+        };
         for (id, from) in files {
-            for out in self.links_out(id, shown.images)? {
-                let to = match (out.file, out.dangling) {
-                    (Some((to, ..)), _) => b.files.get(&to),
-                    (None, true) => {
-                        missing_path(&out.target).and_then(|m| b.missing.get(&link_key(&m)))
+            for (kind, resolved, dangling) in links.remove(&id).unwrap_or_default() {
+                let to = match (resolved, dangling) {
+                    (Some(to), _) => b.files.get(&to),
+                    (None, Some(target)) => {
+                        missing_path(&target).and_then(|m| b.missing.get(&link_key(&m)))
                     }
-                    (None, false) => None,
+                    (None, None) => None,
                 };
                 if let Some(&to) = to {
-                    b.edge(from, to, edge_kind(out.kind));
+                    b.edge(from, to, edge_kind(kind));
                 }
             }
-            for ((to, ..), _) in self.imports_out(id, shown.images)? {
+            for ((to, ..), _) in imports.remove(&id).unwrap_or_default() {
                 if let Some(&to) = b.files.get(&to) {
                     b.edge(from, to, EdgeKind::Import);
                 }
             }
-            if !b.tags.is_empty() {
-                for name in self.tags_of_file(id)? {
-                    if let Some(&to) = b.tags.get(&name) {
-                        b.edge(from, to, EdgeKind::Tag);
-                    }
+            for name in tags.remove(&id).unwrap_or_default() {
+                if let Some(&to) = b.tags.get(&name) {
+                    b.edge(from, to, EdgeKind::Tag);
                 }
             }
         }
@@ -310,7 +339,7 @@ impl Index {
             }
         }
         if shown.unresolved {
-            // In the order of their targets, so a ghost is keyed as `missing_notes` lists it.
+            // In the order of their targets, as `missing_notes` lists them.
             let mut st = self.conn.prepare_cached(&format!(
                 "SELECT l.src_file, l.target, l.kind FROM links l JOIN files s ON s.id = l.src_file
                  WHERE {DANGLING} ORDER BY l.target"
@@ -348,48 +377,110 @@ impl Index {
         Ok(part)
     }
 
+    /// Key each ghost of `b` by the least spelling of every link naming it, the ones the answer
+    /// leaves out too, so it has the key the whole vault's graph gives it and keeps it as the
+    /// graph grows. By [`DANGLING`]'s rule from the files [`shown_file`] takes, as `graph_all`
+    /// meets them, and by both keys a link to it can have, as `Seed::Missing` looks them up.
+    fn respell_ghosts(&self, b: &mut Builder, images: bool) -> Result<()> {
+        if b.missing.is_empty() {
+            return Ok(());
+        }
+        let mut keys = Vec::new();
+        for (key, &i) in &b.missing {
+            keys.push(key.clone());
+            keys.push(link_key(&strip_ext(&b.part.nodes[i as usize].key)));
+        }
+        for keys in keys.chunks(BATCH) {
+            let mut st = self.conn.prepare_cached(&format!(
+                "SELECT l.target FROM links l INDEXED BY idx_links_key
+                 JOIN files s ON s.id = l.src_file
+                 WHERE l.key IN ({}) AND {DANGLING} AND {}",
+                parameters(keys.len()),
+                shown_file("s", images)
+            ))?;
+            let targets = st.query_map(rusqlite::params_from_iter(keys), |r| r.get(0))?;
+            for target in targets {
+                let target: String = target?;
+                if let Some(rel) = missing_path(&target)
+                    && let Some(&i) = b.missing.get(&link_key(&rel))
+                {
+                    b.respell(i, rel);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// The links file `id` writes but external ones, each with where it leads.
     fn links_out(&self, id: i64, images: bool) -> Result<Vec<Out>> {
         let mut st = self.conn.prepare_cached(&format!(
-            "SELECT l.kind, l.target, f.id, f.rel_path, f.doc, f.id IS NOT NULL AND {}, {DANGLING}
+            "SELECT l.target, f.id, f.rel_path, f.doc, f.id IS NOT NULL AND {}, {DANGLING}
              FROM links l JOIN files s ON s.id = l.src_file LEFT JOIN files f ON f.id = l.resolved_file
              WHERE l.src_file = ?1 AND l.kind <> 3",
             shown_file("f", images)
         ))?;
         let rows = st.query_map([id], |r| {
-            let file = match r.get::<_, Option<i64>>(2)? {
-                Some(to) => Some((to, r.get(3)?, r.get(4)?)),
+            let file = match r.get::<_, Option<i64>>(1)? {
+                Some(to) => Some((to, r.get(2)?, r.get(3)?)),
                 None => None,
             };
             Ok(Out {
-                kind: r.get(0)?,
-                target: r.get(1)?,
+                target: r.get(0)?,
                 file,
-                shown: r.get(5)?,
-                dangling: r.get(6)?,
+                shown: r.get(4)?,
+                dangling: r.get(5)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// The files file `id` imports, each with whether [`shown_file`] takes it: the file each
-    /// import resolved to, or where a Go file imports a package, every file [`in_package`] of the
-    /// folder that file is in.
-    fn imports_out(&self, id: i64, images: bool) -> Result<Vec<(Row, bool)>> {
-        let mut st = self.conn.prepare_cached(&format!(
-            "SELECT t.id, t.rel_path, t.doc, {}, s.rel_path FROM imports i
-             JOIN files s ON s.id = i.src_file JOIN files t ON t.id = i.resolved_file
-             WHERE i.src_file = ?1",
-            shown_file("t", images)
-        ))?;
-        let rows = st.query_map([id], |r| Ok(((row(r)?, r.get(3)?), r.get::<_, String>(4)?)))?;
-        let mut out = Vec::new();
-        for found in rows {
-            let ((file, taken), src) = found?;
-            match src.ends_with(".go") && in_package(&file.1) {
-                true => out.extend(self.package(parent_dir(&file.1), images)?),
-                false => out.push((file, taken)),
+    /// The links the files `ids` write but external ones as an edge needs them ([`Link`]), by
+    /// file in the order it wrote them: without [`Index::links_out`]'s look at the file each
+    /// resolved to, in a third of the time.
+    fn links_among(&self, ids: &[i64]) -> Result<HashMap<i64, Vec<Link>>> {
+        let select = |ids: &str| {
+            format!(
+                "SELECT l.src_file, l.kind, l.resolved_file, CASE WHEN {DANGLING} THEN l.target END
+                 FROM links l JOIN files s ON s.id = l.src_file
+                 WHERE l.src_file IN ({ids}) AND l.kind <> 3 ORDER BY l.src_file, l.rowid"
+            )
+        };
+        self.per_file(select, ids, |r| Ok((r.get(1)?, r.get(2)?, r.get(3)?)))
+    }
+
+    /// The files the files `ids` import, by file, each with whether [`shown_file`] takes it: the
+    /// file each import resolved to, or where a Go file imports a package, every file
+    /// [`in_package`] of the folder that file is in.
+    fn imports_out(&self, ids: &[i64], images: bool) -> Result<HashMap<i64, Vec<(Row, bool)>>> {
+        let select = |ids: &str| {
+            format!(
+                "SELECT i.src_file, t.id, t.rel_path, t.doc, {}, s.rel_path FROM imports i
+                 JOIN files s ON s.id = i.src_file JOIN files t ON t.id = i.resolved_file
+                 WHERE i.src_file IN ({ids}) ORDER BY i.src_file, i.rowid",
+                shown_file("t", images)
+            )
+        };
+        let rows = self.per_file(select, ids, |r| {
+            let file: Row = (r.get(1)?, r.get(2)?, r.get(3)?);
+            Ok((file, r.get::<_, bool>(4)?, r.get::<_, String>(5)?))
+        })?;
+        let mut packages: HashMap<String, Vec<(Row, bool)>> = HashMap::new();
+        let mut out = HashMap::new();
+        for (id, rows) in rows {
+            let mut imported = Vec::new();
+            for (file, taken, src) in rows {
+                match src.ends_with(".go") && in_package(&file.1) {
+                    true => {
+                        let dir = parent_dir(&file.1);
+                        if !packages.contains_key(dir) {
+                            packages.insert(dir.to_string(), self.package(dir, images)?);
+                        }
+                        imported.extend(packages[dir].iter().cloned());
+                    }
+                    false => imported.push((file, taken)),
+                }
             }
+            out.insert(id, imported);
         }
         Ok(out)
     }
@@ -435,13 +526,47 @@ impl Index {
         Ok(rows)
     }
 
-    fn tags_of_file(&self, id: i64) -> Result<Vec<String>> {
-        let mut st = self
-            .conn
-            .prepare_cached("SELECT DISTINCT name FROM tags WHERE file_id = ?1")?;
-        let rows = st.query_map([id], |r| r.get(0))?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    /// The tags the files `ids` carry, by file, each once in the order it first carries it.
+    fn tags_of_files(&self, ids: &[i64]) -> Result<HashMap<i64, Vec<String>>> {
+        let select = |ids: &str| {
+            format!(
+                "SELECT file_id, name FROM tags WHERE file_id IN ({ids})
+                 GROUP BY file_id, name ORDER BY file_id, MIN(rowid)"
+            )
+        };
+        self.per_file(select, ids, |r| r.get(1))
     }
+
+    /// What `select` reads of the files `ids`, gathered by file in the order it came: `select`
+    /// is handed the parameters of its `IN (…)`, which takes [`BATCH`] of the files at a time,
+    /// and its first column names the file.
+    fn per_file<T>(
+        &self,
+        select: impl Fn(&str) -> String,
+        ids: &[i64],
+        read: impl Fn(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+    ) -> Result<HashMap<i64, Vec<T>>> {
+        let mut out: HashMap<i64, Vec<T>> = HashMap::new();
+        for ids in ids.chunks(BATCH) {
+            let mut st = self.conn.prepare_cached(&select(&parameters(ids.len())))?;
+            let rows = st.query_map(rusqlite::params_from_iter(ids), |r| {
+                Ok((r.get::<_, i64>(0)?, read(r)?))
+            })?;
+            for found in rows {
+                let (id, row) = found?;
+                out.entry(id).or_default().push(row);
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// The most values one `IN (…)` is handed, well under SQLite's 32766 parameters.
+const BATCH: usize = 500;
+
+/// `n` parameters, for an `IN (…)`.
+fn parameters(n: usize) -> String {
+    vec!["?"; n].join(", ")
 }
 
 #[cfg(test)]
@@ -560,6 +685,36 @@ mod tests {
         let part = around(&["Gone.md"], all(false, false, false, false));
         assert_eq!(keys(&part), ["Gone.md", "d.md"]);
         assert_eq!(edges(&part), [("d.md", "Gone.md", Link)]);
+    }
+
+    /// A missing note linked in two spellings is one ghost, keyed by the least of them whichever
+    /// note links it: in the whole vault's graph and round either note or both.
+    #[test]
+    fn a_ghost_is_keyed_by_its_least_spelling() {
+        let (vault, db) = fixture();
+        let root = vault.path();
+        fs::write(root.join("x.md"), "[[gone]]\n").unwrap();
+        fs::write(root.join("y.md"), "[[Gone]]\n").unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(root, |_| {}).unwrap();
+        let ghosts = |part: Part| {
+            let ghosts = part
+                .nodes
+                .into_iter()
+                .filter(|n| n.kind == NodeKind::Missing);
+            ghosts.map(|n| n.key).collect::<Vec<_>>()
+        };
+        assert_eq!(ghosts(ix.graph_all(Shown::default()).unwrap()), ["Gone.md"]);
+        for keys in [&["x.md"][..], &["y.md"], &["x.md", "y.md"]] {
+            let keys: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
+            let part = ix.graph_around(&keys, Shown::default()).unwrap();
+            assert_eq!(ghosts(part), ["Gone.md"], "round {keys:?}");
+        }
+        // A missing note handed in keeps the spelling it was handed in.
+        let part = ix
+            .graph_around(&["gone.md".into()], Shown::default())
+            .unwrap();
+        assert_eq!(ghosts(part), ["gone.md"]);
     }
 
     /// A note in a gitignored folder that a tab opened is no neighbour of what it links to, and

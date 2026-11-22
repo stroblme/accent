@@ -1,4 +1,4 @@
-//! Local vault storage: three SQLite connections (four in a watched vault, whose PDFs' text a pass
+//! Local vault storage: four SQLite connections (five in a watched vault, whose PDFs' text a pass
 //! of its own reads), one writing worker and shared path validation. [`Local`] also serves remote RPC requests through
 //! `accent-cli serve`; [`files`] handles files and [`index`] handles queries.
 
@@ -34,6 +34,9 @@ pub(crate) struct Local {
     /// Dedicated search reader so long regex scans on a worker cannot hold
     /// the mutex needed by main-thread `list_dir` and `backlinks`.
     search: Mutex<Index>,
+    /// The Graph tab's reader, so a whole vault's graph holds up neither a search nor the
+    /// main thread's `list_dir` and `backlinks`.
+    graph: Mutex<Index>,
     /// The Search pane's turn on `search`: how many of its queries have been asked, and whether
     /// one of them is running there now ([`Local::supersede`]).
     pane: Mutex<(u64, bool)>,
@@ -100,6 +103,7 @@ impl Local {
         // database half-built.
         let (index, damage) = Index::open_or_rebuild(db)?;
         let search = Index::open(db)?;
+        let graph = Index::open(db)?;
         let writer = Index::open(db)?;
 
         let (tx, rx) = channel::<Msg>();
@@ -143,6 +147,7 @@ impl Local {
                 index: Mutex::new(index),
                 interrupt: search.interrupt_handle(),
                 search: Mutex::new(search),
+                graph: Mutex::new(graph),
                 pane: Mutex::new((0, false)),
                 cfg: Mutex::new(cfg),
                 lang,
@@ -288,6 +293,10 @@ impl Local {
 
     fn searcher(&self) -> MutexGuard<'_, Index> {
         locked(&self.search)
+    }
+
+    fn grapher(&self) -> MutexGuard<'_, Index> {
+        locked(&self.graph)
     }
 
     /// Run a search query, interrupting the previous query and skipping stale
