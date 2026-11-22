@@ -310,8 +310,9 @@ impl App {
         Some((x - dx, y - dy))
     }
 
-    /// Lift toasts by presentation status-bar height `by`, or reset with `None`.
-    /// A height-specific CSS class also positions later toasts, animating with widgets::FADE_MS.
+    /// Lift the toasts and the progress bar by presentation status-bar height `by`, or reset with
+    /// `None`. A height-specific CSS class also positions later toasts, animating with
+    /// widgets::FADE_MS.
     fn lift_toasts(&self, by: Option<i32>) {
         if let Some(by) = by {
             LIFT.with_borrow_mut(|lift| {
@@ -331,7 +332,8 @@ impl App {
                     }
                 };
                 provider.load_from_string(&format!(
-                    ".accent-lifted > .accent-toasts {{ transform: translateY(-{by}px); }}"
+                    ".accent-lifted > .accent-toasts, .accent-lifted > .accent-progress \
+                     {{ transform: translateY(-{by}px); }}"
                 ));
                 *lift = Some((provider, by));
             });

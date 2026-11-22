@@ -218,19 +218,11 @@ pub fn build_window(
     sidebar_header.add_css_class("chrome-fade");
     header.add_css_class("chrome-fade");
 
-    // A first connection to a remote host is the window becoming usable, not a list being
-    // replaced, so its bar spans the document column rather than sitting in the status bar
-    // beside the text (DESIGN.md, Loading). The text stays in the status bar either way. Only a
-    // remote vault puts the widget in the layout: a local one is connected from the moment it
-    // opens, so it reserves no height, and lays the bar a print or an export shows over the top
-    // of the tabs instead.
+    // A remote vault's connection, a print and an export each fill the one bar right above the
+    // status bar, whatever pane started them (DESIGN.md, Loading), laid over the bottom of the
+    // document column so it reserves no height. The text stays in the status bar.
     let connect = connect::Bar::new();
-    let editor_column = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    match vault.as_ref().is_some_and(|v| v.is_remote()) {
-        true => editor_column.append(connect.widget()),
-        false => toasts.widget().add_overlay(connect.widget()),
-    }
-    editor_column.append(toasts.widget());
+    toasts.widget().add_overlay(connect.widget());
 
     // Only the header is a top bar now: the tab bars belong to the panes, so they sit inside
     // `content` and presentation mode takes them away with it rather than unrevealing them.
@@ -241,7 +233,7 @@ pub fn build_window(
     // A bottom bar rather than a row inside the content: presentation mode takes it away with the
     // header for one line, and the find bar and the terminal panel stack above it.
     toolbar.add_bottom_bar(statusbar.widget());
-    toolbar.set_content(Some(&editor_column));
+    toolbar.set_content(Some(toasts.widget()));
 
     // One flat background across sidebar, chrome and document (DESIGN.md, Colour): without it
     // the two columns sit on `--window-bg-color` and band against the note. The header bars and
@@ -1485,7 +1477,7 @@ fn install_chrome_css() {
             ".chrome-fade, paned > separator {{ transition: opacity {ms}ms ease; }} \
              scrolledwindow > undershoot {{ transition: box-shadow {ms}ms ease, \
                background-image {ms}ms ease; }} \
-             .accent-toasts {{ transition: transform {lift}ms {easing}; }} \
+             .accent-toasts, .accent-progress {{ transition: transform {lift}ms {easing}; }} \
              .file-tree > row > treeexpander {{ transition: box-shadow {flash}ms ease-out; }} \
              .git-actions, .navigation-sidebar > row:hover .accent-row-number {{ \
                transition: opacity {lift}ms {easing}; }} \

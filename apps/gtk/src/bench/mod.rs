@@ -389,8 +389,8 @@ use user_commands::bench_commands;
 /// - `ACCENT_BENCH_EXPORT=pdf:<rel_pdf>`: annotated export and print copy;
 ///   `note:<rel_note>`, `notebook:<rel_notebook>`: HTML export. Outputs use `$TMPDIR`.
 ///   `stall:<rel_note>,<rel_notebook>,<dir>[,flat]`: how long every export holds the main loop
-///   and what the status bar and the top bar say meanwhile, a large diagram it writes into the
-///   vault exported and printed into `<dir>`, `flat` without its pictures
+///   and what the status bar and the progress bar above it say meanwhile, a large diagram it
+///   writes into the vault exported and printed into `<dir>`, `flat` without its pictures
 ///   (`export::bench_export_stall`).
 /// - `ACCENT_BENCH_SAVE_AS=<rel_file>`: note/diagram/PDF/image Save As and errors.
 /// - `ACCENT_BENCH_MENU=<rel_file>`: tree context menus and modifier selections;

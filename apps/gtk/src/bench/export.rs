@@ -297,8 +297,8 @@ fn stall_diagram(count: usize, flat: bool) -> String {
 
 /// What one export did to the window: the longest the main loop went without a turn and its
 /// busy total (`native::Beat`), how long until it was done, and each state of the status bar's
-/// line and of the bar over the document column in turn, read every frame. The first frame that
-/// counts two pages done with the bar up is pictured into `shot`, where one is given.
+/// line and of the progress bar above it in turn, read every frame. The first frame that counts
+/// two pages done with the bar up is pictured into `shot`, where one is given.
 struct Watch {
     beat: super::native::Beat,
     started: Instant,
@@ -317,6 +317,7 @@ impl Watch {
                 let (line, bar) = (app.statusbar.progress_text(), app.connect.shown());
                 let counting = line.ends_with(" 2/12 pages") && bar != "off";
                 if counting && let Some(path) = shot.take() {
+                    println!("bench export_stall place {}", place(&app));
                     let window = app.window.clone();
                     glib::idle_add_local_once(move || {
                         let shot = super::diagram::shoot(window.upcast_ref(), &path);
@@ -368,6 +369,20 @@ impl Watch {
             self.seen.borrow()
         );
         glib::timeout_future(Duration::from_millis(500)).await;
+    }
+}
+
+/// Whether the progress bar ends where the status bar begins, which it lies right above.
+fn place(app: &App) -> String {
+    let bounds = |widget: &gtk::Widget| widget.compute_bounds(&app.window);
+    match (bounds(app.connect.widget()), bounds(app.statusbar.widget())) {
+        (Some(bar), Some(status)) => format!(
+            "above_status={} bar_bottom={} status_top={}",
+            (bar.y() + bar.height() - status.y()).abs() < 1.0,
+            bar.y() + bar.height(),
+            status.y()
+        ),
+        _ => "not drawn".to_string(),
     }
 }
 

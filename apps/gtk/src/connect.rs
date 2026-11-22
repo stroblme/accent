@@ -1,9 +1,8 @@
-//! Show connection progress over the document column while a remote vault opens, and how far a
-//! print or an export being made has got.
+//! Show how far a remote vault's connection, or a print or an export being made, has got, in one
+//! bar right above the status bar, whatever pane started it.
 //!
-//! The bar belongs to the surface becoming usable; status-bar text still reports the step.
-//! It fades in and goes without changing the layout. A local vault reserves no space for it: its
-//! window shows the bar over the top of the tabs, and only for a print or an export.
+//! The status bar's text still says what the step is. The bar lies over the bottom of the
+//! document column, so it reserves no height, and fades in and goes without changing the layout.
 
 use crate::widgets::Pulse;
 use gtk::prelude::*;
@@ -14,8 +13,8 @@ use std::time::Duration;
 /// Matches Search progress (DESIGN.md, Motion).
 const PULSE: Duration = Duration::from_millis(80);
 
-/// Inset connection progress to align with the first and last tabs beneath it.
-const TAB_INSET: i32 = 6;
+/// Inset the bar as the status bar's padding insets its line beneath it (`.accent-statusbar`).
+const INSET: i32 = 12;
 
 pub struct Bar {
     bar: gtk::ProgressBar,
@@ -30,11 +29,13 @@ impl Bar {
     pub fn new() -> Bar {
         let bar = gtk::ProgressBar::builder()
             .opacity(0.0)
-            .margin_start(TAB_INSET)
-            .margin_end(TAB_INSET)
-            .valign(gtk::Align::Start)
+            .margin_start(INSET)
+            .margin_end(INSET)
+            .valign(gtk::Align::End)
             .can_target(false)
             .build();
+        // Lifted with the toasts while presentation's status bar comes up over the document.
+        bar.add_css_class("accent-progress");
         Bar {
             pulse: Pulse::new(&bar),
             bar,
