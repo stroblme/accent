@@ -1243,6 +1243,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Invert PDF Colours puts one document the other way round: onto the other half's page (Image), or with PDFs off onto the theme's own.
   A theme change, an inversion or the switch renders every tile again, the colours being baked in.
 - A drag selects the text under it, across page breaks as readily as within a page.
+  The selection is its glyphs' boxes filled in the accent as one shape, so no seam shows where two of them meet or overlap, not even in the loupe at twice the scale.
 - A drag within 20 px of the view's edge, or past it, scrolls the view a frame at a time and faster the nearer it gets, as a diagram's canvas does, whether it selects text, moves a selection's handle, draws a stroke or a shape, or under Select moves, stretches, turns or lassos, and what it drags stays under the pointer as the page moves.
   A stroke and a Select drag keep to their page, so they scroll the view only until that page's edge is in view, where what they drag stops too.
 - A secondary click on the page: Go to Source on a LaTeX build (SyncTeX, below), Copy and Copy Link to Selection while something is selected, Select's commands (below), then Add Page Before, Add Page After, Delete Page and Export Highlights — window actions in sections, the terminal's idiom, so the palette lists them and they can be rebound.

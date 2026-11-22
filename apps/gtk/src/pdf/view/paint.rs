@@ -331,11 +331,15 @@ impl imp::PdfView {
             }
         }
         let selection = self.selection.borrow();
+        // Every glyph's box in one path, filled once: a box each painted the accent twice where
+        // two overlapped and left a sliver paler where two met, a seam down the selection.
         if let Some((_, boxes)) = selection.iter().find(|(at, _)| *at == index) {
             let colour = theme::at(accent, theme::SELECTION_ALPHA);
+            let path = gsk::PathBuilder::new();
             for glyph in boxes {
-                snapshot.append_color(&colour, &layout.rect_of(rect, glyph));
+                path.add_rect(&layout.rect_of(rect, glyph));
             }
+            snapshot.append_fill(&path.to_path(), gsk::FillRule::Winding, &colour);
         }
         if let Some(s) = self.picked.borrow().as_ref().filter(|s| s.page == index) {
             paint_selection(snapshot, s, rect, layout, &accent);
