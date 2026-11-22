@@ -358,7 +358,8 @@ drill_history_file() {
 # The Git pane on a slow link, each git call held 40 ms: a Stage, an Unstage, a Commit, a Sync and
 # a branch switch hold the pane until the refresh after them shows what they did, a Stage pressed
 # while an older refresh is on its way included, and a Commit pressed the moment a Stage lets go
-# commits what was staged. The vault a repository of 210 commits, one behind its upstream, with a
+# commits what was staged. A pick of a repository never picked shows its history's bar until its
+# rows come. The vault a repository of 210 commits, one behind its upstream, with a
 # branch `other`, and a second repository in it, for a pick.
 drill_git_refresh() {
 	for r in "$vault" "$vault/inner"; do
@@ -384,8 +385,8 @@ drill_git_refresh() {
 	git -C "$dir/peer" -c user.name=drill -c user.email=drill@invalid -c commit.gpgsign=false commit -qm up
 	git -C "$dir/peer" push -q origin main
 	launch 120 ACCENT_BENCH_SLOW_GIT=40 ACCENT_BENCH_GIT=refresh:note.md,other.md >"$dir/git-refresh"
-	if grep -Eq '^bench git_refresh .*(ms=timeout|stale=[1-9])' "$dir/git-refresh" ||
-		[ "$(grep -c '^bench git_refresh .* stale=0$' "$dir/git-refresh")" -ne 18 ]; then
+	if grep -Eq '^bench git_refresh .*(ms=timeout|stale=[1-9]|bare=[1-9])' "$dir/git-refresh" ||
+		[ "$(grep -c '^bench git_refresh .* stale=0 bare=0$' "$dir/git-refresh")" -ne 18 ]; then
 		cat "$dir/git-refresh"
 		return 1
 	fi

@@ -147,6 +147,12 @@ impl Panel {
             if (!ok || panel.jobs.get() == 0)
                 && let Some(leave) = panel.leaving.take()
             {
+                // No refresh follows to let go of the pane, and the close can still be turned
+                // down by what it asks next.
+                if ok {
+                    panel.settling.set(false);
+                    panel.let_go();
+                }
                 leave(ok);
                 if ok {
                     return;

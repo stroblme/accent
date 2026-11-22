@@ -980,8 +980,9 @@ impl Panel {
     }
 
     /// What the pane holds of the selected repository, in one line: its staged and its other
-    /// changes, HEAD's commit and the history's first, the branch and its counts, and whether the
-    /// pane is held. `ACCENT_BENCH_GIT=refresh` and nothing else.
+    /// changes, HEAD's commit and the history's first, the branch and its counts, whether the
+    /// pane is held, and whether the changes' and the history's bars are up or on their way.
+    /// `ACCENT_BENCH_GIT=refresh` and nothing else.
     #[cfg(feature = "bench")]
     pub fn shown(&self) -> String {
         let state = self.state.borrow();
@@ -1002,7 +1003,7 @@ impl Panel {
             .unwrap_or_default();
         format!(
             "staged=[{staged}] changes=[{changes}] head={head} log={} rows={} branch={} counts={} \
-             held={}",
+             held={} bars={}/{}",
             self.first_commit()
                 .as_deref()
                 .map(short)
@@ -1010,7 +1011,9 @@ impl Panel {
             self.log.n_items(),
             self.branch_label.text(),
             self.counts.text().replace(' ', "/"),
-            self.held()
+            self.held(),
+            self.changes_wait.running(),
+            self.log_wait.running()
         )
     }
 

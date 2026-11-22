@@ -172,7 +172,8 @@ pub(super) fn bench_git_switch(app: &Rc<App>) {
 /// refresh is on its way, a Commit pressed as soon as a Stage lets go, the background fetch,
 /// Sync, a branch switch there and back, a commit expanded, Load More, and a pick of a repository
 /// never picked. Each step prints when the pane first showed its outcome, every state it showed
-/// on the way, and how many of those the pane showed let go of with the outcome still missing.
+/// on the way, how many of those the pane showed let go of with the outcome still missing, and
+/// how many showed an empty history with no bar on its way over it.
 /// `rels` is `<rel>,<other>`, two tracked files of the repository, which needs an upstream one
 /// commit ahead, a branch `other` and more than a page of history, and the vault a second
 /// repository, for the pick.
@@ -316,7 +317,8 @@ fn field(shown: &str, key: &str) -> String {
 /// Watch the pane after one step of [`bench_git_refresh`] until `done` holds of what it shows,
 /// then for 2 s more, which the refreshes a step's `.git` writes schedule land in. Prints the
 /// time it took, how many states the pane showed let go of with the step's outcome missing
-/// once it had been held, and each state on the way, from the step itself on.
+/// once it had been held, how many an empty history without its bar, and each state on the
+/// way, from the step itself on.
 async fn timed_step(git: &Rc<crate::git::Panel>, step: &str, done: &dyn Fn(&str) -> bool) {
     let t = Instant::now();
     let mut states = vec![(0, git.shown())];
@@ -340,9 +342,13 @@ async fn timed_step(git: &Rc<crate::git::Panel>, step: &str, done: &dyn Fn(&str)
         let let_go = after.iter().skip_while(|(_, s)| field(s, "held") == "true");
         let_go.take_while(|(_, s)| !done(s)).count()
     });
+    let bare = states
+        .iter()
+        .filter(|(_, s)| field(s, "rows") == "0" && !field(s, "bars").ends_with("/true"))
+        .count();
     let at = at.map_or("timeout".to_string(), |ms| ms.to_string());
     println!(
-        "bench git_refresh {step} ms={at} states={} stale={stale}",
+        "bench git_refresh {step} ms={at} states={} stale={stale} bare={bare}",
         states.len()
     );
     for (ms, shown) in states {
