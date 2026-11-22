@@ -629,9 +629,13 @@ fn spin(title: &str, range: (f64, f64, f64)) -> adw::SpinRow {
 /// A row of the geometry or a corner's size: whole units a step, fractions kept, shown as the
 /// file writes them to a hundredth of a step, so a folder's share stepped by hundredths shows
 /// four places and the text the row reads back as the keyboard leaves it is its value.
+/// Not numeric: GTK's numeric filter lets in only the locale's decimal point, so under a comma
+/// locale it refused the whole `499.53` and left the row empty, while GTK reads the point back
+/// under any locale (`g_strtod`).
 fn coordinate(title: &str, low: f64) -> adw::SpinRow {
     let row = spin(title, (low, 1e6, 1.0));
     row.set_digits(2);
+    row.set_numeric(false);
     row.connect_output(|row| {
         let places = 100.0 / row.adjustment().step_increment();
         row.set_text(&number((row.value() * places).round() / places));
