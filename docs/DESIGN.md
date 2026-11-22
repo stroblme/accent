@@ -958,6 +958,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A saved file shows nothing.
 - The branch (which syncs the document's repository) and the zoom (which resets it) are flat buttons held to the caption's line height (`.accent-bar-button`): Adwaita's button minimum would otherwise make the bar 46 px tall instead of 29.
 - The zoom shown is the active tab's, never the window's document zoom over a tab it does not reach.
+- While presenting, Laser Pointer follows the zoom as a toggle of the same kind, on while the laser pointer is up, and a press puts it up or away as `L` does, the keyboard staying on what is presented (Views).
 - A secondary press on the bar does nothing: a footer of facts is not a title bar.
   Button 1 still drags the window.
 - The whole bar fades with the chrome while the user types, the unsaved dot included: nobody reads a footer mid-sentence.
@@ -2557,7 +2558,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 - `L` puts a laser pointer over whatever is presented and takes it away again, as leaving presentation does, Xournal++'s laser highlighter (user decision 2026-11-18).
   A press and drag draws a translucent red stroke 12 px wide over the pane and never on the document, which meanwhile neither selects, follows a link nor moves its page, though the wheel and the keys still read it.
   The pointer keeps the document's own cursor, and the strokes stay half a second after the last one ends before they fade out together, unless a press brings them all back first.
-  Where the keyboard types the letter, in a presented shell or source file, the find bar or a dialog, `L` types it and the palette's Laser Pointer puts the pointer up instead.
+  Where the keyboard types the letter, in a presented shell or source file, the find bar or a dialog, `L` types it and the palette's Laser Pointer or the status bar's toggle puts the pointer up instead.
 - It does not resize the window: fullscreen stays `F11`'s, so the two compose.
 - The bars go through `AdwToolbarView::set_reveal_top_bars(false)`, not the opacity fade, which would leave an empty band; the pointer-motion reveal is off meanwhile.
 - The status bar alone comes back while the pointer rests on its strip at the bottom of the document column, over the document rather than pushing it up, so nothing reflows under the pointer; it goes when the pointer leaves the strip or the window.

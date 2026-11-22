@@ -1197,6 +1197,9 @@ pub fn install_actions(app: &Rc<App>) {
                     gio::SimpleAction::new_stateful(name, None, &true.to_variant())
                 }
                 "image-invert" => gio::SimpleAction::new_stateful(name, None, &false.to_variant()),
+                // Whether the laser pointer is up, which the status bar's toggle shows
+                // (`App::toggle_laser`).
+                "laser" => gio::SimpleAction::new_stateful(name, None, &false.to_variant()),
                 // The graph's menu toggles, which follow the graph in front
                 // (`App::sync_graph_actions`).
                 "graph-all" | "graph-unresolved" | "graph-tags" | "graph-images"

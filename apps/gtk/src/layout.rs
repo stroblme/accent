@@ -184,6 +184,16 @@ impl App {
             true => laser.take_off(),
             false => laser.lay_over(self.pane().area()),
         }
+        self.sync_laser();
+    }
+
+    /// The Laser Pointer action's state, which the status bar's toggle shows: whether it is up.
+    fn sync_laser(&self) {
+        let on = self.laser.get().is_some_and(|laser| laser.is_on());
+        let action = self.window.lookup_action("laser");
+        if let Some(action) = action.and_downcast::<gio::SimpleAction>() {
+            action.set_state(&on.to_variant());
+        }
     }
 
     /// Whether the presented note's preview is visible at all; nothing is rendered into a hidden
@@ -228,6 +238,7 @@ impl App {
                 if let Some(laser) = self.laser.get() {
                     laser.take_off();
                 }
+                self.sync_laser();
                 // Each PDF gets the zoom it had back, those a held `Ctrl+Tab` presented too, and
                 // each diagram its zoom and its ring.
                 for pdf in self.pdfs() {
@@ -259,7 +270,9 @@ impl App {
         }
         // The bar searches the rendered note while one is presented, which its toggles say.
         self.retarget_find(&self.pane());
-        // Laser Pointer is presentation's alone.
+        // Laser Pointer is presentation's alone, its toggle in the status bar too.
+        self.statusbar
+            .set_presenting(self.presenting.get().is_some());
         self.sync_applicable();
     }
 

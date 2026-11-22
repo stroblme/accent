@@ -352,8 +352,9 @@ const LINKED: &str = r#"<mxfile host="accent">
 /// is presented stayed as it was (`kept`) and that `L` takes the pointer away (`off`); the
 /// diagram's link then turns its page to a plain click (`clicked`). Under F5 an `l` typed into
 /// the find bar is the query's and one typed into the code tab is its text, the palette's Laser
-/// Pointer reaching the pointer there, and F5 leaves with it away. With `ACCENT_BENCH_SHOTS` set,
-/// the window at each moment goes to `laser-<kind>-<moment>.png` there.
+/// Pointer reaching the pointer there, the status bar's toggle taking it away and putting it up
+/// again with real clicks (`button`), and F5 leaves with it away and the toggle gone. With
+/// `ACCENT_BENCH_SHOTS` set, the window at each moment goes to `laser-<kind>-<moment>.png` there.
 pub(super) fn bench_laser(app: &Rc<App>) {
     scratch_only(app, "ACCENT_BENCH_CHROME=laser");
     let pdf = accent_core::pdf::blank_pdf((595.0, 842.0)).unwrap_or_default();
@@ -407,8 +408,10 @@ pub(super) fn bench_laser(app: &Rc<App>) {
         println!("bench laser code text={text:?} on={}", laser_on(&app));
         let _ = WidgetExt::activate_action(&app.window, "win.laser", None);
         println!("bench laser code palette on={}", laser_on(&app));
+        press_toggle(&app).await;
         super::git::xtest("key F5").await;
         println!("bench laser code left on={}", laser_on(&app));
+        toggle_said(&app, "left");
         bench_quit(&app);
     });
 }
@@ -676,6 +679,42 @@ async fn stroke(app: &Rc<App>, kind: &str) {
 
 fn laser_on(app: &App) -> bool {
     app.laser.get().is_some_and(|laser| laser.is_on())
+}
+
+/// The status bar's laser toggle pressed twice with real clicks, once the bar is up under the
+/// pointer: the laser goes away, then comes up again, as the toggle shows (`bench laser button
+/// …`). With `ACCENT_BENCH_SHOTS` set, the window goes to `laser-button.png` there after.
+async fn press_toggle(app: &Rc<App>) {
+    toggle_said(app, "before");
+    let (dx, dy) = app.window.surface_transform();
+    let strip = f64::from(app.window.height()) - 4.0 + dy;
+    let x = f64::from(app.window.width()) / 2.0 + dx;
+    super::git::xtest(&format!("move {x} {strip}; sleep 0.8")).await;
+    let Some(at) = app.statusbar.laser().compute_bounds(&app.window) else {
+        return println!("bench laser button not drawn");
+    };
+    let (x, y) = (
+        f64::from(at.center().x()) + dx,
+        f64::from(at.center().y()) + dy,
+    );
+    for case in ["pressed", "again"] {
+        super::git::xtest(&format!("move {x} {y}; sleep 0.3; down; up; sleep 0.3")).await;
+        toggle_said(app, case);
+    }
+    if let Ok(dir) = std::env::var("ACCENT_BENCH_SHOTS") {
+        super::minimap::window_png(&app.window, &Path::new(&dir).join("laser-button.png"));
+    }
+}
+
+/// `bench laser button <case>`: whether the toggle is shown, the laser up and the toggle on.
+fn toggle_said(app: &App, case: &str) {
+    let toggle = app.statusbar.laser();
+    println!(
+        "bench laser button {case} shown={} on={} active={}",
+        toggle.is_visible(),
+        laser_on(app),
+        toggle.is_active()
+    );
 }
 
 /// The strokes up and how strong they are drawn at `moment`, and with the window's red before the

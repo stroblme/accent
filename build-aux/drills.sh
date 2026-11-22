@@ -763,7 +763,11 @@ drill_laser() {
 		'bench laser left presenting=false on=false' \
 		'bench laser code text=Some("x = 1l\n") on=false' \
 		'bench laser code palette on=true' \
-		'bench laser code left on=false'
+		'bench laser button before shown=true on=true active=true' \
+		'bench laser button pressed shown=true on=false active=false' \
+		'bench laser button again shown=true on=true active=true' \
+		'bench laser code left on=false' \
+		'bench laser button left shown=false on=false active=false'
 }
 
 # The keys that turn a presented diagram's page and a presented PDF's, each previous-page key

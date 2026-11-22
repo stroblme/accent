@@ -76,6 +76,8 @@ pub struct Bar {
     zoom_label: gtk::Label,
     /// How much is selected in a text tab, while anything is.
     selected: gtk::Label,
+    /// Presentation's laser pointer, up or away, while presenting.
+    laser: gtk::ToggleButton,
 }
 
 impl Bar {
@@ -137,6 +139,20 @@ impl Bar {
         let zoom_label = label(true);
         let zoom = bar_button(&zoom_label, Some("win.zoom-reset"), "Reset Zoom");
         let selected = label(true);
+        // On the Laser Pointer action, whose state is whether the pointer is up: a press puts it
+        // up or away as `L` does, and leaves the keyboard on the presented document.
+        let laser_label = label(false);
+        laser_label.set_label(crate::actions::label_of("win.laser"));
+        laser_label.set_visible(true);
+        let laser = gtk::ToggleButton::builder()
+            .child(&laser_label)
+            .action_name("win.laser")
+            .focus_on_click(false)
+            .valign(gtk::Align::Center)
+            .visible(false)
+            .build();
+        laser.add_css_class("flat");
+        laser.add_css_class("accent-bar-button");
 
         row.append(&progress);
         row.append(&index);
@@ -150,6 +166,7 @@ impl Bar {
         row.append(&unsaved);
         row.append(&facts);
         row.append(&zoom);
+        row.append(&laser);
         // Last, at the corner: it comes and goes with the selection, and moves nothing as it does.
         row.append(&selected);
 
@@ -180,6 +197,7 @@ impl Bar {
             zoom,
             zoom_label,
             selected,
+            laser,
         }
     }
 
@@ -430,6 +448,17 @@ impl Bar {
     /// What a selection in a text tab holds ([`characters_label`]), or `None` for none.
     pub fn set_selected(&self, text: Option<&str>) {
         set(&self.selected, text);
+    }
+
+    /// Offer the laser pointer's toggle while presenting, and only then.
+    pub fn set_presenting(&self, on: bool) {
+        self.laser.set_visible(on);
+    }
+
+    /// The laser pointer's toggle, for the drills.
+    #[cfg(feature = "bench")]
+    pub fn laser(&self) -> &gtk::ToggleButton {
+        &self.laser
     }
 
     /// The zoom control itself, which the window hangs its Fit Width / Fit Height menu off.
