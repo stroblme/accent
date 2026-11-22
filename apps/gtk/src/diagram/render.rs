@@ -213,8 +213,8 @@ pub async fn sheets(
     Ok(pages)
 }
 
-/// Every page of `file` as a PDF, a PDF page the size of each sheet, drawn in `slices` and
-/// `told` as [`sheets`] is.
+/// Every page of `file` as a PDF, a PDF page the size of each sheet with a bookmark leading to
+/// it, named as the Outline lists the page, drawn in `slices` and `told` as [`sheets`] is.
 pub async fn pdf(
     file: &File,
     pictures: Pictures<'_>,
@@ -222,12 +222,21 @@ pub async fn pdf(
     told: impl Fn(usize, usize),
 ) -> Result<Vec<u8>, String> {
     let surface = cairo::PdfSurface::for_stream(1.0, 1.0, Vec::<u8>::new()).map_err(say)?;
-    let total = file.pages.len();
-    for i in 0..total {
+    let names = file.page_names();
+    let total = names.len();
+    for (i, name) in names.iter().enumerate() {
         told(i, total);
         let drawn = draw(file, i, Area::Sheet, pictures, Out::Pdf, slices).await?;
         let (w, h) = (drawn.area.w * PDF_POINT, drawn.area.h * PDF_POINT);
         surface.set_size(w, h).map_err(say)?;
+        // cairo-rs panics on a NUL in the C string it makes of the name, and nothing keeps a raw
+        // one, which XML forbids, out of a file's attributes. The bookmark leads to the page's
+        // top-left, since a page alone (`/XYZ null null`) keeps the viewer's offset as it was.
+        let (name, link) = (name.replace('\0', ""), format!("page={} pos=[0 0]", i + 1));
+        let plain = cairo::PdfOutline::empty();
+        surface
+            .add_outline(cairo::PDF_OUTLINE_ROOT, &name, &link, plain)
+            .map_err(say)?;
         let cr = cairo::Context::new(&surface).map_err(say)?;
         drawn.paint_in(&cr, PDF_POINT, slices).await?;
         // Writing the page out is one step that cannot be cut, so it has a slice to itself.

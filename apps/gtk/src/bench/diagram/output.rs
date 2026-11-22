@@ -156,6 +156,28 @@ pub(super) fn edges(app: &Rc<App>) {
     });
 }
 
+/// Four pages: names beyond Latin-1 and the BMP, one without a name, and one with what a PDF
+/// string escapes.
+const NAMED: &str = r#"<mxfile><diagram name="Grüße" id="a"/><diagram id="b"/><diagram name="Plan (v2) \ draft" id="c"/><diagram name="图表 ∑ 🚀" id="d"/></mxfile>"#;
+
+/// `=outline`: [`NAMED`] as a PDF, its outline as pdfium reads it: each bookmark's depth, title
+/// and page.
+pub(super) fn outline(app: &Rc<App>) {
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        let file = accent_drawio::File::from_bytes(NAMED.as_bytes()).expect("the pages");
+        let slices = crate::work::Slices::new();
+        let pdf = crate::diagram::render::pdf(&file, Default::default(), &slices, |_, _| {});
+        let path = std::env::temp_dir().join("outline.pdf");
+        std::fs::write(&path, pdf.await.expect("a PDF")).expect("write the PDF");
+        let doc = accent_core::pdf::PdfDoc::open(&path).expect("pdfium opens it");
+        let marks = doc.outline().expect("an outline");
+        let marks: Vec<_> = marks.iter().map(|m| (m.depth, &m.title, m.page)).collect();
+        println!("bench diagram outline {marks:?}");
+        bench_quit(&app);
+    });
+}
+
 /// What an export wrote: a PDF's page sizes in points, a picture's size and its commonest pixel,
 /// and the pictures and glyphs an SVG holds (a formula is glyphs, no picture).
 fn exported(path: &Path) -> String {

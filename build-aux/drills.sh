@@ -564,6 +564,14 @@ drill_diagram_edges() {
 	has "$dir/edges" 'bench diagram edges drawn=true seams=[0, 0, 0, 0]'
 }
 
+# A diagram's PDF as pdfium reads its outline: a bookmark for each page, in order, named as the
+# Outline lists it, an unnamed one "Page 2".
+drill_diagram_outline() {
+	test -e "$pdfium" || { echo "SKIPPED the diagram outline drill: no libpdfium"; return 0; }
+	launch 60 ACCENT_BENCH_DIAGRAM=outline >"$dir/outline"
+	has "$dir/outline" 'bench diagram outline [(0, "Grüße", Some(0)), (0, "Page 2", Some(1)), (0, "Plan (v2) \\ draft", Some(2)), (0, "图表 ∑ 🚀", Some(3))]'
+}
+
 # What real clicks and bands select among a diagram's groups, as draw.io selects, a drag moving
 # only what is selected, and how the groups fit what they hold (DESIGN.md, Diagram).
 drill_diagram_select() {
