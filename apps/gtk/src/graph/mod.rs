@@ -80,12 +80,40 @@ fn graph_menu() -> gio::Menu {
     menu
 }
 
+/// The graph's `menu` at `at` over `host`, as `widgets::popup_menu` shows it, with the keyboard
+/// left on the graph once it closes. The press that opened it made the graph's pane the active
+/// one, while the keyboard `popup_menu` gives back may be in another pane, which would then be
+/// the active one again; the canvas takes it instead, the button keeping it after a keyboard's
+/// open.
+fn popup(
+    host: &gtk::Box,
+    menu: &gio::Menu,
+    at: gdk::Rectangle,
+    view: &GraphView,
+) -> gtk::PopoverMenu {
+    let popover = widgets::popup_menu(host, menu, Some(at));
+    // After `popup_menu`'s own handler, which has given the keyboard back.
+    popover.connect_closed(glib::clone!(
+        #[weak]
+        host,
+        #[weak]
+        view,
+        move |_| {
+            let focus = host.root().and_then(|root| root.focus());
+            if !focus.is_some_and(|focus| focus.is_ancestor(&host)) {
+                view.grab_focus();
+            }
+        }
+    ));
+    popover
+}
+
 /// The menu's button over the canvas's top right corner, a disc as opaque as the ring's buttons
 /// over a page (DESIGN.md, PDF). Its menu holds Spread above Reset Graph, `spread` being the
 /// slider's value, and hangs from `host` as the right-click's does, pointing at the button: once
 /// closed, a popover of the button's own left the keyboard on the button rather than where it
 /// was.
-fn menu_button(spread: &gtk::Adjustment, host: &gtk::Box) -> gtk::Button {
+fn menu_button(spread: &gtk::Adjustment, host: &gtk::Box, view: &GraphView) -> gtk::Button {
     let button = gtk::Button::builder()
         .icon_name("view-more-symbolic")
         .tooltip_text("Graph Menu")
@@ -107,6 +135,8 @@ fn menu_button(spread: &gtk::Adjustment, host: &gtk::Box) -> gtk::Button {
     button.connect_clicked(glib::clone!(
         #[weak]
         host,
+        #[weak]
+        view,
         move |button| {
             let Some(at) = button.compute_bounds(&host) else {
                 return;
@@ -123,8 +153,7 @@ fn menu_button(spread: &gtk::Adjustment, host: &gtk::Box) -> gtk::Button {
                 at.width() as i32,
                 at.height() as i32,
             );
-            let popover = widgets::popup_menu(&host, &menu, Some(at));
-            popover.add_child(&spread_row(&spread), "spread");
+            popup(&host, &menu, at, &view).add_child(&spread_row(&spread), "spread");
         }
     ));
     button
@@ -505,7 +534,7 @@ impl App {
         // widget with no layout manager (DESIGN.md, States).
         let host = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let canvas = gtk::Overlay::builder().child(&view).build();
-        canvas.add_overlay(&menu_button(&spread, &host));
+        canvas.add_overlay(&menu_button(&spread, &host, &view));
         host.append(&canvas);
         let holder = loading::holder();
         loading::put(&holder, &host);
@@ -598,14 +627,18 @@ impl App {
         let menu = gtk::GestureClick::builder()
             .button(gdk::BUTTON_SECONDARY)
             .build();
-        menu.connect_pressed(move |menu, _, x, y| {
-            let Some(host) = menu.widget() else {
-                return;
-            };
-            menu.set_state(gtk::EventSequenceState::Claimed);
-            let anchor = gdk::Rectangle::new(x as i32, y as i32, 1, 1);
-            widgets::popup_menu(&host, &graph_menu(), Some(anchor));
-        });
+        let view = graph.view.clone();
+        menu.connect_pressed(glib::clone!(
+            #[weak]
+            host,
+            #[weak]
+            view,
+            move |menu, _, x, y| {
+                menu.set_state(gtk::EventSequenceState::Claimed);
+                let anchor = gdk::Rectangle::new(x as i32, y as i32, 1, 1);
+                popup(&host, &graph_menu(), anchor, &view);
+            }
+        ));
         host.add_controller(menu);
         graph.holder.connect_map(glib::clone!(
             #[weak(rename_to = app)]
