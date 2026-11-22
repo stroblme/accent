@@ -258,8 +258,8 @@ pub enum Request {
         text: String,
         style: pdf::TextStyle,
     },
-    /// Move, stretch or turn strokes and texts of a page, named by their ids, as one step. A
-    /// stroke of ours comes back at the end of the page's `/Annots`.
+    /// Move, stretch or turn strokes and texts of a page, named by their ids, as one step. Each
+    /// keeps its place in the page's `/Annots`.
     Transform {
         page: usize,
         ids: Vec<u32>,
