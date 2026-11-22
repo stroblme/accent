@@ -20,7 +20,7 @@ use super::geometry::{self, End, Frame, GAP, HANDLE, Sheet, TOLERANCE, Zoom};
 use super::paint::{self, Cache, Tint};
 use super::sharp::Renders;
 use super::tools::Tool;
-use crate::theme;
+use crate::{scrollable, theme};
 use drag::{Drag, Mods};
 use preview::Preview;
 
@@ -516,6 +516,64 @@ impl DiagramView {
         self.imp().pull.get()
     }
 
+    /// Scroll a frame at a time while a drag rests near the canvas's edge or past it, as the
+    /// Outline's strip does (`scrollable::edge_speed`), and grow the canvas right or down to
+    /// scroll on into past the drawing, as draw.io's `scrollPointToVisible` does with
+    /// `autoExtend`, so what is dragged can be dropped beyond what the canvas had.
+    fn edge_scroll(&self) {
+        if self.imp().ticking.replace(true) {
+            return;
+        }
+        self.add_tick_callback(|view, _| {
+            let imp = view.imp();
+            let (x, y) = imp.at.get();
+            let (w, h) = (f64::from(view.width()), f64::from(view.height()));
+            let by = (scrollable::edge_speed(x, w), scrollable::edge_speed(y, h));
+            let dragging = !matches!(*imp.drag.borrow(), None | Some(Drag::Pan { .. }));
+            if !dragging || by == (0.0, 0.0) {
+                imp.ticking.set(false);
+                return glib::ControlFlow::Break;
+            }
+            let (sx, sy) = imp.scroll.scroll();
+            // How far past the end of each scrollbar the scroll would go.
+            let short = |a: Option<gtk::Adjustment>, to: f64| {
+                a.map_or(0.0, |a| (to - (a.upper() - a.page_size())).max(0.0))
+            };
+            let (h, v) = (imp.scroll.h(), imp.scroll.v());
+            let grow = (short(h, sx + by.0), short(v, sy + by.1));
+            if grow != (0.0, 0.0) {
+                let (gx, gy) = imp.grown.get();
+                imp.grown.set((gx + grow.0, gy + grow.1));
+                view.relayout();
+            }
+            view.set_scroll((sx + by.0, sy + by.1));
+            // The pointer stayed put and the page moved under it.
+            imp.pointer.set(view.page_at(x, y));
+            view.queue_draw();
+            glib::ControlFlow::Continue
+        });
+    }
+
+    /// Let go of the room a drag grew that the view no longer shows, once no drag needs it: what
+    /// is on screen stays, so a drop never moves the page, and the rest goes as it scrolls back.
+    fn melt(&self) {
+        let imp = self.imp();
+        let (gx, gy) = imp.grown.get();
+        if (gx, gy) == (0.0, 0.0) || imp.drag.borrow().is_some() {
+            return;
+        }
+        // What the view shows past the end the canvas has without the room.
+        let shown = |a: Option<gtk::Adjustment>, grown: f64| {
+            a.map_or(0.0, |a| a.value() + a.page_size() - (a.upper() - grown))
+                .clamp(0.0, grown)
+        };
+        let kept = (shown(imp.scroll.h(), gx), shown(imp.scroll.v(), gy));
+        if kept != (gx, gy) {
+            imp.grown.set(kept);
+            self.relayout();
+        }
+    }
+
     fn centre_page(&self) {
         let Some(sheet) = self.sheet() else { return };
         let c = self.imp().frame.get().to_content(sheet.shown().centre());
@@ -537,7 +595,9 @@ impl DiagramView {
         if imp.frame.replace(frame).scale != frame.scale {
             imp.cache.forget();
         }
-        imp.scroll.configure(size, (w, h));
+        // With the room a drag grew right and down (`edge_scroll`), which moves nothing drawn.
+        let (gx, gy) = imp.grown.get();
+        imp.scroll.configure((size.0 + gx, size.1 + gy), (w, h));
         if !imp.laid_out.replace(true) && imp.pending_scroll.get().is_none() {
             self.centre_page();
         }
@@ -597,6 +657,13 @@ mod imp {
         pub pointer: Cell<Point>,
         /// The keys held in the drag under way.
         pub(super) mods: Cell<Mods>,
+        /// Where the pointer is in the drag under way, in the widget's coordinates, which a drag
+        /// resting near the edge scrolls from.
+        pub at: Cell<(f64, f64)>,
+        /// The room right of and below the drawing that a drag near the edge grew, in pixels.
+        pub grown: Cell<(f64, f64)>,
+        /// Whether a drag near the edge is scrolling the canvas each frame.
+        pub ticking: Cell<bool>,
         /// Where the pointer is over the canvas, until it leaves: what a Ctrl+wheel zooms around.
         pub over: Cell<Option<(f64, f64)>>,
         pub cache: Cache,
@@ -642,6 +709,9 @@ mod imp {
                 slop: Cell::new(0.0),
                 pointer: Cell::new(Point::default()),
                 mods: Cell::new(Mods::default()),
+                at: Cell::new((0.0, 0.0)),
+                grown: Cell::new((0.0, 0.0)),
+                ticking: Cell::new(false),
                 over: Cell::new(None),
                 cache: Cache::default(),
                 renders: Renders::default(),
@@ -667,14 +737,19 @@ mod imp {
 
     impl DiagramView {
         fn adopt_h(&self, adjustment: Option<gtk::Adjustment>) {
-            self.scroll
-                .adopt(&*self.obj(), 0, adjustment, |v| v.queue_draw());
+            self.scroll.adopt(&*self.obj(), 0, adjustment, scrolled);
         }
 
         fn adopt_v(&self, adjustment: Option<gtk::Adjustment>) {
-            self.scroll
-                .adopt(&*self.obj(), 1, adjustment, |v| v.queue_draw());
+            self.scroll.adopt(&*self.obj(), 1, adjustment, scrolled);
         }
+    }
+
+    /// The canvas scrolled: what is on screen is drawn again, and the room a drag grew that it
+    /// left goes.
+    fn scrolled(view: &super::DiagramView) {
+        view.melt();
+        view.queue_draw();
     }
 
     #[glib::derived_properties]
@@ -760,7 +835,13 @@ mod imp {
                     };
                     match pan {
                         Some((sx, sy)) => obj.set_scroll((sx - dx, sy - dy)),
-                        None => imp.pointer.set(obj.page_at(x0 + dx, y0 + dy)),
+                        None => {
+                            imp.at.set((x0 + dx, y0 + dy));
+                            imp.pointer.set(obj.page_at(x0 + dx, y0 + dy));
+                            if imp.moved.get() {
+                                obj.edge_scroll();
+                            }
+                        }
                     }
                     obj.queue_draw();
                 }
@@ -780,6 +861,7 @@ mod imp {
                     let mods = Mods::of(gesture.current_event_state());
                     obj.end_drag(drag, x0 + dx, y0 + dy, moved, mods);
                     imp.preview.take();
+                    obj.melt();
                     obj.queue_draw();
                 }
             ));
@@ -830,6 +912,15 @@ mod imp {
                         return;
                     }
                     let Some(sheet) = obj.sheet() else { return };
+                    // On a waypoint's handle it takes the waypoint away, as draw.io's does
+                    // (`dblClickRemoveEnabled`), and the drag its second press began goes with it.
+                    if let Some(edit) = obj.removed_waypoint(x, y, false) {
+                        glib::idle_add_local_once(move || {
+                            obj.imp().drag.take();
+                            obj.emit(edit);
+                        });
+                        return;
+                    }
                     let p = obj.page_at(x, y);
                     // ponytail: a label found by its painted text only when nothing else is
                     // under the pointer; walking both in one paint order is the upgrade if a

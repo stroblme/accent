@@ -4,6 +4,7 @@
 use super::*;
 
 mod drag;
+mod handles;
 mod input;
 mod layers;
 mod output;
@@ -69,6 +70,8 @@ pub(super) const SAMPLE: &str = r#"<mxfile host="accent">
 ///   star and closing with the cell.
 /// - `=select:<rel>` writes groups to `<rel>` and prints what real clicks and bands select.
 /// - `=shape:<rel>` picks shapes from the Shape tool's grid and draws them by real input.
+/// - `=handles:<rel>` adds and takes away an arrow's waypoints, resizes with Shift held and
+///   holds a move at the canvas's edge, by real input.
 /// - `=render` draws a page as `accent --render-diagram` does and prints where its lines fall.
 /// - `=edges` exports a picture on paper as a PDF and counts the seams pdfium draws around it.
 ///
@@ -111,6 +114,9 @@ pub(super) fn bench_diagram(app: &Rc<App>, arg: &str) {
     }
     if let Some(rel) = arg.strip_prefix("shape:") {
         return shape::shape(app, rel);
+    }
+    if let Some(rel) = arg.strip_prefix("handles:") {
+        return handles::handles(app, rel);
     }
     if let Some((rel, dir)) = arg.strip_prefix("export:").and_then(|a| a.split_once(':')) {
         return output::export(app, rel, Path::new(dir));

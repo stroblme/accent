@@ -13,8 +13,8 @@ use crate::diagram::geometry::{self, HANDLE, Handle, Sheet, TOLERANCE};
 use crate::diagram::tools::Tool;
 
 /// The keys a drag reads on every event, as draw.io's handlers do: Alt places freely, Shift
-/// constrains (a move to one axis, a line's end and a turn to steps of 15°), and the primary
-/// modifier makes a move drop a copy (`isCloneEvent`).
+/// constrains (a move to one axis, a resize to the shape's proportions, a line's end and a turn
+/// to steps of 15°), and the primary modifier makes a move drop a copy (`isCloneEvent`).
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct Mods {
     pub free: bool,
@@ -313,6 +313,34 @@ impl DiagramView {
         geometry::handle_at(&b, local, HANDLE).map(Grip::Resize)
     }
 
+    /// The waypoint of a selected edge whose handle is under widget `(x, y)`, as the edit taking
+    /// it away: what a double click on it and Remove Waypoint do, as draw.io's
+    /// (`mxEdgeHandler.removePoint`). The elbow's handle stands for its waypoint, as in draw.io's
+    /// menu, while an orthogonal edge's segment handles stand for none.
+    pub fn removed_waypoint(&self, x: f64, y: f64, elbow: bool) -> Option<Edit> {
+        let sheet = self.sheet()?;
+        let (id, grip) = self.grip_under(&sheet, &self.selection(), self.page_at(x, y))?;
+        let index = match grip {
+            Grip::Knob(Knob::Bend(i)) => i,
+            Grip::Knob(Knob::Elbow) if elbow => 0,
+            _ => return None,
+        };
+        let mut points = sheet.waypoints(&id);
+        (index < points.len()).then(|| points.remove(index))?;
+        Some(Edit::Points { id, points })
+    }
+
+    /// Edge `id` with a waypoint where widget `(x, y)` is, on the grid, in the segment nearest
+    /// it: Add Waypoint, draw.io's (`mxEdgeHandler.addPointAt`).
+    pub fn added_waypoint(&self, id: &str, x: f64, y: f64) -> Option<Edit> {
+        let sheet = self.sheet()?;
+        let at = geometry::snap_point(self.page_at(x, y), self.grid(false));
+        let route = sheet.scene.route(id)?;
+        let points = handle::insert_point(&sheet.waypoints(id), route, at);
+        let id = id.to_string();
+        Some(Edit::Points { id, points })
+    }
+
     /// What an edge end dragged to `p`, its other end at `other`, lands on: as a connector's end
     /// does ([`Sheet::end_at`]), dangling where [`DiagramView::dangle`] puts it from `anchor`.
     pub(super) fn end_to(
@@ -390,7 +418,8 @@ impl DiagramView {
     /// `rect`, turned `rotation`, resized by dragging `handle` by `delta`, and the lines that
     /// show the guides it snapped to: on the grid and the size guides unless `free` (Alt, as in
     /// draw.io, Graph.js 27881) or the page has its guides off. A shape `fixed` to its
-    /// proportions keeps them, and so snaps to no size guide.
+    /// proportions keeps them, as any shape does with Shift held (`constrained`,
+    /// `mxVertexHandler.isConstrainedEvent`), and so snaps to no size guide.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn resize_to(
         &self,
@@ -399,9 +428,10 @@ impl DiagramView {
         handle: Handle,
         delta: Point,
         guides: &[Neighbour],
-        free: bool,
+        mods: Mods,
         fixed: bool,
     ) -> (Rect, Vec<guide::Line>) {
+        let (free, fixed) = (mods.free, fixed || mods.constrained);
         let grid = self.grid(free);
         let guided =
             !free && !fixed && !guides.is_empty() && self.sheet().is_some_and(|s| s.guides);
@@ -493,7 +523,7 @@ impl DiagramView {
             } => {
                 let delta = Point::new(p.x - from.x, p.y - from.y);
                 let (rect, _) =
-                    self.resize_to(rect, *rotation, *handle, delta, guides, free, *fixed);
+                    self.resize_to(rect, *rotation, *handle, delta, guides, mods, *fixed);
                 Some(Edit::Resize {
                     id: id.clone(),
                     rect,

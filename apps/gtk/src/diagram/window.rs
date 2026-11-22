@@ -308,6 +308,7 @@ impl App {
             "diagram-ungroup" => tab.ungroup(),
             "diagram-select-all" => tab.select_all(),
             "diagram-edit-label" => tab.edit_label(),
+            "diagram-clear-waypoints" => tab.clear_waypoints(),
             "diagram-next-page" => tab.step_page(true),
             "diagram-previous-page" => tab.step_page(false),
             "diagram-go-to-page" => self.open_find(crate::find::Mode::Goto),

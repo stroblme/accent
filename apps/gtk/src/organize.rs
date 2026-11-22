@@ -19,12 +19,8 @@ use gtk::{gdk, glib, graphene};
 
 use crate::doc::Kind;
 use crate::pdf::geometry::{Layout, PageRect, gap_at, gap_middle, page_at};
+use crate::scrollable::edge_speed;
 use crate::widgets::Hook;
-
-/// How near the strip's top or bottom edge a drag scrolls it, and how fast at the very edge, in
-/// pixels a frame.
-const EDGE: f64 = 40.0;
-const EDGE_SPEED: f64 = 12.0;
 
 /// How far apart the insert and paste buttons stand.
 const INSET: f32 = 6.0;
@@ -222,13 +218,6 @@ fn floating(child: &impl IsA<gtk::Widget>) -> gtk::Revealer {
 fn reveal(revealer: &gtk::Revealer, on: bool) {
     revealer.set_reveal_child(on);
     revealer.set_can_target(on);
-}
-
-/// How fast a drag at `y` over a strip `height` tall scrolls it, in pixels a frame: nothing away
-/// from the edges, up to [`EDGE_SPEED`] at them, negative towards the top.
-fn edge_speed(y: f64, height: f64) -> f64 {
-    let into = |edge: f64| (EDGE - edge).clamp(0.0, EDGE) / EDGE * EDGE_SPEED;
-    into(height - y) - into(y)
 }
 
 impl Organize {

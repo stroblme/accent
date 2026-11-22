@@ -347,6 +347,7 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.diagram-ungroup", "Ungroup", &[]),
     ("win.diagram-select-all", "Select All Shapes", &[]),
     ("win.diagram-edit-label", "Edit Label", &[]),
+    ("win.diagram-clear-waypoints", "Clear Waypoints", &[]),
     ("win.diagram-next-page", "Next Diagram Page", &[]),
     ("win.diagram-previous-page", "Previous Diagram Page", &[]),
     ("win.diagram-go-to-page", "Go to Diagram Page…", &[]),

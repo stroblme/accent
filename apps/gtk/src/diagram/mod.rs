@@ -951,6 +951,15 @@ impl DiagramTab {
         }
     }
 
+    /// Take the waypoints off the selection's arrows and the arrows on it, as draw.io's Clear
+    /// Waypoints does (`edit::clear_points`).
+    pub fn clear_waypoints(self: &Rc<Self>) {
+        let ids = self.selection();
+        if !ids.is_empty() {
+            self.edit(|e, page| e.clear_points(page, &ids));
+        }
+    }
+
     /// Delete the selection with every edge on it, as draw.io's Delete All (`Ctrl+Delete`).
     pub fn delete_all(self: &Rc<Self>) {
         let ids = self.selection();

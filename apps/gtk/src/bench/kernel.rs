@@ -772,7 +772,7 @@ fn menus_up(root: &gtk::Widget) -> Vec<gtk::PopoverMenu> {
 
 /// Activate the item of `menu` that `label` names, from the menu as a click on it does: its
 /// action, with its target, looked for from where the menu is. Whether there was one.
-fn pick(menu: &gtk::PopoverMenu, label: &str) -> bool {
+pub(super) fn pick(menu: &gtk::PopoverMenu, label: &str) -> bool {
     fn find(model: &gio::MenuModel, label: &str) -> Option<(String, Option<glib::Variant>)> {
         (0..model.n_items()).find_map(|i| {
             let section = model.item_link(i, gio::MENU_LINK_SECTION);

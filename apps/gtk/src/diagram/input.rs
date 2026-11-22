@@ -105,6 +105,7 @@ impl DiagramTab {
                 grouping.push("win.diagram-ungroup");
             }
             section(&grouping);
+            self.waypoint_items(&menu, &ids, x, y);
             section(&["win.diagram-to-front", "win.diagram-to-back"]);
             if ids.len() == 1 {
                 section(&["win.diagram-edit-label"]);
@@ -123,6 +124,55 @@ impl DiagramTab {
         let at = self.view.compute_point(&host, &at).unwrap_or(at);
         let anchor = gdk::Rectangle::new(at.x() as i32, at.y() as i32, 1, 1);
         crate::widgets::popup_menu(&host, &menu, Some(anchor));
+    }
+
+    /// The waypoint commands of the menu at widget `(x, y)` over `ids`, as draw.io's (Menus.js
+    /// 1739-1797): for one arrow that bends, Remove Waypoint over one of its waypoints and Add
+    /// Waypoint anywhere else, where the menu opened, from a group of the tab's own since only
+    /// the menu has a point to act at; and Clear Waypoints while the selection is arrows alone,
+    /// or has one with waypoints or a shape with an arrow on it.
+    fn waypoint_items(self: &Rc<Self>, menu: &gio::Menu, ids: &[CellId], x: f64, y: f64) {
+        let Some(sheet) = self.view.sheet() else {
+            return;
+        };
+        let part = gio::Menu::new();
+        let bends = |id: &CellId| {
+            let style = sheet.page.cell(id).map(|c| c.style.resolve(true));
+            let bendable = sheet.edge_kind(id).is_some() && !sheet.is_pinned(id);
+            bendable && style.is_some_and(|s| accent_drawio::handle::takes_waypoints(&s))
+        };
+        if let [id] = ids
+            && bends(id)
+            && let Some(host) = self.overlay.parent()
+        {
+            let (label, edit) = match self.view.removed_waypoint(x, y, true) {
+                Some(edit) => ("Remove Waypoint", Some(edit)),
+                None => ("Add Waypoint", self.view.added_waypoint(id, x, y)),
+            };
+            if let Some(edit) = edit {
+                let action = gio::SimpleAction::new("waypoint", None);
+                action.connect_activate(glib::clone!(
+                    #[weak(rename_to = tab)]
+                    self,
+                    move |_, _| tab.apply(edit.clone())
+                ));
+                let group = gio::SimpleActionGroup::new();
+                group.add_action(&action);
+                host.insert_action_group("canvas", Some(&group));
+                part.append(Some(label), Some("canvas.waypoint"));
+            }
+        }
+        let on = |end: &Option<CellId>| end.as_ref().is_some_and(|e| ids.contains(e));
+        let arrows = ids.iter().all(|id| sheet.is_edge(id))
+            || ids.iter().any(|id| !sheet.waypoints(id).is_empty())
+            || (sheet.page.cells.iter()).any(|c| c.edge && (on(&c.source) || on(&c.target)));
+        if arrows {
+            let clear = "win.diagram-clear-waypoints";
+            part.append(Some(crate::actions::label_of(clear)), Some(clear));
+        }
+        if part.n_items() > 0 {
+            menu.append_section(None, &part);
+        }
     }
 
     /// Route canvas keys to window actions. Undo, Select All and Delete are local

@@ -57,6 +57,26 @@ pub fn kind(style: &Resolved, is_loop: bool) -> Kind {
     }
 }
 
+/// Whether the canvas's menu offers Add Waypoint and Remove Waypoint on an edge of `style`: any
+/// but an entity relation and a flex arrow (`Menus.addPopupMenuCellItems`, Menus.js 1750).
+pub fn takes_waypoints(style: &Resolved) -> bool {
+    style.get("edgeStyle") != Some("entityRelationEdgeStyle") && style.shape() != "arrow"
+}
+
+/// `waypoints` with `p` put in before the one that ends the segment of `route` nearest it, the
+/// first of two as near, or last where the route has more segments than waypoints
+/// (`mxEdgeHandler.addPointAt`, `mxUtils.findNearestSegment`).
+pub fn insert_point(waypoints: &[Point], route: &[Point], p: Point) -> Vec<Point> {
+    let nearest = route
+        .windows(2)
+        .map(|s| distance_to_segment(p, s[0], s[1]))
+        .enumerate()
+        .min_by(|a, b| a.1.total_cmp(&b.1));
+    let mut points = waypoints.to_vec();
+    points.insert(nearest.map_or(0, |n| n.0).min(points.len()), p);
+    points
+}
+
 /// A handle between the ends.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Knob {
@@ -444,5 +464,20 @@ mod tests {
             4.0,
         );
         assert_eq!(elbow, [p(9.0, 9.0)]);
+    }
+
+    #[test]
+    fn a_waypoint_goes_into_the_segment_nearest_it() {
+        let route = [p(0.0, 0.0), p(50.0, 50.0), p(100.0, 0.0)];
+        let waypoints = [p(50.0, 50.0)];
+        let at = |q| insert_point(&waypoints, &route, q);
+        assert_eq!(at(p(20.0, 10.0)), [p(20.0, 10.0), p(50.0, 50.0)]);
+        assert_eq!(at(p(80.0, 30.0)), [p(50.0, 50.0), p(80.0, 30.0)]);
+        // An orthogonal route has corners of its own, which are no waypoints.
+        let corners = [p(0.0, 0.0), p(50.0, 0.0), p(50.0, 80.0), p(100.0, 80.0)];
+        assert_eq!(insert_point(&[], &corners, p(90.0, 70.0)), [p(90.0, 70.0)]);
+        let of = |s: &str| takes_waypoints(&Style::parse(s).resolve(true));
+        assert!(of("edgeStyle=orthogonalEdgeStyle;") && of(""));
+        assert!(!of("edgeStyle=entityRelationEdgeStyle;") && !of("shape=arrow;"));
     }
 }

@@ -75,6 +75,18 @@ impl Adjustments {
     }
 }
 
+/// How near a view's edge a drag scrolls it, and how fast at the very edge and past it, in pixels
+/// a frame: the Outline's thumbnail strip's and a diagram canvas's.
+const EDGE: f64 = 40.0;
+const EDGE_SPEED: f64 = 12.0;
+
+/// How fast a drag at `at` along a view `length` long scrolls it, in pixels a frame: nothing away
+/// from the edges, up to [`EDGE_SPEED`] at them and past them, negative towards the start.
+pub fn edge_speed(at: f64, length: f64) -> f64 {
+    let into = |edge: f64| (EDGE - edge).clamp(0.0, EDGE) / EDGE * EDGE_SPEED;
+    into(length - at) - into(at)
+}
+
 /// Clamp adjustment upper bounds to at least page size, as GTK requires.
 /// Content smaller than its viewport has no scroll and clamps to zero.
 fn configure(adjustment: Option<gtk::Adjustment>, upper: f64, page: f64) {

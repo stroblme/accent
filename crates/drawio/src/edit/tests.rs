@@ -460,6 +460,31 @@ fn a_free_end_takes_the_point_typed_in_its_group() {
 }
 
 #[test]
+fn clear_waypoints_takes_them_off_the_edges_on_a_shape_and_puts_the_label_back() {
+    let mut e = editor();
+    // `e`'s label moved off its middle, and a locked edge on `a` with a waypoint of its own.
+    let line = [Point::new(0.0, 0.0), Point::new(100.0, 0.0)];
+    e.move_label(0, "e", &line, Point::new(25.0, 10.0)).unwrap();
+    let (on_a, off) = ((Some("a"), Point::default()), (None, Point::new(0.0, 90.0)));
+    let mut pinned = Cell::new_edge("l", "1", on_a, off, "locked=1;");
+    pinned.geometry.as_mut().unwrap().points = Some(vec![Point::new(20.0, 80.0)]);
+    e.file.pages[0].cells.push(pinned);
+    let looped = Some("1");
+    e.set_style(0, &list(&["e"]), "innerLoopWaypoints", looped)
+        .unwrap();
+    let steps = e.undo.len();
+    e.clear_points(0, &list(&["a"])).unwrap();
+    let g = geometry(&e, "e");
+    assert_eq!((g.points.clone(), g.x, g.y), (None, 0.0, 0.0));
+    assert_eq!(g.offset, None);
+    let style = &e.page(0).unwrap().cell("e").unwrap().style;
+    assert_eq!(style.get("innerLoopWaypoints"), None);
+    assert_eq!(geometry(&e, "l").points, Some(vec![Point::new(20.0, 80.0)]));
+    assert_eq!(e.undo.len(), steps + 1);
+    assert!(e.undo() && geometry(&e, "e").points == Some(vec![Point::new(70.0, 60.0)]));
+}
+
+#[test]
 fn a_line_turns_its_ends_and_waypoints_about_a_point() {
     let mut line = Cell::new_edge(
         "l",

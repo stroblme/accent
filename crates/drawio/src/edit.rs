@@ -245,6 +245,11 @@ impl Editor {
         self.edit(page, |p, _| set_points(p, id, points))
     }
 
+    /// [`clear_points`] on page `page`.
+    pub fn clear_points(&mut self, page: usize, ids: &[CellId]) -> Result<(), Error> {
+        self.edit(page, |p, _| clear_points(p, ids))
+    }
+
     /// [`resize`] on page `page`.
     pub fn resize(&mut self, page: usize, id: &str, rect: Rect, alone: bool) -> Result<(), Error> {
         self.edit(page, |p, _| resize(p, id, rect, alone))
@@ -1310,6 +1315,44 @@ pub fn set_points(page: &mut Page, id: &str, points: &[Point]) -> Result<(), Err
     });
     g.points = (!points.is_empty()).then(|| local.collect());
     Ok(())
+}
+
+/// Take the waypoints off the edges among `ids`, in them and on them or on what they hold, as
+/// draw.io's Clear Waypoints does: each label goes back to the middle of its edge too, a loop kept
+/// inside its shape goes back to its own routing, and a locked edge is left as it is.
+// Actions.js 1701-1739 `clearWaypoints`, `mxGraph.addAllEdges`, `Graph.isCellLocked`
+pub fn clear_points(page: &mut Page, ids: &[CellId]) -> Result<(), Error> {
+    check(page, ids)?;
+    let held = with_subtrees(page, ids.iter().cloned());
+    let on = |end: &Option<CellId>| end.as_ref().is_some_and(|id| held.contains(id));
+    let edges: Vec<CellId> = (page.cells.iter())
+        .filter(|c| c.edge && (held.contains(&c.id) || on(&c.source) || on(&c.target)))
+        .filter(|c| !locked(page, &c.id))
+        .map(|c| c.id.clone())
+        .collect();
+    for id in edges {
+        let cell = cell_mut(page, &id)?;
+        if let Some(g) = cell.geometry.as_mut() {
+            (g.points, g.offset) = (None, None);
+            (g.x, g.y) = (0.0, 0.0);
+        }
+        cell.style.set("innerLoopWaypoints", None);
+    }
+    Ok(())
+}
+
+/// Whether `id`, or anything it is in, is locked (`Graph.isCellLocked`).
+fn locked(page: &Page, id: &str) -> bool {
+    let mut at = page.cell(id);
+    // As many steps as there are cells, which a `parent` loop in a broken file cannot outlast.
+    for _ in 0..page.cells.len() {
+        match at {
+            Some(c) if c.is_locked() => return true,
+            Some(c) => at = c.parent.as_deref().and_then(|p| page.cell(p)),
+            None => return false,
+        }
+    }
+    false
 }
 
 /// Turn edge `id` `degrees` clockwise about `centre` (absolute): its end points and waypoints,
