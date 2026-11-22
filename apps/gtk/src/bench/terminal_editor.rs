@@ -549,11 +549,22 @@ async fn tasks(app: &Rc<App>) {
     let Some(term) = started(app, "boxes.md").await else {
         return println!("bench editor tasks started=false");
     };
+    // The preview's tab joins the editor's, and the pane's tab bar slides in above the page as
+    // it does, moving the box 26 px down over the animation: a click aimed while it ran missed.
+    // So no animation, and the box aimed at once it is where it was a look before, the page all
+    // in and showing the note as saved, as a click on a box asks (`Preview::shows`).
+    if let Some(settings) = gtk::Settings::default() {
+        settings.set_gtk_enable_animations(false);
+    }
     app.toggle_preview();
+    let file = || std::fs::read_to_string(app.root().join("boxes.md")).unwrap_or_default();
+    let last = Cell::new(None);
     let shown = until("editor", "tasks preview", 10_000, || {
         let rendered = app.rendered_of(&term.page)?;
-        let at = rendered.preview().as_ref()?.boxes().first()?.1;
-        Some(at)
+        let preview = rendered.preview();
+        let preview = preview.as_ref().filter(|preview| preview.shows(&file()))?;
+        let at = preview.boxes().first()?.1;
+        (last.replace(Some(at)) == Some(at)).then_some(at)
     })
     .await;
     let Some((x, y)) = shown else {
@@ -561,7 +572,6 @@ async fn tasks(app: &Rc<App>) {
     };
     let (sx, sy) = app.window.surface_transform();
     super::git::xtest(&format!("move {} {}; focus; down; up", x + sx, y + sy)).await;
-    let file = || std::fs::read_to_string(app.root().join("boxes.md")).unwrap_or_default();
     let written = until("editor", "tasks written", 10_000, || {
         file().contains("- [x] open")
     })
