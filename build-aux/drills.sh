@@ -310,6 +310,16 @@ drill_editor() {
 	expect editor editor
 }
 
+# A shell's paths lit under the pointer and opened by Ctrl+click through XTEST. The shell is real,
+# so under a scratch HOME, and `sh` reports no folder (no OSC 7), so the holder is asked for it.
+drill_terminal_links() {
+	export HOME="$dir/home" SHELL=/bin/sh
+	mkdir "$HOME"
+	launch 60 ACCENT_BENCH_LINKS=1 >"$dir/links"
+	fuser -k "$TMPDIR/accent-$(id -u)/hold-3.lock" >/dev/null 2>&1 || true
+	expect links links
+}
+
 # Every match on screen painted, and over the word emphasis, in the column the keyboard is in and
 # nowhere else, wherever a comparison or a staged change is scrolled to.
 drill_find_compare() {

@@ -32,6 +32,7 @@ mod kernel;
 mod keys;
 mod keys_typing;
 mod keys_xtest;
+mod links;
 mod listed;
 mod loading;
 mod loose;
@@ -120,6 +121,7 @@ use info::bench_info;
 use keys::bench_keys;
 use keys_typing::bench_list;
 use keys_xtest::{bench_box_drag, bench_menu_caret, bench_occurrence_keys};
+use links::bench_links;
 pub(crate) use loading::SLOW_READ_MS;
 
 /// Whether the next comparison a Git row asks for fails to read, as one over a dropped link
@@ -248,6 +250,8 @@ use user_commands::bench_commands;
 ///   an image, a notebook, a note and its preview, by pinch, Ctrl+wheel and chord
 ///   (`coast::bench_coast`). Writes `coast.*` into a scratch vault.
 /// - `ACCENT_BENCH_TERM=1`: shell titles and saved terminal sessions.
+/// - `ACCENT_BENCH_LINKS=1`: a shell's file links lit and opened through XTEST, under a scratch
+///   HOME (`links::bench_links`).
 ///   `--terminal` uses a vault-less window; a vault launch opens a shell tab.
 ///   Use scratch `TMPDIR` so it cannot join the user's running holder.
 /// - `ACCENT_BENCH_SHELL_KEYS=1`: `Ctrl+S` in a shell without window focus.
@@ -549,6 +553,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let panes = std::env::var("ACCENT_BENCH_PANES").ok();
     let shell_keys = std::env::var("ACCENT_BENCH_SHELL_KEYS").is_ok();
     let term = std::env::var("ACCENT_BENCH_TERM").is_ok();
+    let links = std::env::var("ACCENT_BENCH_LINKS").is_ok();
     let hold = std::env::var("ACCENT_BENCH_HOLD").ok();
     let user_commands = std::env::var("ACCENT_BENCH_COMMANDS").ok();
     let picture = std::env::var("ACCENT_BENCH_IMAGE").ok();
@@ -660,6 +665,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && !paths
         && !shell_keys
         && !term
+        && !links
         && hold.is_none()
         && user_commands.is_none()
         && picture.is_none()
@@ -1069,6 +1075,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if term {
             return bench_term(&app);
+        }
+        if links {
+            return bench_links(&app);
         }
         if let Some(step) = hold {
             return bench_hold(&app, &step);

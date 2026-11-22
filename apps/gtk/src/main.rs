@@ -1454,6 +1454,16 @@ impl App {
                 }
             ),
         );
+        // A path in its output opens here, from the vault's host for a shell held there.
+        terminal::on_file_link(
+            &term,
+            self.vault(),
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move |link| app.open_terminal_link(link)
+            ),
+        );
         // A `cd` is where the session will put the shell back, so it is written down like a move
         // of the caret would be.
         term.view

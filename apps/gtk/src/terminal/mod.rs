@@ -25,6 +25,7 @@ pub use exit::{Ended, on_exit};
 pub use holder::install_termprops;
 pub use holder::{Facts, cli, end, end_orphans, end_stored, host_prefix, sweep};
 pub use key::{SESSION, console_key, is_key, new_key, program_key, session_key, session_name};
+pub use links::{FileLink, on_file_link};
 pub use shell::{Program, Run, Shell};
 pub(crate) use view::scroller;
 
@@ -75,6 +76,8 @@ pub struct Term {
     run: Option<Run>,
     /// A terminal editor's file as last saved, which its preview tab and the side panes read.
     pub saved: crate::editors::Saved,
+    /// The paths in its output, which open as links once their files are found.
+    files: links::Files,
 }
 
 /// A focused shell's live working directory and machine for Git discovery.
@@ -462,6 +465,7 @@ pub fn open(
         sharing: Cell::new(false),
         run,
         saved: Default::default(),
+        files: Default::default(),
     });
     install_links(&term);
     take_copies(&term);

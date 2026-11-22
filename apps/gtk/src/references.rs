@@ -344,25 +344,49 @@ impl App {
         } else {
             loc.path.clone()
         };
-        let at = loc.range.start;
+        self.open_key_at(key, loc.range.start, loc.anchor.clone());
+    }
+
+    /// Open the file a link in a shell's output names, at its line and column: as the vault's
+    /// file where it is in the vault, else as a file from outside it on this machine, as Open
+    /// File opens one. A host's file outside a remote vault is never lit, so never opened.
+    pub fn open_terminal_link(self: &Rc<Self>, link: terminal::FileLink) {
+        let vault = self.vault().filter(|v| v.is_remote() == link.host);
+        let rel = vault.and_then(|v| link.path.strip_prefix(v.root()).ok());
+        let key = match rel.and_then(Path::to_str) {
+            Some(rel) => rel.to_string(),
+            None if !link.host => link.path.to_string_lossy().into_owned(),
+            None => return,
+        };
+        let at = accent_api::Pos {
+            line: link.line.unwrap_or(1).saturating_sub(1),
+            character: link.column.unwrap_or(1).saturating_sub(1),
+        };
+        self.mark();
+        self.open_key_at(key, at, None);
+    }
+
+    /// [`open_at`](Self::open_at) once the location is a tab key: the caret on `at`, or on the
+    /// heading or the PDF selection `anchor` names.
+    fn open_key_at(self: &Rc<Self>, key: String, at: accent_api::Pos, anchor: Option<String>) {
         // Outside the vault: join the session that named the file once the tab opens.
         let how = match doc::is_loose_key(&key) {
             true => Opened::Kept,
             false => Opened::Preview,
         };
         // Only text has a caret to put anywhere; a PDF lands on the page its anchor names.
-        let page = loc.anchor.as_deref().and_then(markdown::pdf_anchor);
+        let page = anchor.as_deref().and_then(markdown::pdf_anchor);
         if page.is_some() || !matches!(doc::kind_of(&key), Kind::Note | Kind::Text) {
             self.open_as(&key, how);
             return self.show_pdf_anchor(&key, page);
         }
         // In the terminal editor picked, at the place, where the file opens in one.
         let place = (at.line + 1, Some(at.character + 1));
-        if loc.anchor.is_none() && self.edit_at(&key, place, how) {
+        if anchor.is_none() && self.edit_at(&key, place, how) {
             return;
         }
         // Any other anchor is a heading the note does not have.
-        let missed = loc.anchor.clone();
+        let missed = anchor;
         if missed.is_none()
             && accent_core::path::may_be_notebook(&key)
             && self.doc_for(&key).is_none()
