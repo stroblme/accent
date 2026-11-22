@@ -2305,6 +2305,10 @@ The `Ctrl` chords for application and document commands use GTK's `<Primary>` mo
   The whole path is written instead where the name already finds another file; an org note gets `[[file:<path>]]`, the path from its folder, which org shows as the image.
 - Text on the clipboard wins over an image.
   A code tab's paste and drop, a loose note's, and a file dropped on a tab bar are unchanged.
+- **Shift+Tab takes back what Tab gave**, on the caret's line or on every line a selection covers, as one undo step.
+  A list item in a note loses a leading tab or its marker's width, so a fourth-level `- ` item goes to the third, where GtkSourceView's own took off the Indent Width and skipped a level (2026-11-22).
+  Any other line, in a note or in code, goes back to the indent stop before it as VS Code outdents, a makefile's leading tab staying.
+  Tab over whole lines of a note gives each item its marker's width and every other line a tab, so the two keys undo each other there too.
 - **A table in a note lines up on Tab and Return**: in a GFM pipe table, a header row over a delimiter row of as many cells and not in code or front matter, either key pads every cell so each column is as wide as its widest cell, keeping the delimiter row's colons and redrawing its dashes to the width.
   An org note's table is every line opening with `|`, not in a block or a drawer, its hlines (`|-`) redrawn to the widths with a `+` where two columns meet, as org draws them, and a column one wide at least, aligned as its first cookie says (`<r>`, `<c>`, `<l>`, a width after one being ignored), else right aligned where at least half its filled cells are numbers as org reads one (`org-table-number-regexp`, `org-table-number-fraction`) and left aligned otherwise; a row added goes under the last, above an hline closing the table, as org's own Tab puts it.
   A cell is as wide as org shows it (`org-string-width`): a described link `[[url][desc]]` its description, `[[url]]` its link, emphasis markers and all, so a table org aligned stays aligned, though one holding a link looks ragged in accent, which shows a link's brackets and target.

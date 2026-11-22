@@ -9,12 +9,13 @@
 //! Each edit is one user action for Undo. `editor::keys` decides which presses reach
 //! [`on_key`], giving completion and multiple carets priority.
 
-use crate::editor::{caret, line_end, line_prefix};
+use crate::editor::{self, caret, line_end, line_prefix};
 use accent_core::markdown::{self, TableKey};
 use accent_core::note::Syntax;
 use accent_core::org;
 use gtk::prelude::*;
 use gtk::{gdk, glib};
+use sourceview5::prelude::ViewExt as _;
 
 /// Auto-paired delimiters. Omit Markdown emphasis because inserted partners often obstruct typing.
 const PAIRS: [(char, char); 3] = [('(', ')'), ('[', ']'), ('{', '}')];
@@ -162,6 +163,34 @@ pub fn list_indent(line: &str) -> Option<String> {
     }
 }
 
+/// What Tab over a selection makes of `line`'s indent: [`list_indent`] more for an item, a tab
+/// more for any other line but an empty one or an org heading.
+fn indented(line: &str, syntax: Syntax) -> Option<String> {
+    let lead = &line[..line.len() - line.trim_start_matches([' ', '\t']).len()];
+    if line.is_empty() || (syntax == Syntax::Org && line.starts_with('*')) {
+        return None;
+    }
+    let unit = list_indent(line).unwrap_or_else(|| "\t".to_string());
+    Some(unit + lead)
+}
+
+/// What Shift+Tab makes of `line`'s indent. An item loses what Tab gave it, a leading tab or
+/// its marker's width in spaces, so the two keys undo each other at any depth; the view's own
+/// took `level` columns off, which skipped a level of `- ` items. Any other line goes back to
+/// the stop before its indent, as code does ([`editor::stop_before`]).
+fn outdented(line: &str, tab_width: usize, level: usize) -> String {
+    let lead = &line[..line.len() - line.trim_start_matches([' ', '\t']).len()];
+    let width = marker_width(&line[lead.len()..]);
+    if width == 0 {
+        return editor::stop_before(lead, tab_width, level);
+    }
+    if let Some(rest) = lead.strip_prefix('\t') {
+        return rest.to_string();
+    }
+    let spaces = lead.len() - lead.trim_start_matches(' ').len();
+    lead[spaces.min(width)..].to_string()
+}
+
 /// Return the opening list/quote marker width including spaces, or 0.
 /// Task brackets are content, so wrapping aligns beneath the opening bracket.
 fn marker_width(rest: &str) -> usize {
@@ -286,7 +315,12 @@ pub fn on_key(
         gdk::Key::Return | gdk::Key::KP_Enter => on_return(view, syntax),
         gdk::Key::BackSpace => on_backspace(view),
         gdk::Key::Tab | gdk::Key::KP_Tab => on_tab(view, syntax),
-        gdk::Key::ISO_Left_Tab if in_table(view, syntax, TableKey::BackTab) => {
+        gdk::Key::ISO_Left_Tab => {
+            if !in_table(view, syntax, TableKey::BackTab) {
+                let (tab, level) = (view.tab_width() as usize, editor::indent_width(view));
+                editor::reindent(view, |line| Some(outdented(line, tab, level)));
+                view.scroll_mark_onscreen(&view.buffer().get_insert());
+            }
             glib::Propagation::Stop
         }
         _ => match key.to_unicode().filter(|c| !c.is_control()) {
@@ -300,14 +334,21 @@ pub fn on_key(
 ///
 /// The marker's width aligns nested content with the parent's text and wraps. Insert at
 /// line start to preserve the caret's text position; other lines leave Tab to the view, an org
-/// heading's too.
+/// heading's too. Over a selection of whole lines each line takes its own: an item its marker's
+/// width, any other line a tab, as the view gives it.
 fn on_tab(view: &sourceview5::View, syntax: Syntax) -> glib::Propagation {
     if in_table(view, syntax, TableKey::Tab) {
         return glib::Propagation::Stop;
     }
     let buffer = view.buffer();
-    if buffer.has_selection() {
-        return glib::Propagation::Proceed;
+    if let Some((start, end)) = buffer.selection_bounds() {
+        // Within a line, a selection is replaced by the tab, as anywhere else.
+        if start.line() == end.line() && !(start.starts_line() && end.ends_line()) {
+            return glib::Propagation::Proceed;
+        }
+        editor::reindent(view, |line| indented(line, syntax));
+        view.scroll_mark_onscreen(&buffer.get_insert());
+        return glib::Propagation::Stop;
     }
     let at = caret(&buffer);
     let mut start = at;
@@ -743,6 +784,49 @@ mod tests {
             "the box is content"
         );
         assert_eq!(list_indent("\t- ").as_deref(), Some("\t"), "tabs stay tabs");
+    }
+
+    /// Shift+Tab takes back what Tab gave an item, at every depth: a fourth-level `- ` item goes
+    /// to the third, where taking the Indent Width's four columns off sent it to the second.
+    #[test]
+    fn back_tab_undoes_tab_on_an_item() {
+        for item in ["- d", "1. d", "12. d", "- [ ] d", "> d", "\t- d"] {
+            let mut line = item.to_string();
+            let mut depths = vec![line.clone()];
+            for _ in 0..3 {
+                line = list_indent(&line).unwrap() + &line;
+                depths.push(line.clone());
+            }
+            for depth in depths.iter().rev().skip(1) {
+                let lead = outdented(&line, 4, 4);
+                line = lead + line.trim_start_matches([' ', '\t']);
+                assert_eq!(&line, depth, "{item:?}");
+            }
+        }
+        assert_eq!(outdented("      - d", 4, 4), "    ");
+        // An item short of its marker's width goes to the margin; a heading has no indent.
+        assert_eq!(outdented(" - d", 4, 4), "");
+        assert_eq!(outdented("* heading", 4, 4), "");
+    }
+
+    /// A line that is no item goes back a stop, as in code, a tab at a time where it has tabs.
+    #[test]
+    fn back_tab_on_prose_goes_to_the_stop_before() {
+        assert_eq!(outdented("\t\tprose", 4, 4), "\t");
+        assert_eq!(outdented("      prose", 4, 4), "    ");
+        assert_eq!(outdented("prose", 4, 4), "");
+    }
+
+    /// Tab over whole lines gives each its own step, an item its marker's width, and leaves an
+    /// empty line and an org heading as they are.
+    #[test]
+    fn tab_over_lines_steps_each_by_its_own() {
+        assert_eq!(indented("  - b", Syntax::Markdown).as_deref(), Some("    "));
+        assert_eq!(indented("1. a", Syntax::Markdown).as_deref(), Some("   "));
+        assert_eq!(indented("prose", Syntax::Markdown).as_deref(), Some("\t"));
+        assert_eq!(indented("", Syntax::Markdown), None);
+        assert_eq!(indented("* heading", Syntax::Org), None);
+        assert_eq!(indented("* item", Syntax::Markdown).as_deref(), Some("  "));
     }
 
     /// An item is indented from anywhere on its line, whatever is written after the marker;

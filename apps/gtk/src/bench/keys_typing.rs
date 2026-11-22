@@ -44,6 +44,13 @@ pub(super) fn bench_table(view: &multicaret::View) {
     buffer.place_cursor(&at(&buffer, 2, 3));
     press("org_tab", Syntax::Org, gdk::Key::Tab);
     press("org_enter_adds_row", Syntax::Org, gdk::Key::Return);
+    // Shift+Tab on a fourth-level item takes it to the third, back by what Tab gave it, and
+    // Tab over the lines steps each by its own marker.
+    buffer.set_text("- a\n  - b\n    - c\n      - d");
+    buffer.place_cursor(&buffer.end_iter());
+    press("list_back_tab", markdown, gdk::Key::ISO_Left_Tab);
+    buffer.select_range(&buffer.end_iter(), &at(&buffer, 2, 0));
+    press("list_tab_lines", markdown, gdk::Key::Tab);
 }
 
 /// A code tab's Return and closers through [`editor::indent_key`], as a press in a code tab
@@ -101,6 +108,11 @@ pub(super) fn bench_indent(view: &multicaret::View) {
     set(Some("rust"), "\tg(");
     press("tabs", gdk::Key::Return);
     view.set_insert_spaces_instead_of_tabs(true);
+    // Shift+Tab over two lines takes each to the stop before it, a tab and spaces keeping the
+    // tab, and with no language too.
+    set(None, "\t  a\n      b");
+    buffer.select_range(&buffer.end_iter(), &buffer.start_iter());
+    press("back_tab", gdk::Key::ISO_Left_Tab);
     // Insert Line Below from the start of the line takes the same rule.
     set(Some("python3"), "def f():  # x");
     buffer.place_cursor(&buffer.start_iter());

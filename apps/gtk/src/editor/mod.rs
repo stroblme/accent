@@ -47,6 +47,7 @@ use follow::Follow;
 pub(crate) use follow::url_under;
 #[cfg(feature = "bench")]
 pub(crate) use indent::on_key as indent_key;
+pub(crate) use indent::{reindent, stop_before, width as indent_width};
 pub(crate) use keys::attach as attach_keys;
 #[cfg(feature = "bench")]
 pub(crate) use keys::press;
