@@ -10,11 +10,11 @@
 //! are watched; with them off it settles in one go. How the canvas wants the graph drawn, its
 //! camera, size and what is lit, goes to the worker as each frame is drawn, and until a picture
 //! of that comes back the last one is moved and scaled to the camera (user decision 2026-11-21),
-//! so panning, zooming and the pointer never wait on the worker. A picture of a camera the reader
-//! moved reaches [`OVERSCAN`] past the canvas's edges, so a pan or a zoom out finds it drawn
-//! there meanwhile, and one that lights another node, or shows the still layout at another zoom,
-//! crossfades in over the one shown (user decision 2026-11-22). The names follow the picture on
-//! screen, placed best first wherever they overlap none placed before.
+//! so panning, zooming and the pointer never wait on the worker. A picture that lights another
+//! node crossfades in over the one shown (user decision 2026-11-22), as one of the still layout
+//! at another zoom does, and a picture of a camera the reader moved reaches [`OVERSCAN`] past the
+//! canvas's edges, so a pan or a zoom out finds it drawn there meanwhile. The names follow the
+//! picture on screen, placed best first wherever they overlap none placed before.
 
 use std::cell::{Cell, RefCell};
 use std::collections::hash_map::Entry;
@@ -47,8 +47,9 @@ const FADE_MS: u32 = 150;
 /// from one neighbourhood straight to the next (user decision 2026-11-22).
 const LINGER: Duration = Duration::from_millis(150);
 /// How far past each edge a picture of a camera the reader moved is drawn, as a share of the
-/// canvas's width and height: a pan of an eighth of the canvas, or a zoom step out from 50 % up,
-/// still finds the picture there until the next one lands.
+/// canvas's width and height: a pan of an eighth of the canvas, or a zoom step out from 90 % up
+/// round any point and from 50 % up round the middle, still finds the picture there until the
+/// next one lands.
 const OVERSCAN: f64 = 0.125;
 
 /// A press and whether it is still a click: where it went down and the node under it.
