@@ -500,6 +500,30 @@ fn pick_shown(row: &adw::ComboRow, read: Read<Option<usize>>) {
     say_mixed(row, read.mixed);
 }
 
+/// Show `read`, an entry and the value as the file writes it, in a combo row whose first
+/// `listed` entries are a menu's: a value the menu does not list (no entry) as an entry of its
+/// own after them, named as the file writes it, as draw.io's font menu names whatever font the
+/// cell has, then Mixed where the cells differ ([`pick_shown`]).
+fn pick_own(row: &adw::ComboRow, listed: usize, read: Read<(Option<usize>, String)>) {
+    let (at, own) = read.value;
+    if let Some(list) = row.model().and_downcast::<gtk::StringList>() {
+        let n = listed as u32;
+        let own: &[&str] = match at {
+            Some(_) => &[],
+            None => &[own.as_str()],
+        };
+        list.splice(n, list.n_items().saturating_sub(n), own);
+    }
+    let value = Some(at.unwrap_or(listed));
+    pick_shown(
+        row,
+        Read {
+            value,
+            mixed: read.mixed,
+        },
+    );
+}
+
 pub struct Props {
     root: gtk::ScrolledWindow,
     filling: Rc<Cell<bool>>,

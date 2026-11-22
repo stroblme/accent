@@ -696,6 +696,24 @@ pub(super) fn props(app: &Rc<App>, rel: &str) {
             )
         });
         println!("bench diagram props line picked={picked:?}");
+        // A route and a head draw.io's menus do not offer show as entries of their own, named
+        // as the file writes them, where the rows kept what they showed last.
+        let unlisted = [
+            ("edgeStyle", Some("entityRelationEdgeStyle")),
+            ("endArrow", Some("manyOptional")),
+        ];
+        let e = vec!["e".to_string()];
+        tab.edit(|ed, page| ed.set_styles(page, &e, &unlisted));
+        let own = ["Waypoints", "End"].map(|t| {
+            let item = row(t).and_downcast::<adw::ComboRow>()?.selected_item();
+            Some(
+                item.and_downcast::<gtk::StringObject>()?
+                    .string()
+                    .to_string(),
+            )
+        });
+        println!("bench diagram props line own={own:?}");
+        tab.undo();
         // draw.io's fonts, label positions and word wrap on a shape; a label's colours.
         let switch_of = |title: &str| {
             find_widget(&row(title)?, &|w| w.is::<gtk::Switch>()).and_downcast::<gtk::Switch>()
@@ -807,6 +825,21 @@ pub(super) fn props(app: &Rc<App>, rel: &str) {
             style("a"),
             [picked("Pattern"), picked("Font")]
         );
+        // a's own font, picked over a and b, goes onto both.
+        tab.select(vec!["a".to_string(), "b".to_string()]);
+        choose("Font", "Inter");
+        let font = |id: &str| {
+            style(id)
+                .filter(|s| s.contains("fontFamily=Inter"))
+                .is_some()
+        };
+        println!(
+            "bench diagram props own font a={} b={}",
+            font("a"),
+            font("b")
+        );
+        tab.undo();
+        tab.select(vec!["a".to_string()]);
         glib::timeout_future(Duration::from_millis(400)).await;
         pane_shot("shape");
         // Fixed Corner Size writes the corner a is drawn with as a size of its own, and back.

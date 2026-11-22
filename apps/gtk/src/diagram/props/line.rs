@@ -10,7 +10,7 @@ use adw::prelude::*;
 
 use super::{
     Cells, Change, ColourRow, Props, Read, Seen, Styles, choose, colour, combo, entry_row, owned,
-    pick_shown, picture_key, show, spin,
+    pick_own, pick_shown, picture_key, show, spin,
 };
 
 /// draw.io's arrow heads (`Format.addLineMarkerItems`): the style value, whether the head is
@@ -416,11 +416,25 @@ impl Line {
             (&self.start, &self.start_size, true),
             (&self.end, &self.end_size, false),
         ];
+        // A head or a route draw.io's menu does not offer is an entry of its own, which writes
+        // nothing when picked.
+        let listed = if flex { FLEX_HEADS.len() } else { HEADS.len() };
         for (row, size, start) in heads {
-            pick_shown(row, styles.read(Cells::Arrows, |s| head_of(s, start, flex)));
-            show(size, read(Cells::Arrows, head_keys(start)[2], 6.0));
+            let [arrow, _, size_key] = head_keys(start);
+            let head = styles.read(Cells::Arrows, |s| {
+                let kind = s.get(arrow).unwrap_or("none").to_string();
+                (head_of(s, start, flex), kind)
+            });
+            pick_own(row, listed, head);
+            show(size, read(Cells::Arrows, size_key, 6.0));
         }
-        pick_shown(&self.waypoints, styles.read(Cells::Arrows, route_of));
+        let route = styles.read(Cells::Arrows, |s| {
+            (
+                route_of(s),
+                s.get("edgeStyle").unwrap_or_default().to_string(),
+            )
+        });
+        pick_own(&self.waypoints, WAYPOINTS.len(), route);
         let corners = styles.read(Cells::Arrows, |s| Some(corners_of(s)));
         pick_shown(&self.line_style, corners);
     }

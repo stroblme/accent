@@ -8,8 +8,8 @@ use accent_drawio::{Color, Resolved};
 use adw::prelude::*;
 
 use super::{
-    Cells, Change, Check, ColourRow, Props, Read, Styles, choose, colour, combo, owned, pick,
-    pick_shown, show, spin, style,
+    Cells, Change, Check, ColourRow, MIXED, Props, Styles, choose, colour, combo, owned, pick,
+    pick_own, pick_shown, show, spin, style,
 };
 
 /// draw.io's fonts (`Menus.defaultFonts`).
@@ -169,7 +169,15 @@ impl Text {
                 send(Change::FontStyle(bit, button.is_active()));
             });
         }
-        pick(&self.font, &send, Cells::All, "fontFamily", FONTS.to_vec());
+        // Each entry writes its name, the first cell's own font beyond draw.io's list too, so
+        // picking that gives it to every cell selected; Mixed writes nothing.
+        let set = style(&send, Cells::All, "fontFamily");
+        self.font.connect_selected_notify(move |row| {
+            let font = row.selected_item().and_downcast::<gtk::StringObject>();
+            if let Some(font) = font.map(|f| f.string()).filter(|f| f.as_str() != MIXED) {
+                set(Some(font.to_string()));
+            }
+        });
         let align = ALIGN.map(|(v, _)| v).to_vec();
         pick(&self.align, &send, Cells::All, "align", align);
         let valign = VALIGN.map(|(v, _)| v).to_vec();
@@ -239,25 +247,13 @@ impl Text {
             };
             button.update_state(&[gtk::accessible::State::Pressed(pressed)]);
         }
-        // A font draw.io's list does not have is an entry of its own, as draw.io's menu
-        // names whatever font the cell has, the first cell's where they differ.
-        let family = styles.read(Cells::All, |s| {
-            s.get("fontFamily").unwrap_or(FONTS[0]).to_string()
+        // A font draw.io's list does not have is an entry of its own, the first cell's where
+        // they differ.
+        let font = styles.read(Cells::All, |s| {
+            let family = s.get("fontFamily").unwrap_or(FONTS[0]);
+            (FONTS.iter().position(|f| *f == family), family.to_string())
         });
-        let own: &[&str] = match FONTS.contains(&family.value.as_str()) {
-            true => &[],
-            false => &[family.value.as_str()],
-        };
-        if let Some(fonts) = self.font.model().and_downcast::<gtk::StringList>() {
-            let n = FONTS.len() as u32;
-            fonts.splice(n, fonts.n_items() - n, own);
-        }
-        let font = FONTS.iter().position(|f| *f == family.value);
-        let font = Read {
-            value: Some(font.unwrap_or(FONTS.len())),
-            mixed: family.mixed,
-        };
-        pick_shown(&self.font, font);
+        pick_own(&self.font, FONTS.len(), font);
         // Centred and in the middle where the style says nothing, as mxGraph aligns a label.
         let at = |values: &[&str], v: &str| values.iter().position(|x| *x == v);
         let aligns = ALIGN.map(|(v, _)| v);
