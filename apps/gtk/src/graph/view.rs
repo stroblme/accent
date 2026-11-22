@@ -1137,9 +1137,10 @@ impl GraphView {
         }
         let shown = names.iter().map(|(i, ..)| graph.nodes[*i].key.clone());
         imp.shown.replace(shown.collect());
-        // The backdrops first, so none covers a name, one shape for each strength among them.
+        // The backdrops first, so none covers a name: a rounded colour each, which GL and Vulkan
+        // draw directly, where a filled path is drawn into a mask first, every frame.
         let page = crate::highlight::page(adw::StyleManager::default().is_dark());
-        let mut backdrops: Vec<(f32, gsk::PathBuilder)> = Vec::new();
+        let [x, y] = BACKDROP_PAD;
         let mut texts = Vec::with_capacity(names.len());
         for (i, layout, alpha) in names {
             let (width, height) = layout.pixel_size();
@@ -1147,29 +1148,16 @@ impl GraphView {
                 (screen[i][0] + radius(i) + 3.0) as f32,
                 (screen[i][1] - f64::from(height) / 2.0) as f32,
             );
-            let shade = theme::GRAPH_BACKDROP_ALPHA * alpha;
-            let k = match backdrops.iter().position(|(s, _)| *s == shade) {
-                Some(k) => k,
-                None => {
-                    backdrops.push((shade, gsk::PathBuilder::new()));
-                    backdrops.len() - 1
-                }
-            };
-            let [x, y] = BACKDROP_PAD;
             let room = graphene::Rect::new(
                 at.x() - x,
                 at.y() - y,
                 width as f32 + 2.0 * x,
                 height as f32 + 2.0 * y,
             );
-            backdrops[k]
-                .1
-                .add_rounded_rect(&gsk::RoundedRect::from_rect(room, BACKDROP_RADIUS));
+            snapshot.push_rounded_clip(&gsk::RoundedRect::from_rect(room, BACKDROP_RADIUS));
+            snapshot.append_color(&theme::at(page, theme::GRAPH_BACKDROP_ALPHA * alpha), &room);
+            snapshot.pop();
             texts.push((layout, at, alpha));
-        }
-        for (shade, shape) in backdrops {
-            let colour = theme::at(page, shade);
-            snapshot.append_fill(&shape.to_path(), gsk::FillRule::Winding, &colour);
         }
         for (layout, at, alpha) in texts {
             snapshot.save();
