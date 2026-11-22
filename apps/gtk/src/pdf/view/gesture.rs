@@ -15,6 +15,7 @@ use crate::pdf::tools::{
     drag_matrix, drag_of, handle_at, lock_axis, on_knob, rotate_handle, shape_of, snap, snap_angle,
     turn_matrix, width_of,
 };
+use crate::scrollable::edge_speed;
 
 impl PdfView {
     /// The pointer's controllers: hover, a drag that selects, draws, erases or adjusts by the
@@ -54,13 +55,23 @@ impl PdfView {
             obj,
             move |gesture, x, y| {
                 obj.imp().drag_from.set(Some((x, y)));
+                obj.imp().drag_scroll.set(obj.scroll_offset());
                 obj.imp().held.set(false);
+                obj.imp().moved.set(false);
+                obj.imp().reach.set(None);
                 let hand = hand_of(gesture);
+                obj.imp().drag_hand.set(hand);
                 obj.note_hand(hand);
                 // A pen or an eraser claims the sequence at once, unlike a selection, which
                 // waits to see whether the pointer moves: a stroke that let the scrolled
                 // window have the first few pixels would scroll the page under the hand.
                 let mode = obj.effective_mode(gesture);
+                // A few pixels of travel is a click with a shaky hand, not a selection, and a
+                // tool's click may travel a little more with a pen, which wobbles as it lands.
+                obj.imp().slop.set(match mode {
+                    None | Some(Mode::Read) => 3.0,
+                    Some(_) => crate::widgets::click_slop(gesture),
+                });
                 // A press on a handle moves that end, whatever pressed, unless it draws: claimed
                 // at once, so the scrolled window does not pan that touch nor a long press start
                 // a selection of its own. A mouse press anywhere else puts the handles away.
@@ -125,78 +136,13 @@ impl PdfView {
             #[weak]
             obj,
             move |gesture, dx, dy| {
-                if obj.imp().grip.get().is_some() {
-                    return obj.drag_grip(dx, dy);
+                let imp = obj.imp();
+                let slop = imp.slop.get();
+                if dx.abs() >= slop || dy.abs() >= slop {
+                    imp.moved.set(true);
                 }
-                let Some((x, y)) = obj.imp().drag_from.get() else {
-                    return;
-                };
-                // A finger's drag is a selection once a long press has made it one, and until
-                // then the scrolled window's to pan.
-                let held = obj.imp().held.get().then_some(Mode::Read);
-                let Some(mode) = obj.imp().drag_mode.get().or(held) else {
-                    return;
-                };
-                match mode {
-                    Mode::Text => {}
-                    Mode::Read => {
-                        // A few pixels of travel is a click with a shaky hand, not a
-                        // selection. And the strip selects nothing: a drag there moves the
-                        // page, which is its drag source's to claim (`organize.rs`).
-                        if dx.abs() < 3.0 && dy.abs() < 3.0 || obj.imp().thumbnails.get() {
-                            return;
-                        }
-                        gesture.set_state(gtk::EventSequenceState::Claimed);
-                        obj.drag_select((x, y), (x + dx, y + dy), hand_of(gesture));
-                    }
-                    mode if mode.draws() => {
-                        // The page is whichever one the stroke began on: a hand that runs
-                        // over the edge keeps drawing on the paper it started on.
-                        let page = match obj.imp().strokes.borrow().last() {
-                            Some(stroke) if !stroke.done => stroke.page,
-                            _ => return,
-                        };
-                        let at = obj.point_on(page, x + dx, y + dy);
-                        let shift =
-                            (gesture.current_event_state()).contains(gdk::ModifierType::SHIFT_MASK);
-                        let merged: Vec<(f32, f32)> = match mode.shapes() {
-                            true => Vec::new(),
-                            false => merged(gesture, &obj)
-                                .into_iter()
-                                .map(|(x, y)| obj.point_on(page, x, y))
-                                .collect(),
-                        };
-                        if let Some(stroke) = obj.imp().strokes.borrow_mut().last_mut()
-                            && !stroke.done
-                        {
-                            // A shape is its two ends, the press and wherever the hand is.
-                            if mode.shapes() {
-                                let anchor = stroke.points[0];
-                                stroke.points.truncate(1);
-                                // With Shift a line keeps to steps of 15°, on the paper.
-                                let size = obj.page_size(page).unwrap_or((f32::MAX, f32::MAX));
-                                let on_paper = |(x, y): (f32, f32)| {
-                                    (x.clamp(0.0, size.0), y.clamp(0.0, size.1))
-                                };
-                                stroke.points.push(match mode {
-                                    Mode::Line if shift => on_paper(snap_angle(anchor, at)),
-                                    Mode::Line => snap(anchor, at),
-                                    _ => at,
-                                });
-                            } else {
-                                stroke.points.extend(merged);
-                                stroke.points.push(at);
-                            }
-                        }
-                        obj.queue_draw();
-                    }
-                    Mode::Select => {
-                        let state = gesture.current_event_state();
-                        let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
-                        obj.select_drag(gesture, dx, dy, shift)
-                    }
-                    _ => obj.erase_at(x + dx, y + dy),
-                }
+                let shift = (gesture.current_event_state()).contains(gdk::ModifierType::SHIFT_MASK);
+                obj.drag_to(Some(gesture), dx, dy, shift);
             }
         ));
         drag.connect_drag_end(glib::clone!(
@@ -206,6 +152,11 @@ impl PdfView {
                 obj.loupe(None);
                 let from = obj.imp().drag_from.replace(None);
                 let held = obj.imp().held.replace(false);
+                obj.imp().reach.set(None);
+                // Within the few pixels a click is allowed, more for a pen's tool, unless it went
+                // further and came back.
+                let slop = obj.imp().slop.get();
+                let moved = obj.imp().moved.replace(false) || dx.abs() >= slop || dy.abs() >= slop;
                 // A handle let go is no click, however little it moved.
                 if obj.drop_grip() {
                     return;
@@ -218,9 +169,7 @@ impl PdfView {
                     f();
                 }
                 if mode == Some(Mode::Select) {
-                    // The few pixels a click is allowed below, more for a pen, and Ctrl for a copy.
-                    let slop = crate::widgets::click_slop(drag);
-                    let moved = dx.abs() >= slop || dy.abs() >= slop;
+                    // Ctrl for a copy.
                     let state = drag.current_event_state();
                     return obj
                         .select_release(moved, state.contains(crate::platform::PRIMARY_MODIFIER));
@@ -258,16 +207,15 @@ impl PdfView {
                     }
                     return;
                 }
-                // The same few pixels the update handler calls a shaky hand rather than a
-                // selection: what is left is a click, and a click can be on a highlight. A long
+                // Within the same few pixels the update handler calls a shaky hand rather than a
+                // selection, what is left is a click, and a click can be on a highlight. A long
                 // press is none, nor a touch a pinch took: a denial leaves its state, and a
                 // cancel forgot where the drag began.
                 let taken = drag.current_sequence().is_some_and(|sequence| {
                     drag.sequence_state(&sequence) == gtk::EventSequenceState::Denied
                 });
                 if let Some((x, y)) = from
-                    && dx.abs() < 3.0
-                    && dy.abs() < 3.0
+                    && !moved
                     && !held
                     && !taken
                     && !obj.imp().thumbnails.get()
@@ -290,6 +238,7 @@ impl PdfView {
             obj,
             move |_, _| {
                 obj.imp().drag_from.set(None);
+                obj.imp().reach.set(None);
                 obj.drop_grip();
                 obj.loupe(None);
             }
@@ -362,6 +311,152 @@ impl PdfView {
     fn effective_mode(&self, controller: &impl IsA<gtk::EventController>) -> Option<Mode> {
         let mouse_draws = self.imp().style.borrow().mouse || !stylus_attached();
         drag_of(self.imp().mode.get(), hand_of(controller), mouse_draws)
+    }
+
+    /// The drag under way has gone `(dx, dy)` from its press, with Shift held or not: a report of
+    /// `gesture`, or with none a frame of [`Self::edge_scroll`] taking the drag up again as the
+    /// page moves under a pointer at rest. What is dragged goes to the page under the pointer,
+    /// however far the view has scrolled since the press.
+    fn drag_to(&self, gesture: Option<&gtk::GestureDrag>, dx: f64, dy: f64, shift: bool) {
+        let imp = self.imp();
+        if imp.grip.get().is_some() {
+            self.drag_grip(dx, dy);
+            return self.edge_scroll(dx, dy, shift);
+        }
+        let Some((x, y)) = imp.drag_from.get() else {
+            return;
+        };
+        // A finger's drag is a selection once a long press has made it one, and until then the
+        // scrolled window's to pan.
+        let held = imp.held.get().then_some(Mode::Read);
+        let Some(mode) = imp.drag_mode.get().or(held) else {
+            return;
+        };
+        // The positions GDK merged into the report, which a frame of the scroll has none of.
+        let history = || gesture.map(|g| merged(g, self)).unwrap_or_default();
+        match mode {
+            Mode::Text => {}
+            Mode::Read => {
+                // A shaky click is no selection. And the strip selects nothing: a drag there
+                // moves the page, which is its drag source's to claim (`organize.rs`).
+                if !imp.moved.get() || imp.thumbnails.get() {
+                    return;
+                }
+                if let Some(gesture) = gesture {
+                    gesture.set_state(gtk::EventSequenceState::Claimed);
+                }
+                // It runs from the text pressed, wherever the view has scrolled that to.
+                let (sx, sy) = self.scrolled();
+                self.drag_select((x - sx, y - sy), (x + dx, y + dy), imp.drag_hand.get());
+                self.edge_scroll(dx, dy, shift);
+            }
+            mode if mode.draws() => {
+                // The page is whichever one the stroke began on: a hand that runs over the edge
+                // keeps drawing on the paper it started on.
+                let page = match imp.strokes.borrow().last() {
+                    Some(stroke) if !stroke.done => stroke.page,
+                    _ => return,
+                };
+                let at = self.point_on(page, x + dx, y + dy);
+                let merged: Vec<(f32, f32)> = match mode.shapes() {
+                    true => Vec::new(),
+                    false => (history().into_iter())
+                        .map(|(x, y)| self.point_on(page, x, y))
+                        .collect(),
+                };
+                if let Some(stroke) = imp.strokes.borrow_mut().last_mut()
+                    && !stroke.done
+                {
+                    // A shape is its two ends, the press and wherever the hand is.
+                    if mode.shapes() {
+                        let anchor = stroke.points[0];
+                        stroke.points.truncate(1);
+                        // With Shift a line keeps to steps of 15°, on the paper.
+                        let size = self.page_size(page).unwrap_or((f32::MAX, f32::MAX));
+                        let on_paper =
+                            |(x, y): (f32, f32)| (x.clamp(0.0, size.0), y.clamp(0.0, size.1));
+                        stroke.points.push(match mode {
+                            Mode::Line if shift => on_paper(snap_angle(anchor, at)),
+                            Mode::Line => snap(anchor, at),
+                            _ => at,
+                        });
+                    } else {
+                        stroke.points.extend(merged);
+                        stroke.points.push(at);
+                    }
+                }
+                self.queue_draw();
+                self.edge_scroll(dx, dy, shift);
+            }
+            Mode::Select => {
+                self.select_drag(dx, dy, shift, &history());
+                self.edge_scroll(dx, dy, shift);
+            }
+            _ => self.erase_at(x + dx, y + dy),
+        }
+    }
+
+    /// Scroll the view a frame at a time while a drag that has gone `(dx, dy)` from its press,
+    /// with Shift held or not, rests near its edge or past it, as a diagram's canvas does
+    /// (`scrollable::edge_speed`), taking the drag up again each frame. Only once it is a drag,
+    /// so a click near the edge scrolls nothing.
+    fn edge_scroll(&self, dx: f64, dy: f64, shift: bool) {
+        let imp = self.imp();
+        if !imp.moved.get() {
+            return;
+        }
+        imp.reach.set(Some(((dx, dy), shift)));
+        if imp.ticking.replace(true) {
+            return;
+        }
+        self.add_tick_callback(|view, _| {
+            let imp = view.imp();
+            let (Some(((dx, dy), shift)), Some((x, y))) = (imp.reach.get(), imp.drag_from.get())
+            else {
+                imp.ticking.set(false);
+                return glib::ControlFlow::Break;
+            };
+            let (w, h) = (f64::from(view.width()), f64::from(view.height()));
+            let by = (edge_speed(x + dx, w, EDGE), edge_speed(y + dy, h, EDGE));
+            let from = view.scroll_offset();
+            imp.scroll.set_scroll(view.kept_to_page(from, by));
+            // At rest away from the edge, or as far as it may scroll.
+            if view.scroll_offset() == from {
+                imp.ticking.set(false);
+                return glib::ControlFlow::Break;
+            }
+            view.drag_to(None, dx, dy, shift);
+            glib::ControlFlow::Continue
+        });
+    }
+
+    /// The view's scroll `from` moved on `by`, for a drag that keeps to its page, a Select drag
+    /// or a stroke, only until that page's edge is in view: past it, what is dragged would stop
+    /// at the edge and the pointer go on without it.
+    fn kept_to_page(&self, (sx, sy): (f64, f64), (bx, by): (f64, f64)) -> (f64, f64) {
+        let imp = self.imp();
+        let lasso = imp.lasso.borrow().as_ref().map(|l| l.page);
+        let held = || (imp.picked.borrow().as_ref()).and_then(|s| s.handle.map(|_| s.page));
+        let stroke = || (imp.strokes.borrow().last()).and_then(|s| (!s.done).then_some(s.page));
+        let page = lasso.or_else(held).or_else(stroke);
+        let Some(r) = page.and_then(|page| imp.layout.borrow().pages.get(page).copied()) else {
+            return (sx + bx, sy + by);
+        };
+        // Towards the end until the page's far edge meets the view's, towards the start until
+        // its near edge does, and never back from where it is.
+        let keep = |s: f64, by: f64, start: f32, length: f32, view: f64| match by > 0.0 {
+            true => (s + by).min((f64::from(start + length) - view).max(s)),
+            false => (s + by).max(f64::from(start).min(s)),
+        };
+        let (w, h) = (f64::from(self.width()), f64::from(self.height()));
+        (keep(sx, bx, r.x, r.w, w), keep(sy, by, r.y, r.h, h))
+    }
+
+    /// How far the view has scrolled since the drag under way began, which has moved its press in
+    /// the view's coordinates.
+    fn scrolled(&self) -> (f64, f64) {
+        let ((ox, oy), (px, py)) = (self.scroll_offset(), self.imp().drag_scroll.get());
+        (ox - px, oy - py)
     }
 
     /// Under a stylus with a tool in hand the pointer is a dot where the ink will go; under
@@ -525,22 +620,30 @@ impl PdfView {
             .or_else(|| pictures.iter().rev().find(inside).map(Picked::picture))
     }
 
-    /// The drag so far: the lasso drawn on, or what the Select tool holds moved, stretched or
-    /// turned, `snap` (Shift) turning in steps of 15° and keeping a move to the axis it goes
+    /// The drag so far, `(dx, dy)` from its press: the lasso drawn on through the positions
+    /// `merged` into the report, or what the Select tool holds moved, stretched or turned once it
+    /// is a drag, `snap` (Shift) turning in steps of 15° and keeping a move to the axis it goes
     /// furthest along. A move stops at the page's edge.
-    fn select_drag(&self, gesture: &gtk::GestureDrag, dx: f64, dy: f64, snap: bool) {
+    fn select_drag(&self, dx: f64, dy: f64, snap: bool, merged: &[(f64, f64)]) {
         let Some((x, y)) = self.imp().drag_from.get() else {
             return;
         };
         if let Some(lasso) = self.imp().lasso.borrow_mut().as_mut() {
             let page = lasso.page;
-            let merged = merged(gesture, self).into_iter();
-            let merged = merged.filter_map(|(x, y)| self.on_page(page, x, y));
+            let merged = merged.iter().filter_map(|&(x, y)| self.on_page(page, x, y));
             lasso.points.extend(merged);
             lasso.points.extend(self.on_page(page, x + dx, y + dy));
             self.queue_draw();
             return;
         }
+        // A press moves nothing until it is a drag, however a pen's tap wobbles (user decision
+        // 2026-11-19), and shows nothing moved either.
+        if !self.imp().moved.get() {
+            return;
+        }
+        // From the press where the view shows it now, its scroll since taken into the drag.
+        let (sx, sy) = self.scrolled();
+        let (x, y, dx, dy) = (x - sx, y - sy, dx + sx, dy + sy);
         let scale = self.imp().layout.borrow().scale;
         if let Some(s) = self.imp().picked.borrow_mut().as_mut()
             && let Some(handle) = s.handle
@@ -828,6 +931,10 @@ impl PdfView {
         Some((page, layout.to_page(page, cx, cy)?))
     }
 }
+
+/// How near the view's edge a drag scrolls it, in pixels: a diagram canvas's, draw.io's
+/// `scrollPointToVisible` border.
+const EDGE: f64 = 20.0;
 
 /// The edge of a box, round from its top-left corner, as a polyline: how a lasso measures a
 /// text, and the eraser too.

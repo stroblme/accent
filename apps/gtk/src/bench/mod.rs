@@ -295,8 +295,9 @@ use user_commands::bench_commands;
 ///   on a heading at the view's top and at its left edge, a pen's and a mouse's, and a real mouse
 ///   drag through XTEST, each with the loupe's place, what it enlarges and how long its band took,
 ///   held two seconds for a screenshot at `bench loupe hold`; the selection's handles dragged out
-///   and back by a finger and by an XTEST mouse; lines over a 30,000-point plot and a drag down
-///   them a step a frame; writes and removes `loupe-drill.pdf`),
+///   and back by a finger and by an XTEST mouse; an XTEST mouse's drag held at the view's bottom
+///   edge, which scrolls the selection on to the second page; lines over a 30,000-point plot and
+///   a drag down them a step a frame; writes and removes `loupe-drill.pdf`),
 ///   `form` (the fixture form's fields as the tab reads them, the pointer and the tooltip over
 ///   each, a check box and a radio button clicked, a text field typed into at 100 % and 200 %, a
 ///   combo box's and a list box's options picked, Tab through every field, Space, Reset Form and
@@ -328,9 +329,9 @@ use user_commands::bench_commands;
 ///   the seat and sized on the ring before anything is typed, text typed and finished each way,
 ///   typed again and sized again, moved, erased and emptied, with Undo, against the file,
 ///   pictured into `$TMPDIR`; writes the file),
-///   `select:<rel_path>[,<n>]` (the Select tool through XTEST: a lasso, moves, copy, cut, paste,
-///   duplicate, delete, the arrows, a corner and a recolour through the ring's Colour and through
-///   the palette's Recolour Selection, with Undo, against the file, pictured light and dark into
+///   `select:<rel_path>[,<n>]` (the Select tool through XTEST: a lasso, moves, a wobbling press, a
+///   move held at the view's edge, copy, cut, paste, duplicate, delete, the arrows, a corner and a
+///   recolour through the ring's Colour and through the palette's Recolour Selection, with Undo, against the file, pictured light and dark into
 ///   `$TMPDIR`; with `n` strokes, the render thread's time to move and delete them all; then
 ///   another editor's stroke recoloured, in `select-foreign.pdf` beside it; writes both files),
 ///   `picture:<rel_path>` (pictures pasted from the clipboard through XTEST, again and undone,

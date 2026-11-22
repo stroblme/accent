@@ -373,6 +373,13 @@ impl PdfView {
         picked.as_ref().map(|s| (s.page, s.bounds(), s.items.len()))
     }
 
+    /// What the drag under way has made of what the Select tool holds so far, as it is painted.
+    /// Only `ACCENT_BENCH_PDF=select:` asks.
+    #[cfg(feature = "bench")]
+    pub fn picked_matrix(&self) -> Option<accent_core::pdf::Matrix> {
+        self.imp().picked.borrow().as_ref().map(|s| s.matrix)
+    }
+
     /// How many lists of a page the render thread has sent the tools. Only
     /// `ACCENT_BENCH_PDF=pen:` reads it.
     #[cfg(feature = "bench")]
@@ -1031,6 +1038,22 @@ mod imp {
         pub selection: RefCell<Vec<(usize, Vec<accent_core::pdf::Rect>)>>,
         /// Where a drag began, in widget coordinates, while one is in progress.
         pub drag_from: Cell<Option<(f64, f64)>>,
+        /// Where the view was scrolled to as that drag began, which the press has moved by since
+        /// ([`super::PdfView::scrolled`]).
+        pub drag_scroll: Cell<(f64, f64)>,
+        /// What pressed for that drag, and how far it may travel and still be a click
+        /// (`widgets::click_slop`).
+        pub drag_hand: Cell<crate::pdf::tools::Hand>,
+        pub slop: Cell<f64>,
+        /// Whether that drag has travelled past its slop, which makes it a drag from then on,
+        /// however near its press it comes back.
+        pub moved: Cell<bool>,
+        /// How far that drag has gone from its press, and whether Shift is held, while it scrolls
+        /// the view at its edge: what each frame of that scroll takes up again
+        /// ([`super::PdfView::edge_scroll`]).
+        pub reach: Cell<Option<((f64, f64), bool)>>,
+        /// Whether a drag near the edge is scrolling the view each frame.
+        pub ticking: Cell<bool>,
         /// What a drag over the page does: select, draw, or erase.
         pub mode: Cell<super::Mode>,
         /// The tool this drag really uses — the mode, or Select for a mouse press while a pen
@@ -1167,6 +1190,12 @@ mod imp {
                 focus_field: Cell::new(None),
                 selection: RefCell::new(Vec::new()),
                 drag_from: Cell::new(None),
+                drag_scroll: Cell::new((0.0, 0.0)),
+                drag_hand: Cell::new(crate::pdf::tools::Hand::Mouse),
+                slop: Cell::new(0.0),
+                moved: Cell::new(false),
+                reach: Cell::new(None),
+                ticking: Cell::new(false),
                 mode: Cell::new(super::Mode::default()),
                 drag_mode: Cell::new(None),
                 held: Cell::new(false),

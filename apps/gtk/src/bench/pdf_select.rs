@@ -1,6 +1,8 @@
 //! The Select tool's drill, `ACCENT_BENCH_PDF=select:<rel>[,<n>]`: on the first page, two lines,
 //! a rectangle and a text of ours written into the file first, then through XTEST a lasso, a
-//! move by a line lying along the box's edge and its Undo, a Ctrl+drag's copies and a Shift+drag
+//! move by a line lying along the box's edge and its Undo, a press wobbling within a click's few
+//! pixels, a move held at the view's bottom edge, which scrolls on, and its Undo, a Ctrl+drag's
+//! copies and a Shift+drag
 //! along one axis, each undone, a copy pasted a step off it, lassos drawn from a stroke not held,
 //! with and without Ctrl, a pick and a delete, Ctrl+click, a cut pasted in place, a click away
 //! and Escape, a group stretched by its corner, a duplicate and the arrows, the lines and the
@@ -181,6 +183,85 @@ pub(super) fn bench_pdf_select(app: &Rc<App>, arg: &str) {
         println!("bench select moved={changed} others_same={others} to={landed:?}");
         undo(false).await;
         println!("bench select undone one_step={}", filed(&path) == drawn);
+
+        // A press on them that wobbles within a click's few pixels shows nothing moved, one past
+        // them does, and back where it began it lets go of nothing moved.
+        super::git::xtest(&lasso(round_left, true)).await;
+        let shown = || reader.picked_matrix().map(|m| (m[4].round(), m[5].round()));
+        if let Some((x, y)) = at((120.0, LEFT[0])) {
+            let still = Some((0.0, 0.0));
+            let step = async |dy: f64| {
+                let steps = format!("move {x:.0} {:.0}; sleep 0.1", y + dy);
+                super::git::xtest(&steps).await;
+                shown()
+            };
+            super::git::xtest(&format!("move {x:.0} {y:.0}; down; sleep 0.1")).await;
+            let wobbled = step(2.0).await == still;
+            let moved = step(12.0).await != still;
+            let back = step(0.0).await == still;
+            super::git::xtest("up").await;
+            save().await;
+            let unmoved = filed(&path) == drawn;
+            println!(
+                "bench select wobble still={wobbled} moved={moved} back={back} unmoved={unmoved}"
+            );
+        }
+
+        // Dragged to the view's bottom edge and held there, they scroll the view on with them,
+        // staying under the pointer as far as their page lets them go, and land there.
+        let screen = |(wx, wy): (f64, f64)| {
+            let p = graphene::Point::new(wx as f32, wy as f32);
+            let p = view.compute_point(&app.window, &p)?;
+            Some((f64::from(p.x()) + sx, f64::from(p.y()) + sy))
+        };
+        let top = || reader.visible_part(0).map_or(0.0, |r| r.top);
+        let pressed =
+            reader.widget_rect(0, &Rect::from_corners((120.0, LEFT[0]), (120.0, LEFT[0])));
+        let (wx, wy) = (
+            pressed.map_or(0.0, |r| f64::from(r.x())),
+            f64::from(reader.height()) - 4.0,
+        );
+        if let (Some((x, y)), Some((ex, ey))) = (at((120.0, LEFT[0])), screen((wx, wy))) {
+            let (before, scale) = (top(), reader.pixels_per_point());
+            let steps = format!(
+                "move {x:.0} {y:.0}; down; sleep 0.1; move {x:.0} {:.0}; sleep 0.1; \
+                 move {ex:.0} {ey:.0}; sleep 0.6",
+                y + 20.0
+            );
+            super::git::xtest(&steps).await;
+            let scrolled = top() - before;
+            // Where the pointer is on the page now, less where it pressed, as far as the page's
+            // bottom lets the box go.
+            let under = reader
+                .page_point(wx, wy)
+                .map(|(_, px, py)| (px - 120.0, py - LEFT[0]));
+            let room = reader
+                .picked_box()
+                .zip(pdf.page_size(0))
+                .map(|((_, b, _), (_, h))| h - b.bottom);
+            let made = reader.picked_matrix().map(|m| (m[4], m[5]));
+            let followed = match (under, room, made) {
+                (Some((ux, uy)), Some(room), Some((mx, my))) => {
+                    (mx - ux).abs() < 1.0 && (my - uy.min(room)).abs() < 1.0
+                }
+                _ => false,
+            };
+            super::git::xtest("up").await;
+            save().await;
+            let landed = filed(&path);
+            let moved_by = made.map_or(0, |(_, my)| my.round() as i32);
+            let near =
+                |(l, t): (i32, i32)| landed.iter().any(|&(x, y)| x == l && (y - t).abs() <= 1);
+            let gone = (drawn.iter().take(2)).all(|&(l, t)| near((l, t + moved_by)));
+            println!(
+                "bench select edge scrolled={} followed={followed} landed={gone} scale={scale:.2}",
+                scrolled > 1.0
+            );
+            undo(false).await;
+            println!("bench select edge_undone {}", filed(&path) == drawn);
+            pdf.goto_page(0);
+            glib::timeout_future(Duration::from_millis(300)).await;
+        }
 
         // Dragged 40 px down by one of them with Ctrl, both are copied there and stay where they
         // were, and one Undo takes the copies back; with Shift, a drag 60 px across and 15 down

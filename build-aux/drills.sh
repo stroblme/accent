@@ -204,7 +204,9 @@ drill_ring_panes() {
 # finger wobbles, sharp once its band has landed and on the screen at the view's top and its left
 # edge, a pen's too and a mouse's not, through the view's own path and through XTEST. The handles
 # it leaves move either end out and back to where it was, under a finger and an XTEST mouse, and
-# a mouse's selection, a key and the keyboard leaving put them away (DESIGN.md, PDF).
+# a mouse's selection, a key and the keyboard leaving put them away. An XTEST mouse's drag held at
+# the view's bottom edge scrolls on, its selection running from the text pressed to the second
+# page (DESIGN.md, PDF).
 drill_pdf_loupe() {
 	test -e "$pdfium" || { echo "SKIPPED the PDF loupe drill: no libpdfium"; return 0; }
 	launch 150 ACCENT_BENCH_PDF=loupe >"$dir/loupe"
@@ -226,6 +228,7 @@ drill_pdf_loupe() {
 		'mouse none .* handles=none' \
 		'xtest_mouse none selected="The loupe.* handles=none' \
 		'xtest_mouse changed=true' \
+		'xtest_edge reached=true kept=true' \
 		'dense shown=true .* source_scale=2 '; do
 		grep -q "^bench loupe $want" "$dir/loupe" || { cat "$dir/loupe"; return 1; }
 	done

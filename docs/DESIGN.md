@@ -1243,6 +1243,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Invert PDF Colours puts one document the other way round: onto the other half's page (Image), or with PDFs off onto the theme's own.
   A theme change, an inversion or the switch renders every tile again, the colours being baked in.
 - A drag selects the text under it, across page breaks as readily as within a page.
+- A drag within 20 px of the view's edge, or past it, scrolls the view a frame at a time and faster the nearer it gets, as a diagram's canvas does, whether it selects text, moves a selection's handle, draws a stroke or a shape, or under Select moves, stretches, turns or lassos, and what it drags stays under the pointer as the page moves.
+  A stroke and a Select drag keep to their page, so they scroll the view only until that page's edge is in view, where what they drag stops too.
 - A secondary click on the page: Go to Source on a LaTeX build (SyncTeX, below), Copy and Copy Link to Selection while something is selected, Select's commands (below), then Add Page Before, Add Page After, Delete Page and Export Highlights — window actions in sections, the terminal's idiom, so the palette lists them and they can be rebound.
 - **A highlight is a link** (Architecture): Copy Link to Selection puts `[[paper.pdf#page=1&selection=0,6,0,15|the quoted text]]` on the clipboard, one per page the drag covered, and pasting it into a note makes the highlight, painted in the accent at alpha 0.2 under the selection and the search marks.
   Clicking one opens the note holding it; following one from a note goes to the page and shows the selection.
@@ -1298,6 +1300,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A click on a stroke, within 4 pt of its edge, on a text's box or on a picture picks that one alone, the stroke first, so ink drawn over a photo stays within reach, while a circle's empty middle is no part of the circle.
   Only what is held moves, so a drag that starts on a stroke, a text or a picture not held draws a lasso, as one on the paper does (user decision 2026-11-18).
   A press stays a click while it travels less than 3 px with a mouse and GTK's drag threshold, 8 px unless set otherwise, with a pen, as a diagram's does, and a click, however shaky, moves nothing (user decision 2026-11-19).
+  Until then it shows nothing moved either, as a diagram's move waits, and once past it the press is a drag however near its start it comes back.
   With Ctrl a click adds a stroke or a text, a click on one held lets go of it, and a drag from one held drops a copy of all that is held where it is released, as one step, the originals staying (user decisions 2026-11-10); a lasso with Ctrl adds what it takes.
   A click on the paper lets go of everything, and so does `Escape`, a second `Escape` putting the tool down.
 - What Select holds shows one box round it all with eight handles and the diagram's ring beyond the top-right corner, and a dashed box round each item when there are two or more.

@@ -26,7 +26,8 @@ const NAME: &str = "loupe-drill.pdf";
 /// pictured as `handles.png`, each dragged out and back, and the end's by a real mouse through
 /// XTEST. Then a finger on the heading at the top of the view and on the body line's start at the
 /// view's left edge at 300 %, a pen and a mouse through the same path, and a real mouse drag
-/// through XTEST. Then two lines over a dense plot on the second page, and a drag down its lines
+/// through XTEST, then one held at the view's bottom edge, which scrolls the view and the
+/// selection on to the second page. Then two lines over a dense plot on the second page, and a drag down its lines
 /// and back a step a frame, with the longest gap between frames. Takes the file away again.
 pub(super) fn run(app: &Rc<App>) {
     let path = app.root().join(NAME);
@@ -232,6 +233,26 @@ pub(super) fn run(app: &Rc<App>) {
         say("xtest_mouse");
         println!("bench loupe xtest_mouse changed={}", changed.is_some());
         super::git::xtest_now("up").await;
+
+        // Taken to the view's bottom edge and held there, the drag scrolls the view on and the
+        // selection with it, from where it was pressed down to the second page's lines.
+        let bottom = f64::from(view.height()) - 4.0;
+        let below = |y: f64| super::diagram::on_screen(&app, &view, x0 + 40.0, y);
+        let steps = format!(
+            "move {}; down; move {}; move {}; move {}",
+            at(x0 + 2.0),
+            at(x0 + 40.0),
+            below(bottom / 2.0).unwrap_or_default(),
+            below(bottom).unwrap_or_default()
+        );
+        super::git::xtest_now(&steps).await;
+        let reached = until("loupe", "xtest_edge", 5_000, || {
+            selected().contains("plot's page")
+        });
+        let reached = reached.await.is_some();
+        let kept = selected().starts_with("The loupe");
+        super::git::xtest_now("up").await;
+        println!("bench loupe xtest_edge reached={reached} kept={kept}");
 
         // The plot's page: a band of its first line, then of its second.
         pdf.scroll_to(pdfview::Anchor {
