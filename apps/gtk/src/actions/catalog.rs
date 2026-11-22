@@ -305,8 +305,10 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.diagram-cut", "Cut", &[]),
     ("win.diagram-copy", "Copy", &[]),
     ("win.diagram-paste", "Paste into Diagram", &[]),
-    // The one shape's size and the one cell's style, as the Properties pane's Size and Style
-    // groups copy them, and pasted onto the selection.
+    // The one shape's position and size and the one cell's style, as the Properties pane's
+    // Position, Size and Style groups copy them, and pasted onto the selection.
+    ("win.diagram-copy-position", "Copy Position", &[]),
+    ("win.diagram-paste-position", "Paste Position", &[]),
     ("win.diagram-copy-size", "Copy Size", &[]),
     ("win.diagram-paste-size", "Paste Size", &[]),
     ("win.diagram-copy-style", "Copy Style", &[]),
@@ -365,6 +367,8 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.diagram-move-page-up", "Move Diagram Page Up", &[]),
     ("win.diagram-move-page-down", "Move Diagram Page Down", &[]),
     ("win.diagram-to-front", "Bring to Front", &[]),
+    ("win.diagram-forward", "Bring Forward", &[]),
+    ("win.diagram-backward", "Send Backward", &[]),
     ("win.diagram-to-back", "Send to Back", &[]),
     ("win.diagram-invert", "Invert Diagram Colours", &[]),
     ("win.diagram-grid", "Show Grid", &[]),

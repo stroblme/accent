@@ -166,6 +166,7 @@ impl DiagramTab {
                 let shown = self.view.sheet().unwrap_or_default();
                 self.edit(|e, page| e.flip(page, &ids, across, &shown.scene))
             }
+            Change::Order(z) => self.reorder(z),
             Change::Copy(clip) => self.copy_property(clip),
             Change::Paste(clip) => self.paste_property(clip),
             Change::Layer(change) => self.apply_layer(change),
@@ -306,8 +307,8 @@ impl DiagramTab {
         });
     }
 
-    /// The one selected cell's position (`x, y`), size (`w, h`) or style string onto the
-    /// clipboard, as plain text with its kind beside it ([`Clip::held`]).
+    /// The one selected shape's position (`x, y`) or size (`w, h`), or the one selected cell's
+    /// style string, onto the clipboard, as plain text with its kind beside it ([`Clip::held`]).
     pub(in crate::diagram) fn copy_property(self: &Rc<Self>, clip: Clip) {
         let text = {
             let editor = self.editor.borrow();
@@ -320,12 +321,18 @@ impl DiagramTab {
             else {
                 return;
             };
-            let g = cell.geometry.as_ref().map(|g| g.rect()).unwrap_or_default();
+            // A shape's, as draw.io's Copy Size takes a vertex's alone (`Actions.js` `copySize`).
+            let g = cell
+                .geometry
+                .as_ref()
+                .filter(|g| cell.vertex && !g.relative);
+            let g = g.map(|g| g.rect());
             let pair = |a, b| format!("{}, {}", number(a), number(b));
-            match clip {
-                Clip::Position => pair(g.x, g.y),
-                Clip::Size => pair(g.w, g.h),
-                Clip::Style => cell.style.to_string(),
+            match (clip, g) {
+                (Clip::Position, Some(g)) => pair(g.x, g.y),
+                (Clip::Size, Some(g)) => pair(g.w, g.h),
+                (Clip::Style, _) => cell.style.to_string(),
+                (_, None) => return,
             }
         };
         let provider = gtk::gdk::ContentProvider::new_union(&[
@@ -346,8 +353,9 @@ impl DiagramTab {
         }
     }
 
-    /// The clipboard's text onto the selection: a position or a size onto the one shape, a
-    /// style's look onto every cell selected, as one step (`Editor::paste_style`).
+    /// The clipboard's text onto the selection: a position or a size onto every shape selected
+    /// that takes one ([`DiagramTab::placeable`]), a style's look onto every cell selected, as one
+    /// step (`Editor::paste_style`).
     pub(in crate::diagram) fn paste_property(self: &Rc<Self>, clip: Clip) {
         let clipboard = self.view.clipboard();
         let tab = Rc::downgrade(self);
@@ -356,25 +364,65 @@ impl DiagramTab {
             let Some(tab) = tab.upgrade() else { return };
             let text = text.as_deref().map(str::trim).unwrap_or_default();
             let ids = tab.selection();
-            let geometry = || {
-                let editor = tab.editor.borrow();
-                let page = editor.page(tab.page_index.get()).ok()?;
-                let [id] = ids.as_slice() else { return None };
-                Some(page.cell(id)?.geometry.as_ref()?.rect())
-            };
-            match (clip, pair(text), geometry()) {
-                (Clip::Position, Some((x, y)), Some(g)) => {
-                    tab.set_geometry(&ids[0], accent_drawio::Rect::new(x, y, g.w, g.h))
+            match (clip, pair(text)) {
+                (Clip::Position, Some(at)) => tab.paste_geometry(&ids, clip, at),
+                (Clip::Size, Some(size)) if size.0 >= 0.0 && size.1 >= 0.0 => {
+                    tab.paste_geometry(&ids, clip, size)
                 }
-                (Clip::Size, Some((w, h)), Some(g)) if w >= 0.0 && h >= 0.0 => {
-                    tab.set_geometry(&ids[0], accent_drawio::Rect::new(g.x, g.y, w, h))
-                }
-                (Clip::Style, ..) if text.contains('=') && !text.contains('\n') => {
+                (Clip::Style, _) if text.contains('=') && !text.contains('\n') => {
                     let style = accent_drawio::Style::parse(text);
                     tab.edit(|e, page| e.paste_style(page, &ids, &style));
                 }
-                (clip, ..) => tab.toast(&format!("No {} on the clipboard", clip.noun())),
+                (clip, _) => tab.toast(&format!("No {} on the clipboard", clip.noun())),
             }
+        });
+    }
+
+    /// Those of `ids` a pasted position or size lands on: shapes placed in their parent that
+    /// can be moved and resized, so not pinned, nor a group sized by what it holds
+    /// (`Sheet::is_resizable`), as draw.io pastes a size onto its resizable cells.
+    pub(in crate::diagram) fn placeable(&self, ids: &[CellId]) -> Vec<CellId> {
+        let Some(sheet) = self.view.sheet() else {
+            return Vec::new();
+        };
+        let editor = self.editor.borrow();
+        let Ok(page) = editor.page(self.page_index.get()) else {
+            return Vec::new();
+        };
+        let placed = |id: &&CellId| {
+            let g = page.cell(id).and_then(|c| c.geometry.as_ref());
+            sheet.is_resizable(id) && g.is_some_and(|g| !g.relative)
+        };
+        ids.iter().filter(placed).cloned().collect()
+    }
+
+    /// Give each of `ids` that takes it ([`DiagramTab::placeable`]) the position `x, y` in its
+    /// parent or the size `w, h` that `clip` says, the other kept, as one step, as draw.io's
+    /// Paste Size gives each selected shape its size (`Actions.js` `pasteSize`).
+    fn paste_geometry(self: &Rc<Self>, ids: &[CellId], clip: Clip, (a, b): (f64, f64)) {
+        let ids = self.placeable(ids);
+        if ids.is_empty() {
+            return;
+        }
+        self.edit(|e, page| {
+            e.at_once(|e| {
+                for id in &ids {
+                    let (rect, o) = {
+                        let p = e.page(page)?;
+                        let g = p.cell(id).and_then(|c| c.geometry.as_ref());
+                        let Some(g) = g.map(|g| g.rect()) else {
+                            continue;
+                        };
+                        let rect = match clip {
+                            Clip::Position => accent_drawio::Rect::new(a, b, g.w, g.h),
+                            _ => accent_drawio::Rect::new(g.x, g.y, a, b),
+                        };
+                        (rect, p.origin_of(id))
+                    };
+                    e.resize(page, id, rect.translate(o.x, o.y), false)?;
+                }
+                Ok(())
+            })
         });
     }
 }

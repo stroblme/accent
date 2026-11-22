@@ -4,7 +4,8 @@
 use super::*;
 
 /// Probe Properties on the sample: position/size after nudging, burst edits as one
-/// undo, hover-revealed buttons, Copy/Paste Position and Style, wrong-type paste toasts, the
+/// undo, hover-revealed buttons, Copy/Paste Position and Style, a position and a size pasted onto
+/// two shapes, the Order row, wrong-type paste toasts, the
 /// line rows an arrow and a shape share, the rows of a flex arrow and a swimlane, a free line's
 /// ends dragged and typed, Flip of an arrow and of a box placed by fractions, and Custom picked
 /// and typed by XTEST, as saved.
@@ -408,8 +409,8 @@ pub(super) fn props(app: &Rc<App>, rel: &str) {
         );
 
         // The canvas's menu, right-clicked by XTEST: the one paste it offers is for what the
-        // clipboard holds, the shapes, a size or a style, none for a position, and over empty
-        // page with a style held there is no menu.
+        // clipboard holds, the shapes, a size, a position or a style, and over empty page with a
+        // style held there is no menu.
         let canvas = tab.key_target();
         let screen = |r: accent_drawio::Rect| {
             let r = tab.to_widget(&r);
@@ -457,6 +458,71 @@ pub(super) fn props(app: &Rc<App>, rel: &str) {
             menu_labels(&app, a.as_deref()).await,
             menu_labels(&app, blank.as_deref()).await
         );
+
+        // A position and a size go onto every shape selected as one step, as draw.io's Paste
+        // Size goes (user decision 2026-11-22).
+        let (f, m) = (|| tab.frame_of("f"), || tab.frame_of("m"));
+        tab.select(vec!["a".to_string()]);
+        run("win.diagram-copy-position");
+        let said = super::super::export::toast(&app, "Copied position").await;
+        tab.select(vec!["f".to_string(), "m".to_string()]);
+        run("win.diagram-paste-position");
+        glib::timeout_future(Duration::from_millis(300)).await;
+        println!(
+            "bench diagram props many position said={said:?} f={:?} m={:?}",
+            f(),
+            m()
+        );
+        tab.undo();
+        println!("bench diagram props many undone f={:?} m={:?}", f(), m());
+        tab.select(vec!["a".to_string()]);
+        run("win.diagram-copy-size");
+        let said = super::super::export::toast(&app, "Copied size").await;
+        tab.select(vec!["f".to_string(), "m".to_string()]);
+        run("win.diagram-paste-size");
+        glib::timeout_future(Duration::from_millis(300)).await;
+        println!(
+            "bench diagram props many size said={said:?} f={:?} m={:?}",
+            f(),
+            m()
+        );
+        tab.undo();
+
+        // The Order row moves a cell past one sibling or past them all, Forward and Backward
+        // for one cell alone, as draw.io offers them, each one step.
+        let order = || {
+            let cells = &tab.file().pages[0].cells;
+            cells.iter().map(|c| c.id.clone()).collect::<Vec<_>>()
+        };
+        let sensitive = |tooltip: &str| {
+            find_widget(&pane, &|w| {
+                w.is::<gtk::Button>() && w.tooltip_text().as_deref() == Some(tooltip)
+            })
+            .map(|w| w.is_sensitive())
+        };
+        tab.select(vec!["a".to_string()]);
+        println!(
+            "bench diagram props order shown={:?}",
+            shown(&pane, "Order")
+        );
+        click("Bring Forward");
+        println!("bench diagram props order forward {:?}", order());
+        click("Bring to Front");
+        println!("bench diagram props order front {:?}", order());
+        click("Send to Back");
+        println!("bench diagram props order back {:?}", order());
+        tab.select(vec!["a".to_string(), "e".to_string()]);
+        println!(
+            "bench diagram props order two shown={:?} forward={:?} front={:?}",
+            shown(&pane, "Order"),
+            sensitive("Bring Forward"),
+            sensitive("Bring to Front")
+        );
+        for _ in 0..3 {
+            tab.undo();
+        }
+        println!("bench diagram props order undone {:?}", order());
+        tab.select(vec!["a".to_string()]);
 
         // Show Grid is the Page group's switch, which follows the preference either way.
         let grid = || {
@@ -609,6 +675,7 @@ pub(super) fn props(app: &Rc<App>, rel: &str) {
             "End Size",
             "Font",
             "Position",
+            "Order",
             "Word Wrap",
             "Label Background",
             "Label Border",

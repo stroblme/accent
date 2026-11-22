@@ -10,7 +10,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
-use accent_drawio::{Color, Point, Rect, Resolved};
+use accent_drawio::{Color, Point, Rect, Resolved, ZOrder};
 use adw::prelude::*;
 use gtk::glib;
 
@@ -173,6 +173,8 @@ pub enum Change {
     Flip(bool),
     /// Fixed Corner Size or Fixed Size on or off, each selected shape kept as it is drawn.
     Fixed(accent_drawio::Fixed, bool),
+    /// One of the Order row's buttons: the selection moved among its siblings.
+    Order(ZOrder),
     /// A group's Copy button: what it shows, onto the clipboard.
     Copy(Clip),
     /// A group's Paste button: what the clipboard holds, onto the selection.
@@ -534,6 +536,8 @@ pub struct Props {
     y: adw::SpinRow,
     width: adw::SpinRow,
     height: adw::SpinRow,
+    /// Send to Back, Send Backward, Bring Forward and Bring to Front, by what each does.
+    order: [(ZOrder, gtk::Button); 4],
     ends: ends::Ends,
     /// Each group's Copy and Paste buttons, by what they carry.
     clips: Vec<(Clip, gtk::Button, gtk::Button)>,
@@ -719,6 +723,20 @@ impl Props {
         let (width, height) = (coordinate("Width", 0.0), coordinate("Height", 0.0));
         position.add(&x);
         position.add(&y);
+        // draw.io's Arrange panel's four (`ArrangePanel.addLayerOps`), bottom to top, named as
+        // the palette names them.
+        let order = [
+            (ZOrder::ToBack, "go-bottom-symbolic", "win.diagram-to-back"),
+            (ZOrder::Backward, "go-down-symbolic", "win.diagram-backward"),
+            (ZOrder::Forward, "go-up-symbolic", "win.diagram-forward"),
+            (ZOrder::ToFront, "go-top-symbolic", "win.diagram-to-front"),
+        ]
+        .map(|(z, icon, action)| (z, icon_button(icon, crate::actions::label_of(action))));
+        let order_row = adw::ActionRow::builder().title("Order").build();
+        for (_, button) in &order {
+            order_row.add_suffix(button);
+        }
+        position.add(&order_row);
         size.add(&width);
         size.add(&height);
         let aspect = adw::SwitchRow::builder()
@@ -830,6 +848,7 @@ impl Props {
             y,
             width,
             height,
+            order,
             ends,
             clips,
             layers,
@@ -1029,6 +1048,10 @@ impl Props {
             let send = send.clone();
             button.connect_clicked(move |_| send(Change::Flip(across)));
         }
+        for (z, button) in &self.order {
+            let (z, send) = (*z, send.clone());
+            button.connect_clicked(move |_| send(Change::Order(z)));
+        }
         for (clip, copy, paste) in &self.clips {
             let (clip, send_copy, send_paste) = (*clip, send.clone(), send.clone());
             copy.connect_clicked(move |_| send_copy(Change::Copy(clip)));
@@ -1143,8 +1166,17 @@ impl Props {
                 geometry,
                 default_tool,
             } => {
-                self.position.set_visible(geometry.is_some());
+                // Position holds the order for any cells, its place for the one shape alone.
+                self.position.set_visible(true);
+                self.x.set_visible(geometry.is_some());
+                self.y.set_visible(geometry.is_some());
                 self.size.set_visible(geometry.is_some());
+                // Forward and Backward take one cell, as draw.io enables them
+                // (`EditorUi.updateActionStates`).
+                for (z, button) in &self.order {
+                    let one = matches!(z, ZOrder::Forward | ZOrder::Backward);
+                    button.set_sensitive(!one || *count == 1);
+                }
                 if let Some((r, pinned)) = geometry {
                     let rows = [&self.x, &self.y, &self.width, &self.height];
                     for (row, v) in rows.into_iter().zip([r.x, r.y, r.w, r.h]) {
@@ -1155,10 +1187,16 @@ impl Props {
                     self.aspect.set_active(style.get("aspect") == Some("fixed"));
                     self.aspect.set_sensitive(!pinned);
                 }
+                let pinned = geometry.is_some_and(|(_, pinned)| pinned);
                 for (clip, copy, paste) in &self.clips {
                     match clip {
                         Clip::Style => copy.set_visible(*count == 1),
-                        _ => paste.set_visible(!geometry.is_some_and(|(_, pinned)| pinned)),
+                        // A position goes onto every shape selected that can move.
+                        Clip::Position => {
+                            copy.set_visible(geometry.is_some());
+                            paste.set_visible(*vertices && !pinned);
+                        }
+                        Clip::Size => paste.set_visible(!pinned),
                     }
                 }
                 // An arrow's line is drawn from the same keys as a shape's outline, so every cell

@@ -35,11 +35,13 @@ impl DiagramTab {
     }
 
     /// The menu under the pointer, at widget `(x, y)`: the clipboard and Duplicate and Delete,
-    /// Copy Size for one shape and Copy Style for one cell, Group or Ungroup where they apply,
-    /// the order, and Edit Label for one cell; over nothing selected, Paste alone. The one paste
-    /// offered is for what the clipboard holds: Paste Size for a size, Paste Style for a style,
-    /// none for a position, and Paste for anything else. Window actions, so the palette lists
-    /// them and they can be rebound.
+    /// Copy Position and Copy Size for one shape and Copy Style for one cell, Group or Ungroup
+    /// and the waypoints' commands ([`Self::waypoint_items`]) where they apply, the order with
+    /// Bring Forward and Send Backward for one cell, and Edit Label for one cell; over nothing
+    /// selected, Paste alone. The one paste offered is for what the
+    /// clipboard holds: Paste Position or Paste Size for a position or a size, onto the shapes
+    /// that take one, Paste Style for a style, and Paste for anything else. Window actions, so
+    /// the palette lists them and they can be rebound.
     fn menu_at(self: &Rc<Self>, x: f64, y: f64) {
         match self.view.cell_at(x, y) {
             Some(cell) if !self.selection.borrow().contains(&cell) => self.select(vec![cell]),
@@ -74,20 +76,34 @@ impl DiagramTab {
                 let page = editor.page(self.page_index.get());
                 let group =
                     |id: &CellId| page.as_ref().is_ok_and(|p| p.children(id).next().is_some());
-                // The one shape whose size Position and Size show, and whether it is pinned.
+                // The one shape whose place and size Position and Size show.
                 let shape = match ids.as_slice() {
-                    [id] => (page.as_ref().ok().and_then(|p| p.cell(id)))
-                        .filter(|c| c.vertex && c.geometry.as_ref().is_some_and(|g| !g.relative))
-                        .map(|_| self.view.sheet().is_some_and(|s| s.is_pinned(id))),
-                    _ => None,
+                    [id] => (page.as_ref().ok().and_then(|p| p.cell(id))).is_some_and(|c| {
+                        c.vertex && c.geometry.as_ref().is_some_and(|g| !g.relative)
+                    }),
+                    _ => false,
                 };
                 (ids.iter().any(group), shape)
             };
             let mut looks = Vec::new();
-            if let Some(pinned) = shape {
-                looks.push("win.diagram-copy-size");
-                if !pinned && held == Some(Clip::Size) {
-                    looks.push("win.diagram-paste-size");
+            let placeable = || !self.placeable(&ids).is_empty();
+            for (clip, copy, paste) in [
+                (
+                    Clip::Position,
+                    "win.diagram-copy-position",
+                    "win.diagram-paste-position",
+                ),
+                (
+                    Clip::Size,
+                    "win.diagram-copy-size",
+                    "win.diagram-paste-size",
+                ),
+            ] {
+                if shape {
+                    looks.push(copy);
+                }
+                if held == Some(clip) && placeable() {
+                    looks.push(paste);
                 }
             }
             if ids.len() == 1 {
@@ -106,7 +122,13 @@ impl DiagramTab {
             }
             section(&grouping);
             self.waypoint_items(&menu, &ids, x, y);
-            section(&["win.diagram-to-front", "win.diagram-to-back"]);
+            // Forward and Backward for one cell, as draw.io's menu has them
+            // (`Menus.addPopupMenuArrangeItems`).
+            let mut order = vec!["win.diagram-to-front", "win.diagram-to-back"];
+            if ids.len() == 1 {
+                order.extend(["win.diagram-forward", "win.diagram-backward"]);
+            }
+            section(&order);
             if ids.len() == 1 {
                 section(&["win.diagram-edit-label"]);
             }

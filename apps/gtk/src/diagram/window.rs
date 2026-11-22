@@ -294,6 +294,8 @@ impl App {
             "diagram-copy" => tab.copy(),
             "diagram-cut" => tab.cut(),
             "diagram-paste" => self.paste_diagram(&tab, false),
+            "diagram-copy-position" => tab.copy_property(Clip::Position),
+            "diagram-paste-position" => tab.paste_property(Clip::Position),
             "diagram-copy-size" => tab.copy_property(Clip::Size),
             "diagram-paste-size" => tab.paste_property(Clip::Size),
             "diagram-copy-style" => tab.copy_property(Clip::Style),
@@ -323,6 +325,10 @@ impl App {
             "diagram-move-page-down" => tab.move_page(true),
             "diagram-to-front" => tab.reorder(accent_drawio::ZOrder::ToFront),
             "diagram-to-back" => tab.reorder(accent_drawio::ZOrder::ToBack),
+            // One cell at a time, as draw.io enables them (`EditorUi.updateActionStates`).
+            "diagram-forward" | "diagram-backward" if tab.selection().len() != 1 => {}
+            "diagram-forward" => tab.reorder(accent_drawio::ZOrder::Forward),
+            "diagram-backward" => tab.reorder(accent_drawio::ZOrder::Backward),
             "diagram-invert" => tab.toggle_invert(),
             // A preference, as Show Hidden Files is: every diagram and every window follow it.
             "diagram-grid" => {
