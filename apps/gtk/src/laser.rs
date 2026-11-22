@@ -141,6 +141,12 @@ impl Laser {
     pub fn strength(&self) -> f64 {
         self.painter.opacity()
     }
+
+    /// Hold the fade where it is, for a drill that presses into it at its own pace.
+    #[cfg(feature = "bench")]
+    pub fn hold_fade(&self) {
+        self.fade.pause();
+    }
 }
 
 /// Whether the keyboard at `focus` types an `l` itself, where `L` cannot be the laser's: an

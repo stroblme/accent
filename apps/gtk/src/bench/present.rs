@@ -632,7 +632,7 @@ async fn stroke(app: &Rc<App>, kind: &str) {
         f64::from(area.center().x()) + dx,
         f64::from(area.center().y()) + dy,
     );
-    let plain = red(app);
+    let plain = red(app).await;
     // A pause between the moves, or GTK would make one motion of them.
     let path = format!(
         "move {} {y}; down; sleep 0.05; move {} {}; sleep 0.05; move {x} {y}; sleep 0.05; \
@@ -646,27 +646,35 @@ async fn stroke(app: &Rc<App>, kind: &str) {
     );
     super::git::xtest_now(&path).await;
     glib::timeout_future(Duration::from_millis(100)).await;
-    moment(app, kind, "drawing", Some(plain));
-    // The release and a press 750 ms after it, into the 510 ms fade that begins 500 ms after it:
-    // one `xtest.py` times the two, however long it takes to start, and the moments between are
-    // read off the laser as it hears them.
-    let input = glib::spawn_future_local(super::git::xtest_now("up; sleep 0.75; down"));
+    moment(app, kind, "drawing", Some(plain)).await;
+    // The release, the 510 ms fade that begins 500 ms after it, and a press into the fade, the
+    // moments between read off the laser as it hears them. The fade is held where it was seen
+    // to begin, so the press lands in it however long the press takes to come under load.
+    super::git::xtest_now("up").await;
     let pressed = |down: bool| move || app.laser.get().is_some_and(|l| l.pressed() == down);
     until("laser", "release", 5_000, pressed(false)).await;
     let released = Instant::now();
     glib::timeout_future(Duration::from_millis(100)).await;
-    moment(app, kind, "held", Some(plain));
+    moment(app, kind, "held", Some(plain)).await;
     let fading = || app.laser.get().is_some_and(|laser| laser.strength() < 1.0);
     until("laser", "fade", 3_000, fading).await;
     let held = released.elapsed().as_millis();
+    if let Some(laser) = app.laser.get() {
+        laser.hold_fade();
+    }
     println!("bench laser detail {kind} held_ms={held}");
-    moment(app, kind, "fading", None);
-    until("laser", "press", 3_000, pressed(true)).await;
-    moment(app, kind, "again", Some(plain));
-    let _ = input.await;
+    moment(app, kind, "fading", None).await;
+    super::git::xtest_now("down").await;
+    until("laser", "press", 10_000, pressed(true)).await;
+    moment(app, kind, "again", Some(plain)).await;
     super::git::xtest_now("up").await;
-    glib::timeout_future(Duration::from_millis(1500)).await;
-    moment(app, kind, "gone", Some(plain));
+    let gone = || {
+        app.laser
+            .get()
+            .is_some_and(|laser| laser.strokes().is_empty())
+    };
+    until("laser", "gone", 10_000, gone).await;
+    moment(app, kind, "gone", Some(plain)).await;
     let after = presented(app);
     println!("bench laser {kind} kept={} {after}", after == before);
     super::git::xtest("key l").await;
@@ -689,7 +697,14 @@ async fn press_toggle(app: &Rc<App>) {
     let (dx, dy) = app.window.surface_transform();
     let strip = f64::from(app.window.height()) - 4.0 + dy;
     let x = f64::from(app.window.width()) / 2.0 + dx;
-    super::git::xtest(&format!("move {x} {strip}; sleep 0.8")).await;
+    super::git::xtest(&format!("move {x} {strip}")).await;
+    // Up under the pointer and done sliding in, so the toggle is where it stays.
+    let bar = app.statusbar.widget();
+    let (_, full, _, _) = bar.measure(gtk::Orientation::Vertical, app.toolbar.width());
+    let up = || app.toolbar.bottom_bar_height() >= full;
+    if until("laser", "bar up", 5_000, up).await.is_none() {
+        return;
+    }
     let Some(at) = app.statusbar.laser().compute_bounds(&app.window) else {
         return println!("bench laser button not drawn");
     };
@@ -697,8 +712,11 @@ async fn press_toggle(app: &Rc<App>) {
         f64::from(at.center().x()) + dx,
         f64::from(at.center().y()) + dy,
     );
-    for case in ["pressed", "again"] {
-        super::git::xtest(&format!("move {x} {y}; sleep 0.3; down; up; sleep 0.3")).await;
+    for (case, on) in [("pressed", false), ("again", true)] {
+        super::git::xtest(&format!("move {x} {y}; sleep 0.3; down; up")).await;
+        let toggle = app.statusbar.laser();
+        let heard = || laser_on(app) == on && toggle.is_active() == on;
+        until("laser", case, 5_000, heard).await;
         toggle_said(app, case);
     }
     if let Ok(dir) = std::env::var("ACCENT_BENCH_SHOTS") {
@@ -720,7 +738,7 @@ fn toggle_said(app: &App, case: &str) {
 /// The strokes up and how strong they are drawn at `moment`, and with the window's red before the
 /// drag in `plain`, whether they are on screen; the exact numbers go on a line of their own, which
 /// timing moves. A shot of the window goes to `$ACCENT_BENCH_SHOTS`.
-fn moment(app: &App, kind: &str, moment: &str, plain: Option<usize>) {
+async fn moment(app: &App, kind: &str, moment: &str, plain: Option<usize>) {
     let Some(laser) = app.laser.get() else {
         return println!("bench laser {kind} {moment} none");
     };
@@ -730,7 +748,7 @@ fn moment(app: &App, kind: &str, moment: &str, plain: Option<usize>) {
         s if s >= 1.0 => "full",
         _ => "fading",
     };
-    let now = red(app);
+    let now = red(app).await;
     let marked = plain
         .map(|plain| format!(" marked={}", now > plain + 1000))
         .unwrap_or_default();
@@ -771,13 +789,20 @@ fn presented(app: &App) -> String {
     }
 }
 
-/// How many of the window's pixels are the laser's red on screen now.
-fn red(app: &App) -> usize {
+/// How many of the window's pixels are the laser's red on screen now, in its last painted frame,
+/// which is what a `GtkWidgetPaintable` of it draws. A redraw queued since, as a press or the
+/// laser put up queues one, leaves it no picture until the next frame is painted, so this waits
+/// for that frame rather than count nothing as no red.
+async fn red(app: &App) -> usize {
     let window = app.window.upcast_ref::<gtk::Widget>();
-    let (w, h) = (f64::from(window.width()), f64::from(window.height()));
-    let snapshot = gtk::Snapshot::new();
-    gtk::WidgetPaintable::new(Some(window)).snapshot(&snapshot, w, h);
-    let (Some(node), Some(renderer)) = (snapshot.to_node(), app.window.renderer()) else {
+    let painted = || {
+        let (w, h) = (f64::from(window.width()), f64::from(window.height()));
+        let snapshot = gtk::Snapshot::new();
+        gtk::WidgetPaintable::new(Some(window)).snapshot(&snapshot, w, h);
+        snapshot.to_node()
+    };
+    let node = until("laser", "painted", 5_000, painted).await;
+    let (Some(node), Some(renderer)) = (node, app.window.renderer()) else {
         return 0;
     };
     let mut downloader = gdk::TextureDownloader::new(&renderer.render_texture(&node, None));
