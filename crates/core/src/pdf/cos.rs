@@ -106,8 +106,8 @@ impl Objects {
         Ok(())
     }
 
-    /// `annot` at the end of page `page`'s `/Annots`, with `/P` naming the page: added, or written
-    /// over the annotation `into`, which keeps its object and moves there.
+    /// `annot`, with `/P` naming page `page`: added at the end of the page's `/Annots`, or written
+    /// over the annotation `into`, which keeps its object and its place there.
     pub(super) fn append_annot(
         &mut self,
         page: usize,
@@ -115,27 +115,19 @@ impl Objects {
         into: Option<Ref>,
     ) -> Result<Ref> {
         annot.set(b"P", Object::Ref(self.page(page)?));
-        let at = match into {
-            Some(at) => {
-                self.update.set(at, Object::Dict(annot));
-                at
-            }
-            None => self.update.add(Object::Dict(annot)),
-        };
-        self.put_last(page, at)?;
+        if let Some(at) = into {
+            self.update.set(at, Object::Dict(annot));
+            return Ok(at);
+        }
+        let at = self.update.add(Object::Dict(annot));
+        let mut entries = self.annots(page)?;
+        entries.push(Object::Ref(at));
+        self.set_annots(page, entries)?;
         Ok(at)
     }
 
-    /// The annotation `at` at the end of page `page`'s `/Annots`: moved there, or put back.
-    pub(super) fn put_last(&mut self, page: usize, at: Ref) -> Result<()> {
-        let mut entries = self.annots(page)?;
-        entries.retain(|e| *e != Object::Ref(at));
-        entries.push(Object::Ref(at));
-        self.set_annots(page, entries)
-    }
-
     /// The annotation `at` put back at `index` of page `page`'s `/Annots`, where it was before
-    /// a write moved it to the end.
+    /// a take left it out.
     pub(super) fn put_at(&mut self, page: usize, at: Ref, index: usize) -> Result<()> {
         let mut entries = self.annots(page)?;
         entries.retain(|e| *e != Object::Ref(at));

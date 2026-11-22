@@ -30,7 +30,7 @@ pub fn fresh_id() -> u32 {
 }
 
 /// One undo/redo step for ink or pages. A stroke is named by its object, which every edit of it
-/// keeps, so the steps need not follow the `/Annots` order that erases and moves shuffle.
+/// keeps, so the steps need not follow the `/Annots` order that erases shuffle.
 ///
 /// Page numbers remain those at step creation: sequential Undo and Redo restore the page order
 /// needed by each step.
@@ -602,18 +602,13 @@ impl Ink {
                 Ok(changed)
             }
             Some(Batch::Move(_)) => {
-                let mut moves: Vec<(Ref, pdf::Matrix)> = (run.iter())
+                let moves: Vec<(Ref, pdf::Matrix)> = (run.iter())
                     .filter_map(|step| match step {
                         Step::Moved { at, matrix, .. } => Some((*at, *matrix)),
                         _ => None,
                     })
                     .map(|(at, m)| (at, if forwards { m } else { pdf::invert(m) }))
                     .collect();
-                // Each of ours moved goes to the end of `/Annots`, so Undo moves them in the
-                // order the move did, which keeps them stacked as they were among themselves.
-                if !forwards {
-                    moves.reverse();
-                }
                 doc.transform_inks(page, &moves)?
                     .into_iter()
                     .map(walked)
@@ -621,7 +616,9 @@ impl Ink {
             }
             // Drawing forwards puts a stroke on, and so does erasing backwards.
             Some(Batch::On(_)) => {
-                let mut drawn: Vec<&pdf::Drawn> = (run.iter())
+                // Each goes back to its place in `/Annots`, so in the reverse of the order they
+                // were taken in, which is the order the walk hands them over in.
+                let drawn: Vec<&pdf::Drawn> = (run.iter())
                     .map(|step| match step {
                         Step::Drawn { at, kept, .. } | Step::Erased { at, kept, .. } => (kept
                             .as_ref())
@@ -629,15 +626,6 @@ impl Ink {
                         _ => Err(Error::Pdf("not a stroke put back".to_string())),
                     })
                     .collect::<Result<_>>()?;
-                // Another editor's stroke goes back to its place in `/Annots`, so in the reverse
-                // of the order they were taken in, and ours to its end: Undo puts theirs back
-                // first, then ours in the order they were taken, stacked as they were.
-                if !forwards {
-                    let (mut ours, theirs): (Vec<_>, Vec<_>) =
-                        (drawn.into_iter()).partition(|d| matches!(d, pdf::Drawn::Ours { .. }));
-                    ours.reverse();
-                    drawn = theirs.into_iter().chain(ours).collect();
-                }
                 doc.redraw_inks(page, &drawn)?
                     .into_iter()
                     .map(walked)
@@ -697,8 +685,8 @@ mod tests {
     use crate::pdf::PageEdit;
     use crate::pdf::tests::{open_tiny, page_texts, reopen};
 
-    /// A stroke keeps its object, and with it its name, through the moves and erases that
-    /// shuffle `/Annots` and the highlights an export appends: pdfium lists each where the file
+    /// A stroke keeps its object, and with it its name, through a move, an erase that shuffles
+    /// `/Annots` and the highlights an export appends: pdfium lists each where the file
     /// lists its object. The name of one erased finds it no longer on the page, which is what
     /// keeps a list that has not caught up from erasing the stroke after the one it meant.
     #[test]
@@ -727,8 +715,8 @@ mod tests {
             names
         );
 
-        // The first is moved 10 pt down, which puts it on top; then the second is erased, and an
-        // export's highlight joins the end.
+        // The first is moved 10 pt down, in its place; then the second is erased, and an export's
+        // highlight joins the end.
         let down = [1.0, 0.0, 0.0, 1.0, 0.0, 10.0];
         doc.transform_ink(0, drawn[0], down).unwrap();
         ink.moved(0, drawn[0], down);
@@ -745,7 +733,7 @@ mod tests {
         let listed: Vec<_> = (ink.named(&doc, 0).into_iter())
             .map(|(id, shape)| (id, shape.at, shape.points[0].1.round() as i32))
             .collect();
-        assert_eq!(listed, [(names[2], drawn[2], 60), (names[0], drawn[0], 30)]);
+        assert_eq!(listed, [(names[0], drawn[0], 30), (names[2], drawn[2], 60)]);
         assert_eq!(ink.at(names[1]), Some(drawn[1]));
         assert!(doc.take_ink(0, drawn[1]).is_err(), "gone from the page");
     }
@@ -1255,7 +1243,7 @@ mod tests {
     }
 
     /// Strokes moved or deleted together stay stacked as they were drawn through the Undo and the
-    /// Redo, each of ours going to the end of `/Annots` in the order the step made them.
+    /// Redo, each going back to its place in `/Annots`.
     #[test]
     fn undo_of_a_group_move_or_delete_keeps_the_stacking() {
         let Some((_dir, mut doc)) = open_tiny() else {
@@ -1286,6 +1274,62 @@ mod tests {
         ink.delete(&mut doc, 0, &drawn).unwrap();
         ink.walk(&mut doc, false);
         assert_eq!(stacked(&mut ink, &doc), drawn, "a delete's Undo");
+    }
+
+    /// Undo puts strokes back where they were among the page's annotations, not on top of them:
+    /// a move of one, a delete of two of four and an eraser drag that takes one and cuts another,
+    /// each walked back and forward, leave `/Annots` as it was, with the highlight exported after
+    /// them still above them all.
+    #[test]
+    fn undo_puts_strokes_back_in_their_place() {
+        let Some((_dir, mut doc)) = open_tiny() else {
+            return;
+        };
+        let mut ink = Ink::default();
+        for y in [20.0, 40.0, 60.0, 80.0] {
+            let line = pdf::Shape::Line {
+                a: (20.0, y),
+                b: (80.0, y),
+            };
+            let (_, at) = doc.add_shape(0, line, STYLE).unwrap();
+            ink.drew(0, at);
+        }
+        let mark = pdf::Highlight {
+            page: 0,
+            quads: vec![pdf::Rect::from_corners((20.0, 30.0), (90.0, 50.0))],
+            color: [255, 255, 0, 255],
+            contents: None,
+        };
+        doc.add_highlights(&[mark]).unwrap();
+        let ids: Vec<u32> = ink.named(&doc, 0).iter().map(|(id, _)| *id).collect();
+        let ats: Vec<Ref> = ids.iter().map(|&id| ink.at(id).unwrap()).collect();
+        let annots = |doc: &PdfDoc| doc.cos.annots(0).unwrap();
+        let before = annots(&doc);
+
+        let right = [1.0, 0.0, 0.0, 1.0, 10.0, 0.0];
+        ink.transform(&mut doc, 0, &ids[..1], right).unwrap();
+        assert_eq!(annots(&doc), before, "a move");
+        ink.walk(&mut doc, false);
+        assert_eq!(annots(&doc), before, "its Undo");
+
+        ink.delete(&mut doc, 0, &[ids[0], ids[2]]).unwrap();
+        ink.walk(&mut doc, false);
+        assert_eq!(annots(&doc), before, "a delete's Undo");
+        ink.walk(&mut doc, true);
+        ink.walk(&mut doc, false);
+        assert_eq!(annots(&doc), before, "its Undo after a Redo");
+
+        let (was, _) = doc.take_ink(0, ats[1]).unwrap();
+        ink.erased(0, ats[1], was, Vec::new(), false);
+        let cut = doc.cut_ink(0, ats[3], (50.0, 70.0), (50.0, 90.0), 4.0);
+        let cut = cut.unwrap().expect("the pass crossed the line");
+        let left = cut.left.iter().map(|&piece| (fresh_id(), piece)).collect();
+        ink.erased(0, ats[3], cut.was, left, true);
+        ink.walk(&mut doc, false);
+        assert_eq!(annots(&doc), before, "an eraser drag's Undo");
+        ink.walk(&mut doc, true);
+        ink.walk(&mut doc, false);
+        assert_eq!(annots(&doc), before, "its Undo after a Redo");
     }
 
     /// A cut is one step: Undo takes the pieces off and puts the stroke back whole, and Redo cuts

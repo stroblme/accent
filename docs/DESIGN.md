@@ -1306,7 +1306,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   With a picture among them every handle keeps the proportions, an edge scaling both axes about the opposite edge's middle, and while the hand is on it the picture shows as its outline filled as a highlight is.
   A text only moves, its corner going where the others take it, since its size is the Text tool's and an editor typing into a turned one would set it upright again, so texts alone show their box without handles or ring.
   While it turns the box turns with it and shows no handles, as a diagram's shape does, and once let go the turn is in the strokes themselves, no angle kept beside them.
-  Ours are drawn again along the moved path, each line keeping its width, while another editor's keeps everything it carries, only its `/Rect` and `/InkList` moving, so every reader fits its appearance stream into the new `/Rect` and it scales as a picture would.
+  Ours are drawn again along the moved path in their place among the page's annotations, each line keeping its width, while another editor's keeps everything it carries, only its `/Rect` and `/InkList` moving, so every reader fits its appearance stream into the new `/Rect` and it scales as a picture would.
   A turn no `/Rect` can fit turns another editor's as a picture, its appearance a copy of its stream whose `/Matrix` puts it where the turn does (ISO 32000-1 §12.5.5), the stream it had left in the file.
 - Cut, Copy, Paste, Duplicate and Delete are Select's commands, on the ring's outer orbit while it holds something, Paste while there is something to paste, in the page's menu, whose secondary click picks the stroke under it first, and in the palette.
   A copy goes onto the system clipboard as plain geometry in a format of our own (`application/x-accent-pdf-ink`, JSON), a picture with its image's bytes in base64, beside its texts as plain text, so any PDF tab takes it, and a paste draws it again as strokes, texts and pictures of ours, which Select then holds.
@@ -1316,6 +1316,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A paste with another tool in hand picks Select up.
   Duplicate pastes a copy a step down and right without touching the clipboard, and the copies are held, so another Duplicate steps on from them.
   A move, a stretch, a turn, a delete, a cut, a paste and a duplicate are each one step for Undo, however many strokes they take.
+  Undo puts every stroke and text back in its place among the page's annotations, after a delete, a cut or an erase as after a move, so a stroke drawn under another comes back under it.
   Each is written in one go and pdfium opened again once, its Undo and Redo too, so moving 20 strokes on a page of a 2069-page document takes 7 ms of the render thread, where opening it after each stroke took 95 ms.
   Select holds one page at a time, and a cut pasted on another page is how a drawing moves between pages.
 - **Colour recolours what Select holds** (user decisions 2026-11-04), a command on the ring's orbit beside Cut while Select holds a stroke or a text a recolour reaches.

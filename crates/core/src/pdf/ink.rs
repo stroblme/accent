@@ -73,10 +73,11 @@ pub(super) enum Seg {
 /// [`PdfDoc::redraw_ink`](super::PdfDoc::redraw_ink) puts back.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Drawn {
-    /// One of ours, a stroke or a text: its object, untouched in the file, which goes back onto
-    /// the end of the page's `/Annots`, and the box it covers.
+    /// One of ours, a stroke or a text: its object, untouched in the file, which goes back to
+    /// its `index` in the page's `/Annots`, where it was, and the box it covers.
     Ours {
         at: accent_pdf::Ref,
+        index: usize,
         area: super::Rect,
     },
     /// Another editor's, or a picture of ours: the entries that left `/Annots` with it, its own

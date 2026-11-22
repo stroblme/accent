@@ -289,8 +289,8 @@ impl PdfDoc {
         Ok(taken)
     }
 
-    /// Put back a stroke or text [`PdfDoc::take_ink`] took, and say what box it covers: one of
-    /// ours at the end of the page's `/Annots`, another editor's where it was.
+    /// Put back a stroke or text [`PdfDoc::take_ink`] took where it was in the page's `/Annots`,
+    /// and say what box it covers.
     pub fn redraw_ink(&mut self, page: usize, drawn: &Drawn) -> Result<Rect> {
         let area = self.put_back(page, drawn)?;
         self.reopen()?;
@@ -298,7 +298,8 @@ impl PdfDoc {
     }
 
     /// Put back each of `drawn` as [`PdfDoc::redraw_ink`] puts back one, in that order, the
-    /// document opened again once: the box each covers, or why it could not go back.
+    /// document opened again once: the box each covers, or why it could not go back. Taken in
+    /// the reverse of that order, each goes back to the place it had.
     pub fn redraw_inks(&mut self, page: usize, drawn: &[&Drawn]) -> Result<Vec<Result<Rect>>> {
         let put = drawn.iter().map(|d| self.put_back(page, d)).collect();
         self.reopen()?;
@@ -308,8 +309,8 @@ impl PdfDoc {
     /// [`PdfDoc::redraw_ink`] without opening the document again.
     fn put_back(&mut self, page: usize, drawn: &Drawn) -> Result<Rect> {
         match drawn {
-            Drawn::Ours { at, area } => {
-                self.cos.put_last(page, *at)?;
+            Drawn::Ours { at, index, area } => {
+                self.cos.put_at(page, *at, *index)?;
                 Ok(*area)
             }
             Drawn::Foreign { entries, area } => {
@@ -457,11 +458,11 @@ impl PdfDoc {
     /// Transform one `/Ink` annotation, returning the union of old and new bounds. Each keeps
     /// its object.
     ///
-    /// Our strokes are redrawn to preserve line width, on top of the page's other annotations.
-    /// External strokes keep their position and are resized through `/Rect`, preserving their
-    /// appearance and `/InkList`; a turn, which no `/Rect` can fit, turns their appearance as a
-    /// picture (`Objects::turn`). A text of ours moves in its place, its corner where `m` takes
-    /// it, set as it was.
+    /// Our strokes are redrawn to preserve line width, in their place among the page's
+    /// annotations. External strokes keep their position and are resized through `/Rect`,
+    /// preserving their appearance and `/InkList`; a turn, which no `/Rect` can fit, turns their
+    /// appearance as a picture (`Objects::turn`). A text of ours moves in its place, its corner
+    /// where `m` takes it, set as it was.
     pub fn transform_ink(&mut self, page: usize, at: Ref, m: Matrix) -> Result<Rect> {
         let held = self.hold(page, at)?;
         let area = self.moved(page, at, m, held)?;
@@ -473,8 +474,7 @@ impl PdfDoc {
     /// order, the document opened again once: on 2069 pages that is 4–5 ms, and a move of 20
     /// strokes took 95 ms opening it after each, 7 ms opening it once. The box each covered and
     /// now covers comes back, or why it could not move. Every one is read off the page before
-    /// any is written, while pdfium still lists the page as `/Annots` does, since a stroke of ours
-    /// moved goes to the end of it.
+    /// any is written, while pdfium still lists the page as `/Annots` does.
     pub fn transform_inks(
         &mut self,
         page: usize,
@@ -530,11 +530,9 @@ impl PdfDoc {
             ..read.style
         };
         if read.ours {
-            let index = self.cos.index_of(page, at)?;
             let (now, _) = self
                 .cos
                 .put_ink(page, height, &read.segs, style, Some(at))?;
-            self.cos.put_at(page, at, index)?;
             let area = read.bounds.union(now);
             return Ok(Recoloured::InPlace {
                 was: [r, g, b],
@@ -631,9 +629,10 @@ impl PdfDoc {
         let read = match held {
             Held::Text(_, area) => {
                 let mut entries = self.cos.annots(page)?;
-                entries.retain(|e| *e != Object::Ref(at));
+                let index = self.cos.index_of(page, at)?;
+                entries.remove(index);
                 self.cos.set_annots(page, entries)?;
-                return Ok((Drawn::Ours { at, area }, area));
+                return Ok((Drawn::Ours { at, index, area }, area));
             }
             // A picture goes back where it was among the page's annotations, as it moves there.
             Held::Picture(placed, _) => {
@@ -653,6 +652,7 @@ impl PdfDoc {
                 entries.remove(index);
                 Drawn::Ours {
                     at,
+                    index,
                     area: read.bounds,
                 }
             }
@@ -748,9 +748,9 @@ impl PdfDoc {
 pub(super) const OURS: &[u8] = b"accent-";
 
 impl Objects {
-    /// One stroke of ours, `segs` in top-left page points on a page `height` points tall, at the
-    /// end of the page's `/Annots`, written into the stroke `into` or a new one: the box it
-    /// covers, and its object.
+    /// One stroke of ours, `segs` in top-left page points on a page `height` points tall, written
+    /// into the stroke `into` in its place or a new one at the end of the page's `/Annots`: the
+    /// box it covers, and its object.
     ///
     /// The appearance stream draws in the page's own space, its `/BBox` being the `/Rect`, so a
     /// reader fits it where it was drawn; the `/InkList`, the flattened path, is what another
