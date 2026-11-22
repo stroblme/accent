@@ -1693,8 +1693,11 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - The pointer over a node lights it, its links and its neighbours, and dims the rest to 35 % (user decision 2026-11-22).
   The change crossfades over 150 ms, the names with the discs, and the lit node stays lit for 150 ms after the pointer leaves it, so moving from node to node goes straight from one neighbourhood to the next.
   With animations off nothing crossfades, and the lit node still stays lit for those 150 ms.
-- Names are placed best first, the file in front, the node the keyboard is on and the lit node always, then the lit node's neighbours and the rest by how many links each has (user decision 2026-11-22).
-  A name whose box meets one already placed is left out, so how many show follows the zoom.
+  While the pointer lights no node, the file in front is lit the same way but milder, the rest dimmed to 60 %, so the graph shows where the note being read sits, and the pointer takes over at once and hands back to it with the same crossfade (user decision 2026-11-22).
+  When the file in front changes to a node off the canvas, as a tab picked in another pane makes it, a graph the reader has moved eases over to put that node in the middle, at once with animations off, while a fitted graph stays as it is.
+- Names are placed best first, the file in front, the node the keyboard is on and the lit node always, then the names already shown, so they stay while the nodes move, then the lit node's neighbours and then the rest by how many links each has (user decisions 2026-11-22).
+  A name whose box meets one already placed is left out, so how many show follows the zoom, and a pan alone changes none of them.
+  Each sits on a soft rounded backdrop in the canvas's colour, so it reads over the discs and links beneath it without covering its own disc.
 - **The layout is a live force layout** worked out off the main loop (user decision 2026-11-21), so the nodes settle as they are watched, a dragged node pulls its neighbours along and what a click adds slides out of the node clicked.
   A dragged node is held only while the pointer holds it, and settles back with the rest once let go, however long it was held.
   With animations off the settled layout shows at once, and a drag moves the one node until it is let go.
@@ -2704,6 +2707,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
   The other timings we own are debounces, which keep the main loop free.
 - A mouse wheel's notch eases over 200 ms, ease-out cubic, as GTK eases a page key or a scrollbar press (`widgets::smooth_wheel`): GTK moves a notch's whole step at once, which reads as a stutter over text.
   Notches in quick succession add up to one target; a touchpad, Shift's sideways scroll and Control's zoom stay GTK's.
+  The graph eases over to the file in front the same way when that file's node is off its canvas (Graph).
   Every scroller that scrolls up and down eases it: documents, the minimap (the view's own easing), images, diagrams, terminals, popovers, dialogs and the sidebar's panes, the Git pane's among them.
   The scrollers libadwaita builds into Preferences, Keyboard Shortcuts and About ease it too (`widgets::smooth_wheels`).
   Any other scroll meanwhile takes over where the easing is: the caret followed, a page key, a heading jumped to, a diagram's page turned at its edge.

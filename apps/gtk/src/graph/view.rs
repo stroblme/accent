@@ -28,7 +28,7 @@ use gtk::{gdk, glib, graphene, gsk, pango};
 
 use super::camera::{self, Arrow, Camera};
 use super::model::{self, Changes, Graph, Paint};
-use super::raster::{self, Colours, Rgba};
+use super::raster::{self, Colours, Light, Rgba};
 use super::worker::{Cmd, Picture, Worker};
 use crate::theme;
 use accent_core::graph::layout::Spread;
@@ -39,6 +39,10 @@ const LABELS_MAX: usize = 400;
 const LABELS_KEPT: usize = 4 * LABELS_MAX;
 /// The widest a name is drawn before it is ellipsized, in pixels.
 const LABEL_WIDTH: i32 = 160;
+/// How far a name's backdrop reaches past its text, across and down, and how round its corners
+/// are, in pixels: less across than the gap before the disc, which it never covers.
+const BACKDROP_PAD: [f32; 2] = [2.0, 0.0];
+const BACKDROP_RADIUS: f32 = 4.0;
 /// How far a wheel notch pans, in pixels.
 const NOTCH: f64 = 64.0;
 /// How long a new picture crossfades in over the one shown, in ms: quicker than the app's other
@@ -127,6 +131,9 @@ mod imp {
         /// the frames whose names were drawn.
         pub labels: RefCell<HashMap<String, Label>>,
         pub frame: Cell<u64>,
+        /// The names drawn in the last frame, by key, in the order placed: the next frame places
+        /// them first, so they stay while the nodes move.
+        pub shown: RefCell<Vec<String>>,
         /// The nodes best-linked first, and the generation they are of.
         pub by_degree: RefCell<(u64, Vec<usize>)>,
         /// A character's width and a line's height in the names' font, in pixels, until the
@@ -455,11 +462,36 @@ impl GraphView {
     }
 
     /// Draw the file keyed `key` in the accent, or none.
+    /// A graph the reader moved eases over to put the file's node in the middle when it is off
+    /// the canvas, at once with animations off, and a fitted one stays as it is (user decision
+    /// 2026-11-22).
     pub fn set_front(&self, key: Option<String>) {
-        if *self.imp().front.borrow() != key {
-            self.imp().front.replace(key);
-            self.queue_draw();
+        let imp = self.imp();
+        if *imp.front.borrow() == key {
+            return;
         }
+        let at = (key.as_deref()).and_then(|key| self.graph().index_of(key));
+        let at = at.and_then(|i| imp.at.borrow().get(i).copied());
+        imp.front.replace(key);
+        self.queue_draw();
+        let wheel = imp.wheel.borrow().clone();
+        if let (Some(p), Some(wheel)) = (at, wheel)
+            && imp.placed.get()
+            && !self.camera().fitting
+            && !self.shows(p)
+        {
+            let mut camera = self.camera();
+            camera.centre(p, self.size());
+            imp.easing.set((self.camera().offset, camera.offset));
+            wheel.play();
+        }
+    }
+
+    /// Whether world point `p` is on the canvas, [`camera::MARGIN`] inside its edges.
+    fn shows(&self, p: [f32; 2]) -> bool {
+        let (size, s) = (self.size(), self.camera().to_screen(p));
+        let inside = |v: f64, max: f64| (camera::MARGIN..=max - camera::MARGIN).contains(&v);
+        inside(s[0], size[0]) && inside(s[1], size[1])
     }
 
     /// A file or a folder moved: its nodes keep their places under the new keys.
@@ -502,14 +534,12 @@ impl GraphView {
         };
         imp.current.replace(Some(key.to_string()));
         self.update_property(&[gtk::accessible::Property::Description(&said)]);
-        let (size, Some(&p)) = (self.size(), imp.at.borrow().get(i)) else {
+        let Some(p) = imp.at.borrow().get(i).copied() else {
             return;
         };
-        let mut camera = self.camera();
-        let s = camera.to_screen(p);
-        let inside = |v: f64, max: f64| (camera::MARGIN..=max - camera::MARGIN).contains(&v);
-        if centre || !(inside(s[0], size[0]) && inside(s[1], size[1])) {
-            camera.centre(p, size);
+        if centre || !self.shows(p) {
+            let mut camera = self.camera();
+            camera.centre(p, self.size());
             camera.fitting = false;
             self.set_camera(camera);
         }
@@ -959,7 +989,16 @@ impl GraphView {
                 camera,
                 size,
                 scale: surface.map_or(f64::from(self.scale_factor()), |s| s.scale()),
-                lit: imp.hover.get(),
+                lit: match imp.hover.get() {
+                    Some(node) => Some(Light {
+                        node,
+                        dim: theme::GRAPH_DIM_ALPHA,
+                    }),
+                    None => index(&imp.front).map(|node| Light {
+                        node,
+                        dim: theme::GRAPH_FRONT_DIM_ALPHA,
+                    }),
+                },
                 front: index(&imp.front),
                 current: index(&imp.current).filter(|_| self.has_focus()),
                 colours: Colours {
@@ -1042,10 +1081,10 @@ impl GraphView {
         };
         // The node each picture shown lights, a picture of a graph since changed lighting one it
         // may no longer hold, and its share of the canvas.
-        let lit = |p: &Picture| p.lit.filter(|&l| l < graph.nodes.len());
+        let lit = |p: &Picture| p.lit.filter(|l| l.node < graph.nodes.len());
         let ends = match fade {
             Some((from, t)) if lit(from) != lit(picture) => {
-                vec![(lit(from), 1.0 - t), (lit(picture), t)]
+                vec![(lit(picture), t), (lit(from), 1.0 - t)]
             }
             _ => vec![(lit(picture), 1.0)],
         };
@@ -1055,15 +1094,16 @@ impl GraphView {
     }
 
     /// The names placed for each lit node of `ends`, drawn at its share, so they crossfade with
-    /// the pictures: a name placed for both at both shares together. Each sits right of its disc,
-    /// dimmed outside the lit node's neighbourhood.
+    /// the pictures: a name placed for both at both shares together. Each sits right of its disc
+    /// on a soft backdrop of the canvas's colour, which reads over the discs and links under it,
+    /// and is dimmed outside the lit node's neighbourhood, its backdrop with it.
     fn paint_labels(
         &self,
         snapshot: &gtk::Snapshot,
         graph: &Graph,
         screen: &[[f64; 2]],
         radius: &dyn Fn(usize) -> f64,
-        ends: &[(Option<usize>, f64)],
+        ends: &[(Option<Light>, f64)],
         ink: gdk::RGBA,
     ) {
         let imp = self.imp();
@@ -1072,17 +1112,19 @@ impl GraphView {
         // Each name drawn with its alpha, and where it is in that list.
         let mut names: Vec<(usize, pango::Layout, f32)> = Vec::new();
         let mut slot: HashMap<usize, usize> = HashMap::new();
-        for &(lit, share) in ends {
+        for &(light, share) in ends {
+            let lit = light.map(|l| l.node);
             let near: HashSet<usize> = lit
                 .map(|l| graph.adjacency[l].iter().copied().chain([l]).collect())
                 .unwrap_or_default();
             for (i, layout) in self.place(graph, screen, radius, lit) {
-                let alpha = match (lit.is_some() && !near.contains(&i), graph.nodes[i].kind) {
-                    (true, _) => theme::GRAPH_DIM_ALPHA,
-                    (false, kind) if model::paint_of(kind) == Paint::Ghost => {
+                let dim = light.filter(|_| !near.contains(&i)).map(|l| l.dim);
+                let alpha = match (dim, graph.nodes[i].kind) {
+                    (Some(dim), _) => dim,
+                    (None, kind) if model::paint_of(kind) == Paint::Ghost => {
                         theme::GRAPH_FAINT_ALPHA
                     }
-                    (false, _) => ink.alpha(),
+                    (None, _) => ink.alpha(),
                 } * share as f32;
                 match slot.entry(i) {
                     Entry::Occupied(at) => names[*at.get()].2 += alpha,
@@ -1093,14 +1135,45 @@ impl GraphView {
                 }
             }
         }
+        let shown = names.iter().map(|(i, ..)| graph.nodes[*i].key.clone());
+        imp.shown.replace(shown.collect());
+        // The backdrops first, so none covers a name, one shape for each strength among them.
+        let page = crate::highlight::page(adw::StyleManager::default().is_dark());
+        let mut backdrops: Vec<(f32, gsk::PathBuilder)> = Vec::new();
+        let mut texts = Vec::with_capacity(names.len());
         for (i, layout, alpha) in names {
-            let height = layout.pixel_size().1 as f32;
-            let p = screen[i];
+            let (width, height) = layout.pixel_size();
+            let at = graphene::Point::new(
+                (screen[i][0] + radius(i) + 3.0) as f32,
+                (screen[i][1] - f64::from(height) / 2.0) as f32,
+            );
+            let shade = theme::GRAPH_BACKDROP_ALPHA * alpha;
+            let k = match backdrops.iter().position(|(s, _)| *s == shade) {
+                Some(k) => k,
+                None => {
+                    backdrops.push((shade, gsk::PathBuilder::new()));
+                    backdrops.len() - 1
+                }
+            };
+            let [x, y] = BACKDROP_PAD;
+            let room = graphene::Rect::new(
+                at.x() - x,
+                at.y() - y,
+                width as f32 + 2.0 * x,
+                height as f32 + 2.0 * y,
+            );
+            backdrops[k]
+                .1
+                .add_rounded_rect(&gsk::RoundedRect::from_rect(room, BACKDROP_RADIUS));
+            texts.push((layout, at, alpha));
+        }
+        for (shade, shape) in backdrops {
+            let colour = theme::at(page, shade);
+            snapshot.append_fill(&shape.to_path(), gsk::FillRule::Winding, &colour);
+        }
+        for (layout, at, alpha) in texts {
             snapshot.save();
-            snapshot.translate(&graphene::Point::new(
-                (p[0] + radius(i) + 3.0) as f32,
-                p[1] as f32 - height / 2.0,
-            ));
+            snapshot.translate(&at);
             snapshot.append_layout(&layout, &theme::at(ink, alpha));
             snapshot.restore();
         }
@@ -1113,10 +1186,11 @@ impl GraphView {
     }
 
     /// The names that go on the canvas with `lit` lit, best first, each laid out: the file in
-    /// front, the node the keyboard is on and the lit node always, then the lit node's
-    /// neighbours and the rest, best-linked first, each where its box meets none placed before,
-    /// [`LABELS_MAX`] in all. A name's box is guessed before it is laid out, so one that does not
-    /// fit costs no layout.
+    /// front, the node the keyboard is on and the lit node always, then the names drawn in the
+    /// last frame, so they stay while the nodes move, the lit node's neighbours and the rest,
+    /// best-linked first, each where its box meets none placed before, [`LABELS_MAX`] in all
+    /// (user decisions 2026-11-22). A name's box is guessed before it is laid out, so one that
+    /// does not fit costs no layout.
     fn place(
         &self,
         graph: &Graph,
@@ -1137,7 +1211,9 @@ impl GraphView {
         let mut labels = imp.labels.borrow_mut();
         let mut taken = camera::Occupied::new(self.size(), imp.camera.get().offset);
         let mut placed: Vec<(usize, pango::Layout)> = Vec::new();
-        let candidates = always.into_iter().flatten().chain(near);
+        let shown = imp.shown.borrow();
+        let shown = shown.iter().filter_map(|key| graph.index_of(key));
+        let candidates = always.into_iter().flatten().chain(shown).chain(near);
         for i in candidates.chain(by_degree.iter().copied()) {
             if placed.len() == LABELS_MAX {
                 break;

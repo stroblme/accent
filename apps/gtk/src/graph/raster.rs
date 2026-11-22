@@ -24,6 +24,13 @@ pub struct Colours {
     pub accent: Rgba,
 }
 
+/// A node lit, and how far everything outside its neighbourhood is dimmed: its alpha.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Light {
+    pub node: usize,
+    pub dim: f32,
+}
+
 /// How the canvas wants the graph drawn.
 #[derive(Clone, Debug, PartialEq)]
 pub struct View {
@@ -33,8 +40,9 @@ pub struct View {
     /// The canvas in pixels, and its display's pixels to one of them.
     pub size: [f64; 2],
     pub scale: f64,
-    /// The node the pointer lights, which dims everything outside its neighbourhood.
-    pub lit: Option<usize>,
+    /// The node lit, its links and neighbours over the rest: the one under the pointer, or else,
+    /// more mildly, the file in front.
+    pub lit: Option<Light>,
     /// The file in front, in the accent with a ring.
     pub front: Option<usize>,
     /// The node the keyboard is on while the canvas has the keyboard, ringed.
@@ -82,7 +90,8 @@ pub fn draw(scene: &Scene, view: &View, camera: Camera) -> Pixels {
         ((f64::from(model::radius(scene.near[i].len())) * camera.zoom).max(camera::MIN_RADIUS)
             * scale) as f32
     };
-    let lit = view.lit.filter(|&l| l < n);
+    let light = view.lit.filter(|l| l.node < n);
+    let lit = light.map(|l| l.node);
     let mut near = vec![lit.is_none(); n];
     if let Some(l) = lit {
         near[l] = true;
@@ -134,7 +143,7 @@ pub fn draw(scene: &Scene, view: &View, camera: Camera) -> Pixels {
             k @ 1..=5 => colours.lanes[k - 1],
             6 | 7 => alpha(ink, theme::GRAPH_FAINT_ALPHA),
             8 => alpha(ink, theme::GRAPH_RING_ALPHA),
-            _ => alpha(ink, theme::GRAPH_DIM_ALPHA),
+            _ => alpha(ink, light.map_or(1.0, |l| l.dim)),
         };
         match scene.paints[i] {
             Paint::Tag => px.square(p, r, colour),

@@ -71,9 +71,9 @@ pub struct Picture {
     pub texture: gdk::MemoryTexture,
     pub camera: Camera,
     pub size: [f64; 2],
-    /// The view's serial, and the node it lit.
+    /// The view's serial, and what it lit.
     pub serial: u64,
-    pub lit: Option<usize>,
+    pub lit: Option<raster::Light>,
     /// How long it took to draw, in ms, and the generation drawn, for the drill.
     #[cfg(feature = "bench")]
     pub ms: f64,

@@ -244,8 +244,13 @@ pub const GRID_ALPHA: f32 = 0.1;
 /// decision 2026-11-21).
 pub const GRAPH_EDGE_ALPHA: f32 = 0.2;
 pub const GRAPH_DIM_ALPHA: f32 = 0.35;
+/// What lies outside the neighbourhood of the file in front while the pointer lights no node,
+/// dimmed less than the pointer dims it (user decision 2026-11-22).
+pub const GRAPH_FRONT_DIM_ALPHA: f32 = 0.6;
 pub const GRAPH_FAINT_ALPHA: f32 = 0.6;
 pub const GRAPH_RING_ALPHA: f32 = 0.4;
+/// The backdrop of the canvas's colour behind a graph's name (user decision 2026-11-22).
+pub const GRAPH_BACKDROP_ALPHA: f32 = 0.7;
 
 /// Selection opacity matching libadwaita: 30 % accent while focused, 10 % foreground otherwise.
 /// Custom secondary selections match GTK's primary selection.
