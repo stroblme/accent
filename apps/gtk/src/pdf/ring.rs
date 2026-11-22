@@ -7,7 +7,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use accent_core::config::DrawingConfig;
-use accent_core::pdf::Theme;
+use accent_core::pdf::{TextStyle, Theme};
 
 use super::Mode;
 use super::tools::{Hand, drag_of, nearest, widths};
@@ -93,6 +93,8 @@ pub struct PdfRing {
     /// Whether the swatches are out in place of the commands.
     choosing: Cell<bool>,
     config: RefCell<DrawingConfig>,
+    /// How the text open in the editor is set, which the Text tool's options show while it is.
+    typing: Cell<Option<TextStyle>>,
     /// The document's recolouring, which the swatches are painted through.
     theme: Rc<Cell<Theme>>,
     /// The tool in hand, as the window has it.
@@ -159,6 +161,7 @@ impl PdfRing {
             colours: RefCell::default(),
             choosing: Cell::new(false),
             config: RefCell::new(DrawingConfig::default()),
+            typing: Cell::new(None),
             theme,
             tool: Cell::new(Mode::Read),
             eraser: Cell::new(false),
@@ -269,16 +272,24 @@ impl PdfRing {
         self.sync_options();
     }
 
+    /// The style of the text open in the editor, which the Text tool's options show checked in
+    /// place of the config's, or `None` once it is closed.
+    pub fn set_typing(&self, style: Option<TextStyle>) {
+        self.typing.set(style);
+        self.sync_options();
+    }
+
     /// Show the tool in hand's options, checked as the config has them, and nothing for a tool
     /// with none.
     fn sync_options(&self) {
         let tool = self.ring.tool().style_owner();
         let config = self.config.borrow();
         let widths = widths(self.ring.tool());
-        let (width, colour) = match tool {
-            Mode::Eraser => (config.eraser_radius, None),
-            Mode::Highlighter => (config.highlighter_width, Some(config.highlighter_color)),
-            Mode::Text => (config.text_size, Some(config.text_color)),
+        let (width, colour) = match (tool, self.typing.get()) {
+            (Mode::Eraser, _) => (config.eraser_radius, None),
+            (Mode::Highlighter, _) => (config.highlighter_width, Some(config.highlighter_color)),
+            (Mode::Text, Some(style)) => (style.size, Some(Some(style.rgb))),
+            (Mode::Text, None) => (config.text_size, Some(config.text_color)),
             _ => (config.pen_width, Some(config.pen_color)),
         };
         let names = match tool {
@@ -299,8 +310,15 @@ impl PdfRing {
         }
         let swatches = crate::theme::swatches();
         let shown = widths.is_some() && colour.is_some();
+        // Compared as the file is given them, the accent as it is now, so a text typed in the
+        // accent checks the accent's swatch.
+        let checked = colour.map(resolved);
         for (i, button) in self.swatches.iter().enumerate() {
-            check(button, shown, shown && colour == Some(swatches[i]));
+            check(
+                button,
+                shown,
+                shown && checked == Some(resolved(swatches[i])),
+            );
         }
         let erasing = self.ring.tool() == Mode::Eraser;
         for (button, (partial, _, _)) in self.erasers.iter().zip(ERASERS) {
@@ -402,12 +420,17 @@ impl PdfRing {
         let commands = self.commands.iter().filter(|b| b.is_visible()).count();
         let swatches = crate::theme::swatches().map(resolved);
         let checked = swatch_of(&self.colours.borrow(), &swatches);
+        let on = |buttons: &[gtk::ToggleButton]| {
+            buttons.iter().position(|b| b.is_visible() && b.is_active())
+        };
         format!(
-            "shown={:?} widths={} swatches={} erasers={} commands={commands} colour={} \
-             recolours={} checked={checked:?} painted={}",
+            "shown={:?} widths={} width={:?} swatches={} swatch={:?} erasers={} \
+             commands={commands} colour={} recolours={} checked={checked:?} painted={}",
             self.ring.tool(),
             shown(&self.widths),
+            on(&self.widths),
             shown(&self.swatches),
+            on(&self.swatches),
             shown(&self.erasers),
             self.colour.is_visible(),
             shown(&self.recolours),

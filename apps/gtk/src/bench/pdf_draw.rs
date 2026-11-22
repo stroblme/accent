@@ -249,7 +249,7 @@ fn greyed(ring: &gtk::Widget) -> String {
 }
 
 /// A real press on the button of `ring` that `label` names.
-async fn press(app: &Rc<App>, ring: &gtk::Widget, label: &str) -> bool {
+pub(super) async fn press(app: &Rc<App>, ring: &gtk::Widget, label: &str) -> bool {
     let button = find_widget(ring, &|w| {
         w.is::<gtk::Button>() && w.is_visible() && w.tooltip_text().as_deref() == Some(label)
     });

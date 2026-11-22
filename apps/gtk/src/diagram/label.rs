@@ -41,8 +41,9 @@ pub enum Look {
     },
     /// Text typed onto a PDF page: plain, refusing what Helvetica cannot set, in a face like it
     /// at the text's size on screen, `ink` on `paper`, its lines and the room round them as the
-    /// page sets them (`accent_core::pdf::LEADING`, `PADDING`). The box grows with the text.
-    Plain { ink: [u8; 3], paper: [u8; 3] },
+    /// page sets them (`accent_core::pdf::LEADING`, `PADDING`). The box grows with the text, and
+    /// [`restyle`](LabelEditor::restyle) sets it again in another size or ink.
+    Plain { ink: Cell<[u8; 3]>, paper: [u8; 3] },
     /// A PDF form's text field filled in: plain, in the same face at the field's size on screen,
     /// `ink` on `paper`, over the field's box, which it keeps, its text set across as the field
     /// sets it, on one line or wrapped over several, and at most `max_len` characters long.
@@ -61,8 +62,8 @@ pub struct LabelEditor<T = CellId> {
     pub target: T,
     /// Label position and font size in document units. Reposition the editor on
     /// scroll and zoom so editing continues as the canvas moves.
-    pub place: Rect,
-    pub font_size: f64,
+    pub place: Cell<Rect>,
+    pub font_size: Cell<f64>,
     look: Look,
     view: sourceview5::View,
     buffer: sourceview5::Buffer,
@@ -77,6 +78,8 @@ pub struct LabelEditor<T = CellId> {
     original: String,
     /// The toplevel and the press handler on it, taken off again when the editor closes.
     press: RefCell<Option<(gtk::Widget, gtk::GestureClick)>>,
+    /// A widget a press on is no click away from the editor ([`spare`](Self::spare)).
+    spared: RefCell<Option<gtk::Widget>>,
     /// A label's own paste, which Paste as Plain Text holds back; typed text has none.
     paste: Option<glib::SignalHandlerId>,
 }
@@ -177,8 +180,8 @@ impl<T: 'static> LabelEditor<T> {
         overlay.set_clip_overlay(&layer, true);
         let editor = Rc::new(LabelEditor {
             target,
-            place,
-            font_size,
+            place: Cell::new(place),
+            font_size: Cell::new(font_size),
             look,
             view,
             buffer,
@@ -188,6 +191,7 @@ impl<T: 'static> LabelEditor<T> {
             px: Cell::new(0.0),
             original: text.to_string(),
             press: RefCell::new(None),
+            spared: RefCell::new(None),
             paste,
         });
         if let Look::Field {
@@ -275,7 +279,7 @@ impl<T: 'static> LabelEditor<T> {
     /// A field's text as the page sets it in its box: 2 pt in from either side and, on one line,
     /// down the middle, on several from 1 pt below the top (`accent_core::pdf`'s appearances).
     fn pad_field(&self, at: Rect, px: f64, multiline: bool) {
-        let scale = px / self.font_size.max(1.0);
+        let scale = px / self.font_size.get().max(1.0);
         let across = (2.0 * scale).round() as i32;
         self.view.set_left_margin(across);
         self.view.set_right_margin(across);
@@ -292,15 +296,16 @@ impl<T: 'static> LabelEditor<T> {
     /// it types again (`place`), so none of that shows round it. A text view asks for no more
     /// width than its margins, and the `GtkFixed` it is in gives it no more than it asks for.
     fn fit(&self) {
-        let scale = self.px.get() / self.font_size;
+        let scale = self.px.get() / self.font_size.get();
+        let place = self.place.get();
         let text = self
             .buffer
             .text(&self.buffer.start_iter(), &self.buffer.end_iter(), false);
         let (wide, _) = self.view.create_pango_layout(Some(&text)).pixel_size();
         // A pixel more, for the caret at the end of the widest line.
         let margins = self.view.left_margin() + self.view.right_margin() + 1;
-        let w = f64::from(wide + margins).max(self.place.w * scale);
-        let h = self.place.h * scale;
+        let w = f64::from(wide + margins).max(place.w * scale);
+        let h = place.h * scale;
         self.frame
             .set_size_request(w.ceil() as i32, h.ceil() as i32);
     }
@@ -333,7 +338,7 @@ impl<T: 'static> LabelEditor<T> {
                 editor::refont(&self.view);
                 return;
             }
-            Look::Plain { ink, paper } => (*ink, *paper),
+            Look::Plain { ink, paper } => (ink.get(), *paper),
             Look::Field { ink, paper, .. } => return self.field_font(px, *ink, *paper),
         };
         use accent_core::pdf::{BASELINE, LEADING, PADDING};
@@ -408,6 +413,29 @@ impl<T: 'static> LabelEditor<T> {
         );
         self.font.replace(Some(provider));
         editor::refont(&self.view);
+    }
+
+    /// Typed text set again at `font_size` points in `ink`, its box at `place` (document units):
+    /// a size or a colour picked while it is open. [`place_at`](Self::place_at) shows it so.
+    pub fn restyle(&self, place: Rect, font_size: f64, ink: [u8; 3]) {
+        if let Look::Plain { ink: shown, .. } = &self.look {
+            shown.set(ink);
+        }
+        self.place.set(place);
+        self.font_size.set(font_size);
+        // Its font again at the next placing, whatever the zoom.
+        self.px.set(0.0);
+    }
+
+    /// What the editor opened with.
+    pub fn original(&self) -> &str {
+        &self.original
+    }
+
+    /// Leave the editor open on a press on `widget`, as on one in the editor itself: the PDF
+    /// ring, whose sizes and colours set the text being typed. Before [`wire_finish`].
+    pub fn spare(&self, widget: &gtk::Widget) {
+        self.spared.replace(Some(widget.clone()));
     }
 
     /// The text typed, or `None` when it is what the editor opened with; typed text's without
@@ -588,6 +616,7 @@ fn wire_press<T: 'static>(editor: &Rc<LabelEditor<T>>, finish: impl Fn() + 'stat
     let press = gtk::GestureClick::new();
     press.set_propagation_phase(gtk::PropagationPhase::Capture);
     let (frame, window) = (editor.frame.clone(), root.clone());
+    let spared = editor.spared.borrow().clone();
     press.connect_pressed(move |gesture, _, x, y| {
         // A popover's presses reach the window too (the spelling menu's), on a surface of their
         // own: correcting a word is not a click outside the label.
@@ -600,6 +629,14 @@ fn wire_press<T: 'static>(editor: &Rc<LabelEditor<T>>, finish: impl Fn() + 'stat
         if frame
             .compute_bounds(&window)
             .is_some_and(|b| b.contains_point(&point))
+        {
+            return;
+        }
+        // Nor one on the widget spared, the PDF ring's buttons for typed text.
+        let picked = || window.pick(x, y, gtk::PickFlags::DEFAULT);
+        if spared
+            .as_ref()
+            .is_some_and(|spared| picked().is_some_and(|w| w == *spared || w.is_ancestor(spared)))
         {
             return;
         }
@@ -710,8 +747,8 @@ impl DiagramTab {
             return;
         };
         editor.place_at(
-            self.view.to_widget(&editor.place),
-            editor.font_size * self.view.scale(),
+            self.view.to_widget(&editor.place.get()),
+            editor.font_size.get() * self.view.scale(),
         );
     }
 

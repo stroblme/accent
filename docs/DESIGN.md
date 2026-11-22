@@ -1261,8 +1261,11 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A text of ours goes whole, under either eraser, once the pass comes within reach of its box.
 - Line, Rectangle and Circle are `/Ink` too, from press to release — a line snaps onto an axis within 4° and with Shift to steps of 15°, a circle grows from the press — because the eraser, Select and every read here know ink alone.
 - **Text types onto the page** (user decision 2026-10-27), for when no pen is at hand, as Firefox's PDF editor does: a click opens a box there, the diagram's label editor, plain, in a face like Helvetica at the text's size on screen, in its colour as the page shows it and with its lines and baselines where the page will set them.
+  The box is a line tall with its caret from the click on, before anything is typed, and its bottom left is where the click was, so its first line sits there (user decisions 2026-11-22).
   Return starts a line, nothing wraps, and the box grows with the text; `Ctrl+Return`, `Escape` or a click elsewhere finishes it, that click opening no other, and a box left empty writes nothing.
   A click on a text of ours opens it to type again, the box never smaller than the text was, so none of it shows round it; emptied, it is erased.
+  While a box is open the ring's sizes and colours show its own and set it, a press on them leaving it open, and they stay the Text tool's for the next text (user decision 2026-11-22 for the size).
+  A new box keeps its first line where the click was as its size changes, and a text of ours keeps its corner, where the page shows it until it is written.
   The box finished stays over the page until a tile carries what it typed, as a stroke does.
   It is a `/FreeText` (ISO 32000-1 §12.5.6.6) with an appearance stream of ours, drawn alike by every reader: Helvetica, which every reader has, so nothing is embedded, in WinAnsi encoding — Latin-1, the euro and Windows-1252's quotes and dashes, anything else refused as it is typed — its text the `/Contents` and its size and colour the `/DA`, which is what Firefox and Acrobat edit it by.
   Each text typed, typed again, moved or erased is one Undo step; it is not a comment, so neither the Outline pane nor a tooltip lists it, and another editor's typed text is theirs, which the tools leave alone.
@@ -1318,7 +1321,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - With a tool in hand the other tools' icons dim to Adwaita's `--dim-opacity`, their discs staying opaque, so the options read as that tool's; a dimmed tool comes back under the pointer or the keyboard and still takes a click.
   A press between the ring's buttons reaches the page.
 - With a pen on the seat the mouse selects and only the pen draws, its eraser tip erasing under any tool; "Draw with the Mouse" in Preferences gives the mouse back.
-  Select draws nothing, so the mouse uses it whatever the seat holds.
+  Select and Text draw nothing, so the mouse uses them whatever the seat holds, a text being typed on a keyboard anyway.
   While its eraser end is at the page, hovering or touching, the ring shows the Eraser and its options in place of the tool in hand, which comes back with the tip; nothing is picked by it.
   A finger never draws, under any tool: its drag moves the page, kinetically, through the scrolled window's own touch drag, and two fingers pinch-zoom (Zoom), the pinch taking both touches as the second lands so a pan cannot cancel it.
   A finger held still for a long press (GTK's, half a second) and then dragged selects from where it was held, as on a phone; the scrolled window's own long press stops it panning that touch.

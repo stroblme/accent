@@ -462,6 +462,9 @@ pub fn open(
         #[weak]
         tab,
         move |tool, choice| {
+            if tool == pdfview::Mode::Text {
+                tab.restyle_text(choice);
+            }
             if let Some(f) = tab.on_choice.get() {
                 f(&tab, tool, choice);
             }

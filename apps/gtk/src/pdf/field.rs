@@ -605,7 +605,7 @@ impl PdfTab {
             f64::from(at.height()),
         );
         let scale = f64::from(self.view.placement().0.scale);
-        editor.place_at(at, editor.font_size * scale);
+        editor.place_at(at, editor.font_size.get() * scale);
     }
 
     /// Fill the field in with what its editor holds and close it, kept over the page until a

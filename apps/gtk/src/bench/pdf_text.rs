@@ -85,14 +85,47 @@ pub(super) fn bench_pdf_text(app: &Rc<App>, rel: &str) {
         app.pdf_mode(pdfview::Mode::Text);
         glib::timeout_future(Duration::from_secs(1)).await;
         println!("bench text tool {}", pdf.ring().state());
+        // Placed by the mouse with a pen on the seat, which leaves the mouse only the tools that
+        // draw nothing: its box and caret show before anything is typed, the pointer at its
+        // bottom left. `foot` is that corner less the pointer, in pixels.
+        reader.bench_stylus(true);
+        let pointer = (w * 0.3, h * 0.3);
+        super::git::xtest(&format!(
+            "{}; focus",
+            click(on_screen(pointer.0, pointer.1))
+        ))
+        .await;
+        let foot = || {
+            let overlay = view.parent()?.parent()?;
+            let p = graphene::Point::new(pointer.0 as f32, pointer.1 as f32);
+            let p = view.compute_point(&overlay, &p)?;
+            let (at, ..) = pdf.typing_at()?;
+            Some(format!(
+                "{:.0},{:.0}",
+                at.x - f64::from(p.x()),
+                at.y + at.h - f64::from(p.y())
+            ))
+        };
+        println!(
+            "bench text placed {} foot={:?} cursor={}",
+            editing(&pdf),
+            foot(),
+            pdf.typing_cursor()
+        );
+        picture(&view, "text-placed.png");
+        reader.bench_stylus(false);
+        // A size picked on the ring sets the box open, which keeps the keyboard and its first
+        // line on the pointer.
+        let large = super::pdf_draw::press(&app, pdf.ring().widget(), "Large Text").await;
+        glib::timeout_future(Duration::from_millis(300)).await;
+        println!(
+            "bench text sized pressed={large} {} foot={:?}",
+            editing(&pdf),
+            foot()
+        );
         // Typed with Return for a second line and finished with Ctrl+Return; what Helvetica
         // cannot set refused as it is typed.
-        let at = on_screen(w * 0.3, h * 0.3);
-        let steps = format!(
-            "{}; focus; type Hallo Welt; key Return; type zwei",
-            click(at)
-        );
-        super::git::xtest(&steps).await;
+        super::git::xtest("type Hallo Welt; key Return; type zwei").await;
         pdf.type_text(" äö€→");
         glib::timeout_future(Duration::from_millis(300)).await;
         println!("bench text typing {}", editing(&pdf));
@@ -109,16 +142,22 @@ pub(super) fn bench_pdf_text(app: &Rc<App>, rel: &str) {
         println!("bench text box {boxed:?}");
         picture(&view, "text-typed.png");
 
-        // Typed again: its editor over it, holding it, finished with Escape.
+        // Typed again: its editor over it, holding it, the ring showing its size, set small
+        // there and finished with Escape.
         let Some(middle) = first() else {
             println!("bench text unlisted");
             return bench_quit(&app);
         };
         let steps = format!(
-            "{}; key End; key space; type mehr; key Escape",
+            "{}; key End; key space; type mehr",
             click(on_screen(middle.0, middle.1))
         );
         super::git::xtest(&steps).await;
+        println!("bench text retyping {}", pdf.ring().state());
+        let small = super::pdf_draw::press(&app, pdf.ring().widget(), "Small Text").await;
+        glib::timeout_future(Duration::from_millis(300)).await;
+        println!("bench text resized pressed={small} {}", editing(&pdf));
+        super::git::xtest("key Escape").await;
         save().await;
         println!("bench text retyped {} {}", editing(&pdf), filed(&pdf, page));
         undo(false).await;

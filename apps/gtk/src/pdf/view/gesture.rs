@@ -400,6 +400,12 @@ impl PdfView {
         self.note_hand(Hand::Pen { eraser });
     }
 
+    /// As though a stylus were on the seat, or none again, which Xvfb never has.
+    #[cfg(feature = "bench")]
+    pub fn bench_stylus(&self, attached: bool) {
+        BENCH_STYLUS.set(attached);
+    }
+
     /// The Select tool's press. The rotate ring, a corner or an edge of what it holds takes hold
     /// of all of it, and so does a press on one of its items or anywhere in their box, a drag
     /// moving or with Ctrl copying all that is held, and a Ctrl+click on an item held letting go
@@ -856,9 +862,19 @@ fn merged(gesture: &gtk::GestureDrag, view: &PdfView) -> Vec<(f64, f64)> {
 /// Whether the seat has a stylus at all. Asked on the press rather than cached: a tablet can be
 /// plugged in mid-session.
 fn stylus_attached() -> bool {
+    #[cfg(feature = "bench")]
+    if BENCH_STYLUS.get() {
+        return true;
+    }
     gdk::Display::default()
         .and_then(|d| d.default_seat())
         .is_some_and(|s| !s.devices(gdk::SeatCapabilities::TABLET_STYLUS).is_empty())
+}
+
+#[cfg(feature = "bench")]
+thread_local! {
+    /// Whether a drill has put a stylus on the seat (`PdfView::bench_stylus`).
+    static BENCH_STYLUS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// A piece a partial eraser leaves of `ink`: its style along `points`, as the render thread will

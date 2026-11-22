@@ -2,6 +2,7 @@
 //! text's size, empty or holding a text of ours to type again; finishing it types the text, types
 //! it again, or erases one emptied (`accent_core::pdf`'s `typed`).
 
+use std::cell::Cell;
 use std::rc::{Rc, Weak};
 use std::time::Duration;
 
@@ -9,16 +10,25 @@ use accent_core::pdf::{self, NamedText, TextStyle, Theme};
 use adw::prelude::*;
 use gtk::glib;
 
+use super::Choice;
 use super::protocol::Request;
 use super::tab::PdfTab;
 use crate::diagram::label::{LabelEditor, Look, wire_finish};
 
 /// What the editor open over the page types: on which page, which text of ours it types again
-/// (`None` for a new one), and how it is set.
+/// (`None` for a new one), how it is set, which a size or a colour picked on the ring while it is
+/// open changes, and how it was set when it opened.
 pub struct Typing {
     pub page: usize,
     pub id: Option<u32>,
-    pub style: TextStyle,
+    pub style: Cell<TextStyle>,
+    was: TextStyle,
+}
+
+/// How tall a box of one line is at `size`: a new text's box stands that tall over the pointer,
+/// which is its bottom left, so its first line sits on the pointer.
+fn one_line(size: f32) -> f32 {
+    (pdf::LEADING + 2.0 * pdf::PADDING) * size
 }
 
 impl PdfTab {
@@ -31,12 +41,14 @@ impl PdfTab {
         }
         let (id, text, place, style) = match hit {
             Some((id, t)) => (Some(id), t.typed.text, t.bounds, t.typed.style),
-            None => (
-                None,
-                String::new(),
-                pdf::Rect::from_corners(at, at),
-                self.view.text_style(),
-            ),
+            // A line tall from the start, so its box and caret show before anything is typed:
+            // an empty text view asks for no height.
+            None => {
+                let style = self.view.text_style();
+                let top = (at.0, at.1 - one_line(style.size));
+                let place = pdf::Rect::from_corners(top, at);
+                (None, String::new(), place, style)
+            }
         };
         let theme = self.view.theme();
         let paper = match theme {
@@ -44,7 +56,7 @@ impl PdfTab {
             Theme::Plain => [255; 3],
         };
         let look = Look::Plain {
-            ink: super::view::shown(style.rgb, theme),
+            ink: Cell::new(super::view::shown(style.rgb, theme)),
             paper,
         };
         let place = accent_drawio::Rect::new(
@@ -53,9 +65,17 @@ impl PdfTab {
             f64::from(place.width()),
             f64::from(place.height()),
         );
-        let target = Typing { page, id, style };
+        let target = Typing {
+            page,
+            id,
+            style: Cell::new(style),
+            was: style,
+        };
         let size = f64::from(style.size);
         let editor = LabelEditor::open(&self.overlay, target, &text, place, size, look);
+        // The ring's sizes and colours set the text open, so a press on them leaves it open.
+        editor.spare(self.ring.widget());
+        self.ring.set_typing(Some(style));
         *self.typing.borrow_mut() = Some(editor.clone());
         self.place_text();
         // Only the editor that left: another may have opened by the time the idle runs.
@@ -81,13 +101,41 @@ impl PdfTab {
         glib::idle_add_local_once(move || wire_finish(&editor, now, later));
     }
 
+    /// A size or a colour picked on the ring for the Text tool: set into the text open, if one is.
+    /// A new one keeps its first line on the pointer, and one of ours its corner, where the page
+    /// shows it until it is written.
+    pub(super) fn restyle_text(&self, choice: Choice) {
+        let Some(editor) = self.typing.borrow().clone() else {
+            return;
+        };
+        let was = editor.target.style.get();
+        let style = match choice {
+            Choice::Width(size) => TextStyle { size, ..was },
+            Choice::Colour(c) => TextStyle {
+                rgb: c.unwrap_or_else(crate::theme::accent_rgb),
+                ..was
+            },
+            Choice::Partial(_) => return,
+        };
+        editor.target.style.set(style);
+        let mut place = editor.place.get();
+        if editor.target.id.is_none() {
+            let h = f64::from(one_line(style.size));
+            (place.y, place.h) = (place.y + place.h - h, h);
+        }
+        let ink = super::view::shown(style.rgb, self.view.theme());
+        editor.restyle(place, f64::from(style.size), ink);
+        self.ring.set_typing(Some(style));
+        self.place_text();
+    }
+
     /// Put the editor back over its text: where it opens, and again whenever the page scrolls or
     /// zooms under it. Nothing while none is open.
     pub(super) fn place_text(&self) {
         let Some(editor) = self.typing.borrow().clone() else {
             return;
         };
-        let p = editor.place;
+        let p = editor.place.get();
         let corner = |x: f64, y: f64| (x as f32, y as f32);
         let r = pdf::Rect::from_corners(corner(p.x, p.y), corner(p.x + p.w, p.y + p.h));
         let Some(at) = self.view.widget_rect(editor.target.page, &r) else {
@@ -101,19 +149,31 @@ impl PdfTab {
         let (x, y) = to(at.x(), at.y());
         let at = accent_drawio::Rect::new(x, y, f64::from(at.width()), f64::from(at.height()));
         let scale = f64::from(self.view.placement().0.scale);
-        editor.place_at(at, editor.font_size * scale);
+        editor.place_at(at, editor.font_size.get() * scale);
     }
 
     /// Type what the editor holds and close it: a new text where it opened, or one of ours typed
-    /// again, or erased once emptied; nothing for an empty box or an unchanged text. Reentrant-safe, as
-    /// the diagram's label is: closing it moves the keyboard, which can call this again.
+    /// again or set again in another size or colour, or erased once emptied; nothing for an empty
+    /// box or an unchanged text. Reentrant-safe, as the diagram's label is: closing it moves the
+    /// keyboard, which can call this again.
     pub fn finish_text(self: &Rc<Self>) {
         let Some(editor) = self.typing.borrow_mut().take() else {
             return;
         };
-        let Typing { page, id, style } = editor.target;
-        let at = (editor.place.x as f32, editor.place.y as f32);
-        let request = match (id, editor.changed()) {
+        self.ring.set_typing(None);
+        let (page, id, style) = (
+            editor.target.page,
+            editor.target.id,
+            editor.target.style.get(),
+        );
+        let place = editor.place.get();
+        let at = (place.x as f32, place.y as f32);
+        // One of ours set in another size or colour is written again, typed into or not.
+        let restyled = id.is_some() && style != editor.target.was;
+        let typed = editor
+            .changed()
+            .or_else(|| restyled.then(|| editor.original().to_string()));
+        let request = match (id, typed) {
             (_, None) => None,
             (None, Some(text)) => Some(Request::Type {
                 page,
@@ -237,6 +297,19 @@ impl PdfTab {
         let editor = self.typing.borrow().clone()?;
         let (at, content, px) = editor.at();
         Some((at, content, px, editor.has_focus()))
+    }
+
+    /// Whether its caret shows: the editor holds the keyboard, draws its cursor and is on screen
+    /// a line tall at least.
+    pub fn typing_cursor(&self) -> bool {
+        self.typing.borrow().as_ref().is_some_and(|editor| {
+            let view = editor.view();
+            let line = f64::from(view.create_pango_layout(Some("Ag")).pixel_size().1);
+            view.has_focus()
+                && view.is_cursor_visible()
+                && view.is_mapped()
+                && f64::from(view.height()) >= line
+        })
     }
 
     /// `text` typed into it, as keys would: XTEST types no more than ASCII.

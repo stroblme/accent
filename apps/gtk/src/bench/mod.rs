@@ -315,8 +315,10 @@ use user_commands::bench_commands;
 ///   diagram, pressed through XTEST: none greyed, and the tool picked on its own tab alone;
 ///   then every pane's ring out after Reload Window; writes `ring-a.pdf`, `ring-b.pdf` and
 ///   `ring.drawio`),
-///   `text:<rel_path>` (the Text tool through XTEST: text typed and finished each way, typed
-///   again, moved, erased and emptied, with Undo, against the file; writes the file),
+///   `text:<rel_path>` (the Text tool through XTEST: a box placed by the mouse with a pen on
+///   the seat and sized on the ring before anything is typed, text typed and finished each way,
+///   typed again and sized again, moved, erased and emptied, with Undo, against the file,
+///   pictured into `$TMPDIR`; writes the file),
 ///   `select:<rel_path>[,<n>]` (the Select tool through XTEST: a lasso, moves, copy, cut, paste,
 ///   duplicate, delete, the arrows, a corner and a recolour through the ring's Colour and through
 ///   the palette's Recolour Selection, with Undo, against the file, pictured light and dark into
