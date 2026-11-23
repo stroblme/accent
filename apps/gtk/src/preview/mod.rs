@@ -62,10 +62,12 @@ pub struct Wiring {
     pub search: SavedSearch,
 }
 
-/// What a page's task boxes reach: whether a click flips one now, and what flips it.
+/// What a page's task boxes reach: whether a click flips one now, what flips it, and what steps
+/// the note's history back (`true`) or forward for Undo and Redo over the page.
 pub struct Tasks {
     pub live: Box<dyn Fn() -> bool>,
     pub flip: Flip,
+    pub history: Box<dyn Fn(bool)>,
 }
 
 /// Flips a task's box, told the text the page shows and the line of the task's item.
@@ -1139,7 +1141,8 @@ fn offset_at(view: &PreviewView, x: f64, y: f64) -> Option<i32> {
 }
 
 /// The view's input: a click on a link follows it and one on a task's box flips it, the pointer
-/// over either is a hand, Space pages, and the menu offers Copy and Select All (refresh T7).
+/// over either is a hand, Space pages, Undo and Redo step the note's history while its boxes are
+/// live, and the menu offers Copy and Select All (refresh T7).
 fn wire(page: &Rc<Page>) {
     let view = &page.view;
     let click = gtk::GestureClick::builder().button(1).build();
@@ -1182,9 +1185,21 @@ fn wire(page: &Rc<Page>) {
     keys.connect_key_pressed(glib::clone!(
         #[weak]
         view,
+        #[weak]
+        page,
         #[upgrade_or]
         glib::Propagation::Proceed,
         move |_, key, _, state| {
+            if let Some(back) = crate::multicaret::undo_or_redo(key, state) {
+                let tasks = page.task_hook.get().filter(|tasks| (tasks.live)());
+                return match tasks {
+                    Some(tasks) => {
+                        (tasks.history)(back);
+                        glib::Propagation::Stop
+                    }
+                    None => glib::Propagation::Proceed,
+                };
+            }
             if key != gdk::Key::space || state.contains(gdk::ModifierType::CONTROL_MASK) {
                 return glib::Propagation::Proceed;
             }

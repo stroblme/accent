@@ -316,7 +316,7 @@ impl View {
     /// Undo/redo while retaining the column. GTK restores text and one caret;
     /// our record restores all selections before/after the step. Unrecorded
     /// steps predating the column leave carets where restored text carries them.
-    fn step_history(&self, back: bool) {
+    pub(crate) fn step_history(&self, back: bool) {
         let buffer = self.buffer();
         let imp = self.imp();
         let can = match back {

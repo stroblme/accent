@@ -19,8 +19,8 @@ fn note() -> String {
 }
 
 /// The preview beside its note, the caret at the note's end: each box clicked, its line printed
-/// with whether the page stayed where it was read and the pointer over the box, then one Undo,
-/// after which the note is as it was. A drag across a box changes nothing, nor do clicks on the
+/// with whether the page stayed where it was read and the pointer over the box, then one `Ctrl+Z`
+/// over the page, after which the note is as it was, and on the first box a Redo and an Undo. A drag across a box changes nothing, nor do clicks on the
 /// links in a task's text: one to a heading of the note brings the page there, the other opens
 /// its note. Then an org note's preview alone in its pane:
 /// each checkbox clicked, saved; and presented, where a click changes nothing.
@@ -73,11 +73,22 @@ pub(super) async fn run(app: &Rc<App>) {
             after.lines().nth(line as usize - 1).unwrap_or_default(),
             moved.abs() > 1.0
         );
-        tab.buffer.undo();
+        // Undo over the page, which has kept the keyboard, steps the note's history; on the first
+        // box Redo too, and Undo again.
+        xtest("key ctrl+z").await;
         println!(
             "bench tasks undo line={line} restored={}",
             tab.text() == before
         );
+        if i == 0 {
+            xtest("key ctrl+shift+z").await;
+            let redone = tab.text() == after;
+            xtest("key ctrl+z").await;
+            println!(
+                "bench tasks redo line={line} redone={redone} restored={}",
+                tab.text() == before
+            );
+        }
         // The page shows the note again before the next click, which it would otherwise refuse.
         until("tasks", "rendered", 5_000, || {
             (rendered.preview().as_ref()).is_some_and(|p| p.shows(&tab.text()))

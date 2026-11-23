@@ -1036,6 +1036,18 @@ impl Tab {
         }
     }
 
+    /// Undo, or Redo with `back` false, as the tab's own `Ctrl+Z` and `Ctrl+Shift+Z` step its
+    /// history: a column of carets with its record of them, anything else through GtkTextView's.
+    pub fn step_history(&self, back: bool) {
+        match self.view.downcast_ref::<multicaret::View>() {
+            Some(column) if column.has_carets() => column.step_history(back),
+            _ => {
+                let action = if back { "text.undo" } else { "text.redo" };
+                let _ = self.view.activate_action(action, None);
+            }
+        }
+    }
+
     // --- preferences ---------------------------------------------------------------------
 
     /// Set tab and wrap width from preferences for notes and code, and the indent level of a code

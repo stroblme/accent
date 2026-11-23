@@ -500,14 +500,28 @@ impl App {
                     note.is_some_and(|note| note.writable()) && !presenting
                 }
             };
-            let flip = move |shown: &str, line| {
-                if let (Some(app), Some(rendered)) = (app.upgrade(), held.upgrade()) {
-                    app.click_box(&rendered, shown, line);
+            let flip = {
+                let (app, held) = (app.clone(), held.clone());
+                move |shown: &str, line| {
+                    if let (Some(app), Some(rendered)) = (app.upgrade(), held.upgrade()) {
+                        app.click_box(&rendered, shown, line);
+                    }
+                }
+            };
+            // The note's whole history, typing and all, as its own tab steps it (user decision
+            // 2026-11-23), the page rendered at once as after a click on a box.
+            let history = move |back| {
+                if let (Some(app), Some(rendered)) = (app.upgrade(), held.upgrade())
+                    && let Some(Note::Tab(tab)) = rendered.note()
+                {
+                    tab.step_history(back);
+                    app.render_rendered(&rendered, false);
                 }
             };
             preview.connect_tasks(crate::preview::Tasks {
                 live: Box::new(live),
                 flip: Box::new(flip),
+                history: Box::new(history),
             });
             rendered.frame.set_child(Some(preview.widget()));
             *rendered.preview.borrow_mut() = Some(preview);

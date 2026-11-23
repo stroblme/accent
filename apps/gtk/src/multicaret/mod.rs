@@ -150,7 +150,7 @@ fn ends_column(key: gdk::Key, state: gdk::ModifierType) -> bool {
 
 /// `Some(true)` for GtkTextView's Undo chord, `Ctrl+Z`, and `Some(false)` for its Redo,
 /// `Ctrl+Shift+Z` or `Ctrl+Y`.
-fn undo_or_redo(key: gdk::Key, state: gdk::ModifierType) -> Option<bool> {
+pub(crate) fn undo_or_redo(key: gdk::Key, state: gdk::ModifierType) -> Option<bool> {
     if !state.contains(crate::platform::PRIMARY_MODIFIER)
         || state.contains(gdk::ModifierType::ALT_MASK)
     {

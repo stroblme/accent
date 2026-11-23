@@ -1,5 +1,6 @@
 bench tasks click line=3 "- [x] open, see [[tasks-other]] or [[#Far]]" cursor=Some("pointer") moved=false
 bench tasks undo line=3 restored=true
+bench tasks redo line=3 redone=true restored=true
 bench tasks click line=4 "- [ ] done" cursor=Some("pointer") moved=false
 bench tasks undo line=4 restored=true
 bench tasks click line=5 "- [ ] upper" cursor=Some("pointer") moved=false

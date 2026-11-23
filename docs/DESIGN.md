@@ -850,6 +850,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - A click on a link into the vault is followed as a link is; one out of it goes to the system when Go to Definition's would (`markdown::is_url`); either only on a release that selected nothing.
 - A click on a task's box flips it in the note, a done box opened and an open or in-progress one (`[/]`, org's `[-]`) ticked as org's `org-toggle-checkbox` ticks it (user decision 2026-11-19), and the pointer over a box is a hand (`markdown::click_box`).
   It is one undo step in the note's buffer, which the save and the page follow as they follow typing, and the page keeps the keyboard and so is not pulled to the note's caret.
+  Undo `Ctrl+Z` and Redo `Ctrl+Shift+Z` / `Ctrl+Y` over the page step the note's own history as they would in its tab, typing included, and the page shows what they leave at once (user decision 2026-11-23).
   A note open in a terminal editor has its file written instead, a presented one keeps its boxes as they are, and the page has no key for a box, as it has none for a link.
 - A wikilink without an alias reads as in Obsidian's reading view, its target's headings and block apart: `[[Note#Part#Sub]]` as `Note > Part > Sub`, `[[#Part]]` as `Part`; printouts, the HTML export and Android's rendered note show it so too.
 - A `#tag` is a link to the tag, drawn as the editor draws a tag, in the accent without a link's underline; a click shows the Info pane's Tags section with that tag picked, as the palette's tag does.
