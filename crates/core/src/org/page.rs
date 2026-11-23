@@ -454,8 +454,8 @@ impl<'a> Page<'a> {
     }
 
     /// A block of code, or of HTML for an `HtmlBlock` `tag`: each line of `body` less the
-    /// indentation they share, and less the comma org escapes a `*` or a `#+` at the start of a
-    /// line with.
+    /// indentation they share, and less the first of the one or two commas org escapes a `*` or a
+    /// `#+` at the start of a line with (`org-unescape-code-in-string`).
     fn verbatim(&mut self, tag: Cm<'a>, body: &[Range<usize>], bytes: Range<usize>) {
         let text = self.text;
         let html = matches!(tag, Cm::HtmlBlock);
@@ -476,7 +476,9 @@ impl<'a> Page<'a> {
             let mut at = (l.start + indent).min(l.end);
             let s = &text[at..l.end];
             let lead = s.len() - s.trim_start().len();
-            if s[lead..].starts_with(",*") || s[lead..].starts_with(",#+") {
+            let rest = s[lead..].trim_start_matches(',');
+            let commas = s.len() - lead - rest.len();
+            if (1..=2).contains(&commas) && (rest.starts_with('*') || rest.starts_with("#+")) {
                 if lead > 0 {
                     self.push(shown(text[at..at + lead].into()), l.clone());
                 }
@@ -598,7 +600,9 @@ impl<'a> Page<'a> {
             }
         };
         let bytes = lines[i].start..lines[end - 1].end;
-        let (ordered, body) = bullet(text, lines[i].clone()).unwrap_or_default();
+        let (number, body) = bullet(text, lines[i].clone()).unwrap_or_default();
+        // Counted from the first item's counter cookie where it has one, as org exports it.
+        let ordered = number.map(|n| counter(text, body..lines[i].end).map_or(n, |(n, _)| n));
         let described = ordered.is_none() && term(text, body..lines[i].end).is_some();
         let list = match described {
             true => Cm::DefinitionList,
@@ -624,6 +628,9 @@ impl<'a> Page<'a> {
         let Some((_, mut body)) = bullet(text, first.clone()) else {
             return;
         };
+        if let Some((_, after)) = counter(text, body..first.end) {
+            body = after;
+        }
         let rest = |body: usize| -> Vec<Range<usize>> {
             std::iter::once(body..first.end)
                 .chain(lines[1..].iter().cloned())
@@ -729,6 +736,10 @@ impl<'a> Page<'a> {
             }
             Found::Math((r, tex, display)) => {
                 self.push(math(text[tex].into(), display), r.clone());
+                r.end
+            }
+            Found::Entity(r, shown) => {
+                self.push(Node::Event(Event::Text(shown.into())), r.clone());
                 r.end
             }
             Found::Script(up, r) => {
@@ -884,7 +895,9 @@ pub(super) fn object(text: &str, start: usize, i: usize, eol: usize, end: usize)
             .or_else(|| inline_footnote(text, i, end).map(Found::Note)),
         b'<' if b.get(i + 1) == Some(&b'<') => target(text, i, eol).map(Found::Target),
         b'<' => super::links::angle(text, i, eol).map(Found::Link),
-        b'\\' => latex(text, i, end).map(Found::Math),
+        b'\\' => latex(text, i, end)
+            .map(Found::Math)
+            .or_else(|| entity(text, i, end).map(|(r, shown)| Found::Entity(r, shown))),
         b'$' => dollars(text, i, end).map(Found::Math),
         c @ (b'_' | b'^') if b.get(i + 1) == Some(&b'{') && i > start => {
             script(text, i, eol).map(|r| Found::Script(c == b'^', r))
@@ -912,6 +925,8 @@ pub(super) enum Found {
     /// `^{…}` or `_{…}`, and whether it is a superscript.
     Script(bool, Range<usize>),
     Emphasis(u8, Range<usize>),
+    /// One of org's entities, `\vert{}`, and the text it stands for.
+    Entity(Range<usize>, &'static str),
 }
 
 /// The quote, verse or centre block opening on `lines[i]`, to its last line before the next
@@ -1003,6 +1018,19 @@ fn indentation(text: &str, line: Range<usize>) -> usize {
     let start = text[..line.start].rfind('\n').map_or(0, |n| n + 1);
     let s = &text[start..line.end];
     s.len() - s.trim_start().len()
+}
+
+/// An item's counter cookie at the start of `at`, `[@3]`, which numbers it 3: that number and
+/// where the text after it starts. A first item's starts its list there, and one on a later item
+/// is only taken out of its text.
+fn counter(text: &str, at: Range<usize>) -> Option<(u64, usize)> {
+    let s = &text[at.clone()];
+    let (digits, after) = s.strip_prefix("[@")?.split_once(']')?;
+    let n = (digits.bytes().all(|b| b.is_ascii_digit()))
+        .then(|| digits.parse().ok())
+        .flatten()?;
+    (after.chars().next().is_none_or(char::is_whitespace))
+        .then(|| (n, at.start + s.len() - after.trim_start().len()))
 }
 
 /// An item's checkbox at the start of `at`, `[ ]`, `[-]` or `[X]`: its tick and where the text
@@ -1134,6 +1162,19 @@ fn dollars(text: &str, i: usize, end: usize) -> Option<(Range<usize>, Range<usiz
         .then(|| (i..close + 1, i + 1..close, false))
 }
 
+/// The entity of org's at `i`, before `end`, `\name{}` or `\name` with no letter after it, and
+/// the text it stands for. Only the names of `org-entities` an org note meets are known: `vert`,
+/// which its formatted paste writes for a pipe in a table cell (`super::from_html`).
+fn entity(text: &str, i: usize, end: usize) -> Option<(Range<usize>, &'static str)> {
+    const ENTITIES: [(&str, &str); 1] = [("vert", "|")];
+    let rest = &text[i + 1..end];
+    let letters = rest.find(|c: char| !c.is_ascii_alphabetic());
+    let name = &rest[..letters.unwrap_or(rest.len())];
+    let (_, shown) = ENTITIES.iter().find(|(n, _)| *n == name)?;
+    let braces = rest[name.len()..].starts_with("{}");
+    Some((i..i + 1 + name.len() + if braces { 2 } else { 0 }, shown))
+}
+
 /// `^{…}` or `_{…}` at `i`, after a character that is no blank, within the line ending at `eol`.
 fn script(text: &str, i: usize, eol: usize) -> Option<Range<usize>> {
     if text.as_bytes()[i - 1].is_ascii_whitespace() {
@@ -1233,6 +1274,21 @@ Left out.
             out.replace_range(k..k + 4, "");
         }
         out
+    }
+
+    /// An entity, a counter cookie and a line of code escaped twice show as org exports them:
+    /// `\vert{}` a pipe, `[@3]` counting the list from 3, `,,*` with one comma taken off.
+    #[test]
+    fn org_shows_an_entity_a_counter_and_an_escaped_line_as_it_exports_them() {
+        let h = bare(
+            "| a \\vert{} b | c\\vert d \\vertical |\n\n1. [@3] three\n2. four\n\n- [@5] [ ] task\n\n\
+             #+begin_src org\n,,* star\n,* head\n,,,* three\n,,#+key\n#+end_src\n",
+        );
+        assert!(h.contains("a | b") && h.contains("c| d \\vertical"), "{h}");
+        assert!(h.contains("<ol start=\"3\">") && !h.contains("[@"), "{h}");
+        let task = "<input disabled=\"\" type=\"checkbox\"/>\ntask";
+        assert!(h.contains(task), "{h}");
+        assert!(h.contains(",* star\n* head\n,,,* three\n,#+key\n"), "{h}");
     }
 
     /// A checkbox links to its item's line, as a markdown task's box does.
