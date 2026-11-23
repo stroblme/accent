@@ -407,7 +407,8 @@ methods! {
     // ------------------------------------------------------------------ files
     read(rel: ref str) -> (String, Etag);
     read_text(rel: ref str) -> fs::Read;
-    /// Read an absolute dependency file only if a live host language session named it.
+    /// Read an absolute file outside the vault only if a live host language session named it, or
+    /// [`shell_file`](Vault::shell_file) found it where a shell named it.
     read_named(abs: ref str) -> fs::Read;
     /// The file a shell's output names where the files are, absolute or from home (`~/`), by its
     /// absolute path there, or `None` for a folder or nothing: a host's home is the host's to say.
