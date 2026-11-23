@@ -721,7 +721,9 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   The lanes running on past the commit are drawn dashed beside its files, so the graph stays whole while they are shown.
 - A commit's age (`just now`, `5 min`, `3 h`) is told again twice a minute while the history is on screen and as soon as it is shown again, so it never trails by more than half a minute: a list binds a row only when its item changes or it scrolls into view.
 - A commit leads its summary with a label per decoration — HEAD's branch in the accent, a remote branch dimmer, a tag outlined, and the stash `stash` in a local branch's label, its commits being in the history with nothing else saying what they are — three at most and `+N` for the rest; a branch and a tag of one name stay apart, and `origin/HEAD` and notes are not shown.
-- Each lane is handed down first parents, and a commit's lane takes the first of the names reaching it, its own branches' and tags' and those of the lanes ending at it, a local branch before a remote one before a tag and then by name (the stash and a detached HEAD name none).
+- Each lane is handed down first parents, and a commit's lane takes the first of the names reaching it, its own branches' and tags' and those of the lanes ending at it (the stash and a detached HEAD name none).
+  The default branch comes first, the one `origin/HEAD` points at or else a local `main` or `master`, and its `origin/` one with it, so the history it shares with a branch made from it or merged into it keeps its name (user decision 2026-11-23).
+  Then a local branch comes before a remote one and a remote one before a tag, and names of one kind go by name.
   A commit where lanes meet says "side branched here" of the names its lane does not carry on.
   That is the graph's own reading, with no git call of its own, so a branch that has not diverged shares its lane and forks nowhere.
   Nothing in it turns on which tip `git log --topo-order` lists first or on where HEAD is, so a branch behind its upstream keeps its name below the upstream's commits, and a commit, a fetch or a pull renames no row below what it moved.

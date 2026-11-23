@@ -736,6 +736,9 @@ pub struct Branches {
     /// [`Status`] says the same, and this is what the pane falls back on when a status did not
     /// come back.
     pub head: Option<String>,
+    /// The repository's default branch, by its local name: the one `origin/HEAD` points at, else
+    /// a local `main` or `master`. The history's lanes take its name first ([`lanes()`]).
+    pub default: Option<String>,
 }
 
 /// The repository's local and remote-tracking branches, in one `for-each-ref`: those HEAD was on
@@ -789,7 +792,8 @@ fn recently_checked_out(reflog: &[u8]) -> Vec<String> {
 /// Parse `<refname> NUL <symref> NUL <HEAD>` lines. Whole ref names rather than `refname:short`,
 /// which is the only way a local branch called `origin/x` stays apart from the remote one. A
 /// symbolic ref — `origin/HEAD`, which a clone sets — names another branch rather than being one,
-/// so it goes. `%(HEAD)` is `*` on the branch HEAD is on and a space everywhere else.
+/// so it is no branch of the lists, and `origin/HEAD`'s is the default branch. `%(HEAD)` is `*` on
+/// the branch HEAD is on and a space everywhere else.
 ///
 /// The names in `reflog` ([`recently_checked_out`]) go first, in its order; the rest keep the
 /// lines' own.
@@ -797,9 +801,17 @@ fn parse_branches(bytes: &[u8], reflog: &[u8]) -> Branches {
     let mut branches = Branches::default();
     for line in String::from_utf8_lossy(bytes).lines() {
         let mut fields = line.split('\0');
-        let (Some(name), Some("")) = (fields.next(), fields.next()) else {
+        let (Some(name), Some(symref)) = (fields.next(), fields.next()) else {
             continue;
         };
+        if !symref.is_empty() {
+            if name == "refs/remotes/origin/HEAD" {
+                branches.default = symref
+                    .strip_prefix("refs/remotes/origin/")
+                    .map(String::from);
+            }
+            continue;
+        }
         if let Some(local) = name.strip_prefix("refs/heads/") {
             if fields.next() == Some("*") {
                 branches.head = Some(local.to_string());
@@ -808,6 +820,10 @@ fn parse_branches(bytes: &[u8], reflog: &[u8]) -> Branches {
         } else if let Some(remote) = name.strip_prefix("refs/remotes/") {
             branches.remote.push(remote.to_string());
         }
+    }
+    if branches.default.is_none() {
+        let local = |name: &&str| branches.local.iter().any(|l| l == name);
+        branches.default = ["main", "master"].into_iter().find(local).map(String::from);
     }
     let recent = recently_checked_out(reflog);
     let rank = |name: &String| recent.iter().position(|r| r == name).unwrap_or(usize::MAX);

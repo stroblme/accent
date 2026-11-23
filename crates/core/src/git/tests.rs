@@ -482,7 +482,7 @@ fn parse_log_and_lanes_on_a_linear_history() {
         "skip and limit"
     );
 
-    let rows = lanes(commits);
+    let rows = lanes(commits, None);
     check_invariants(&rows);
     assert!(rows.iter().all(|r| r.column == 0 && r.through.is_empty()));
 
@@ -532,7 +532,11 @@ fn parse_refs_types_each_decoration_and_puts_heads_first() {
     assert!(parse_refs("").is_empty());
     let mut stash = node("s", &[], &[]);
     stash.refs = parse_refs("refs/stash");
-    assert_eq!(lanes(vec![stash])[0].lane, None, "a stash is no branch");
+    assert_eq!(
+        lanes(vec![stash], None)[0].lane,
+        None,
+        "a stash is no branch"
+    );
 }
 
 /// A commit with local branches `refs` on it, for the graph tests that need no repository.
@@ -567,11 +571,14 @@ fn named(rows: &[LogRow]) -> Vec<(Option<&str>, Vec<&str>)> {
 
 #[test]
 fn a_lane_is_named_by_its_tip_and_a_fork_names_the_lanes_that_end_there() {
-    let rows = lanes(vec![
-        node("m", &["b"], &["main"]),
-        node("s", &["b"], &["side"]),
-        node("b", &[], &[]),
-    ]);
+    let rows = lanes(
+        vec![
+            node("m", &["b"], &["main"]),
+            node("s", &["b"], &["side"]),
+            node("b", &[], &[]),
+        ],
+        None,
+    );
     check_invariants(&rows);
     assert_eq!(
         named(&rows),
@@ -583,37 +590,50 @@ fn a_lane_is_named_by_its_tip_and_a_fork_names_the_lanes_that_end_there() {
         "the base carries on as main, and side branched from it"
     );
     // Whichever tip `--topo-order` lists first.
-    let rows = lanes(vec![
-        node("s", &["b"], &["side"]),
-        node("m", &["b"], &["main"]),
-        node("b", &[], &[]),
-    ]);
-    assert_eq!(named(&rows)[2], (Some("main"), vec!["side"]));
+    let fork = |side: &str| {
+        let rows = lanes(
+            vec![
+                node("s", &["b"], &[side]),
+                node("m", &["b"], &["main"]),
+                node("b", &[], &[]),
+            ],
+            Some("main"),
+        );
+        (rows[2].lane.clone(), rows[2].forks.clone())
+    };
+    let base = |fork: &str| (Some("main".to_string()), vec![fork.to_string()]);
+    assert_eq!(fork("side"), base("side"));
+    // The default branch keeps its name before one whose name comes first.
+    assert_eq!(fork("fix"), base("fix"));
 }
 
 #[test]
 fn a_lane_takes_the_first_name_reaching_it_and_an_unnamed_one_forks_silently() {
     // A merge whose second parent's branch is gone: its lane has no name, and the base it came
-    // from says nothing. A branch merged into main by fast-forward names what is below it where
-    // its name comes first, as `done` does `main`.
-    let rows = lanes(vec![
-        node("wip", &["merge"], &[]),
-        node("merge", &["a", "s"], &["main"]),
-        node("a", &["b"], &["done"]),
-        node("s", &["b"], &[]),
-        node("b", &[], &[]),
-    ]);
+    // from says nothing. A branch merged into the default one by fast-forward sits on its lane,
+    // and names what is below it where there is no default branch and its name comes first.
+    let history = || {
+        vec![
+            node("wip", &["merge"], &[]),
+            node("merge", &["a", "s"], &["main"]),
+            node("a", &["b"], &["done"]),
+            node("s", &["b"], &[]),
+            node("b", &[], &[]),
+        ]
+    };
+    let rows = lanes(history(), Some("main"));
     check_invariants(&rows);
-    assert_eq!(
-        named(&rows),
-        [
+    let names = |done: &'static str| {
+        vec![
             (None, vec![]),
             (Some("main"), vec![]),
-            (Some("done"), vec![]),
+            (Some(done), vec![]),
             (None, vec![]),
-            (Some("done"), vec![]),
+            (Some(done), vec![]),
         ]
-    );
+    };
+    assert_eq!(named(&rows), names("main"));
+    assert_eq!(named(&lanes(history(), None)), names("done"));
 }
 
 /// The row of commit `id`.
@@ -655,9 +675,9 @@ fn a_commit_a_fetch_or_a_pull_leaves_the_rows_below_it_as_they_were() {
         vec![local.clone(), topic.clone(), moved.clone(), b.clone()],
         vec![topic.clone(), local.clone(), moved.clone(), b.clone()],
     ];
-    let first = lanes(histories[0].clone());
+    let first = lanes(histories[0].clone(), Some("main"));
     for history in histories {
-        let rows = lanes(history);
+        let rows = lanes(history, Some("main"));
         check_invariants(&rows);
         assert_eq!(row(&rows, "m").lane.as_deref(), Some("main"));
         assert_eq!(
@@ -686,7 +706,7 @@ fn lanes_on_a_diamond_merge() {
     commit_all(dir, "main");
     ok(dir, &["merge", "-q", "--no-ff", "side", "-m", "merge"]);
 
-    let rows = lanes(log(&open(dir), 0, 10).unwrap());
+    let rows = lanes(log(&open(dir), 0, 10).unwrap(), None);
     check_invariants(&rows);
     assert_eq!(rows.len(), 4);
     assert_eq!(rows[0].commit.summary, "merge");
@@ -715,7 +735,7 @@ fn lanes_on_two_unmerged_tips_stay_two_columns_wide() {
     write_file(dir, "m.md", "m\n");
     commit_all(dir, "main");
 
-    let rows = lanes(log(&open(dir), 0, 10).unwrap());
+    let rows = lanes(log(&open(dir), 0, 10).unwrap(), None);
     check_invariants(&rows);
     assert_eq!(rows.len(), 3);
     assert!(rows.iter().all(|r| r.column <= 1), "two tips, two columns");
@@ -747,7 +767,7 @@ fn lanes_on_an_octopus_merge() {
     commit_all(dir, "main");
     ok(dir, &["merge", "-q", "b", "c", "-m", "octopus"]);
 
-    let rows = lanes(log(&open(dir), 0, 10).unwrap());
+    let rows = lanes(log(&open(dir), 0, 10).unwrap(), None);
     check_invariants(&rows);
     assert_eq!(rows[0].commit.summary, "octopus");
     assert_eq!(rows[0].commit.parents.len(), 3);
@@ -774,7 +794,7 @@ fn lanes_on_two_orphan_roots() {
     write_file(dir, "g.md", "two\n");
     commit_all(dir, "second tip");
 
-    let rows = lanes(log(&open(dir), 0, 10).unwrap());
+    let rows = lanes(log(&open(dir), 0, 10).unwrap(), None);
     check_invariants(&rows);
     assert_eq!(rows.len(), 4);
     assert_eq!(
@@ -1129,7 +1149,15 @@ fn parse_branches_splits_local_from_remote_and_drops_the_symbolic_ones() {
     assert_eq!(listed.local, ["main", "feature/x"]);
     assert_eq!(listed.remote, ["origin/main"], "origin/HEAD is a pointer");
     assert_eq!(listed.head.as_deref(), Some("feature/x"));
+    assert_eq!(
+        listed.default.as_deref(),
+        Some("main"),
+        "where origin/HEAD points"
+    );
     assert_eq!(parse_branches(b"", b""), Branches::default());
+    // Without it a local `main` or `master` is the default branch.
+    let local = parse_branches(b"refs/heads/topic\0\0*\nrefs/heads/master\0\0 \n", b"");
+    assert_eq!(local.default.as_deref(), Some("master"));
 }
 
 #[test]

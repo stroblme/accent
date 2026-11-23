@@ -322,7 +322,7 @@ mod tests {
         git::Branches {
             local: local.iter().map(|b| b.to_string()).collect(),
             remote: remote.iter().map(|b| b.to_string()).collect(),
-            head: None,
+            ..git::Branches::default()
         }
     }
 

@@ -121,7 +121,8 @@ impl Panel {
         // thing about the history that did not survive one.
         let was = self.expanded.borrow().clone();
         self.collapse();
-        let rows = git::lanes(commits);
+        let default = self.state.borrow().branches.default.clone();
+        let rows = git::lanes(commits, default.as_deref());
         let mut items: Vec<LogItem> = rows.iter().cloned().map(LogItem::Commit).collect();
         // The last row, while git has more; the splice takes it away again once the last page
         // has come in.

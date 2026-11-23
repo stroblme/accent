@@ -106,10 +106,11 @@ pub(super) fn parse_refs(decorations: &str) -> Vec<Ref> {
 /// `--topo-order` ensures children precede parents.
 ///
 /// Freed columns are reused to keep width proportional to concurrent history lines. Branch names
-/// descend through first parents, a commit taking the first of the names reaching it
+/// descend through first parents, a commit taking the first of the names reaching it, `default`
+/// (the default branch, [`Branches::default`](super::Branches::default)) before the rest
 /// ([`lane_of`]). When columns converge, the commit's own column continues and the names that do
 /// not go on represent branches forked there.
-pub fn lanes(commits: Vec<Commit>) -> Vec<LogRow> {
+pub fn lanes(commits: Vec<Commit>, default: Option<&str>) -> Vec<LogRow> {
     let mut lanes: Vec<Option<Lane>> = Vec::new();
     let mut rows = Vec::with_capacity(commits.len());
 
@@ -124,7 +125,7 @@ pub fn lanes(commits: Vec<Commit>) -> Vec<LogRow> {
             .iter()
             .filter_map(|&i| lanes[i].take().and_then(|l| l.name))
             .collect();
-        let lane = lane_of(&ending, &commit.refs);
+        let lane = lane_of(&ending, &commit.refs, default);
         // Only where columns meet: one column ending in a straight line hands its lane over.
         let mut forks: Vec<&Ref> = match above.len() > 1 {
             true => ending
@@ -179,21 +180,31 @@ struct Lane {
     name: Option<Ref>,
 }
 
-/// The branch a commit's lane draws: the first, by kind and then by name, of the lanes `ending`
-/// at it and its own decorations `refs`, a local branch before a remote one and a remote one
-/// before a tag. A detached HEAD and the stash name no line of history.
+/// The branch a commit's lane draws: the first of the lanes `ending` at it and its own
+/// decorations `refs`. The `default` branch and its `origin/` one come first, so the line of
+/// history it shares with a branch made from it or merged into it keeps its name (user decision
+/// 2026-11-23); then a local branch before a remote one and a remote one before a tag, and then
+/// by name. A detached HEAD and the stash name no line of history.
 ///
 /// Nothing here turns on which tip `--topo-order` listed first, or where HEAD is, so a commit, a
 /// fetch, a pull or a checkout leaves every row below the commits it moves as it was: a branch
 /// behind its upstream keeps its own name below the upstream's commits, before and after them.
-fn lane_of(ending: &[Ref], refs: &[Ref]) -> Option<Ref> {
+fn lane_of(ending: &[Ref], refs: &[Ref], default: Option<&str>) -> Option<Ref> {
     let own = refs
         .iter()
         .filter(|r| !matches!(r.kind, RefKind::Head | RefKind::Stash));
+    let is_default = |r: &Ref| {
+        let name = match r.kind {
+            RefKind::LocalBranch => Some(r.name.as_str()),
+            RefKind::RemoteBranch => r.name.strip_prefix("origin/"),
+            _ => None,
+        };
+        name.is_some_and(|name| Some(name) == default)
+    };
     ending
         .iter()
         .chain(own)
-        .min_by_key(|r| (r.kind, &r.name))
+        .min_by_key(|r| (!is_default(r), r.kind, &r.name))
         .cloned()
 }
 
