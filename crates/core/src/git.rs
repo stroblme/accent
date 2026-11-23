@@ -184,10 +184,12 @@ pub struct LogRow {
     pub below: Vec<usize>,
     /// Columns of unrelated branches passing this row untouched.
     pub through: Vec<usize>,
-    /// The branch this commit's column draws: the first decoration found on it, going down from
-    /// its tip. `None` for a line of history no branch or tag names.
+    /// The branch this commit's column draws: the first by kind and name of the decorations
+    /// reaching it down first parents (see [`lanes()`]). `None` for a line of history no branch or
+    /// tag names.
     pub lane: Option<String>,
-    /// The named columns that end at this commit besides its own: the branches that forked here.
+    /// The names of the columns meeting at this commit that its lane does not carry on: the
+    /// branches that forked here.
     pub forks: Vec<String>,
 }
 

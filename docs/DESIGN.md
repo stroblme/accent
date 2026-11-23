@@ -620,7 +620,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Every row on screen is the picked repository's own; one never picked before shows its history when that refresh lands.
   The changes and the history go into their lists ten rows at a time, the frames drawn in between (`git::Fill`): GTK makes a row's widgets for each of a list's first 200 items, which spliced at once held the window up 80-130 ms on a repository with 2 000 changes.
   Each ten take the place of ten of the rows they replace, so a list whose every row changes never empties to fill again.
-  A commit on a branch behind its upstream renames the lanes of every commit below it, and the history went down to ten rows and grew back over 450 ms before (Xvfb, 2026-11-22).
+  A commit on a branch behind its upstream renamed the lanes of every commit below it, and the history went down to ten rows and grew back over 450 ms before (Xvfb, 2026-11-22), which no commit, fetch or pull does any more (lanes, below).
 - Picking away from such a repository cannot be spread so, every row having to go at once, so a row makes what most rows leave out — a commit's decorations, its not-pulled arrow and "side branched here", a file's folder — the first time it shows it, and only hides it after (`git::part`): a commit row is 8 widgets where it was 15, and the pick held the window up 23 ms where it held it 30 (medians, release, Xvfb, 2026-10-07, `ACCENT_BENCH_GIT=switch`'s `pick_ms`).
 - Beside the chooser, and only with it, Sync All: Sync's pull and push for every repository, one after another, carrying on past one that fails.
   One toast at the end names each that did not sync and why — git's own `error:` or `fatal:` line — and one stopped in a merge or a rebase is left alone and named with them.
@@ -721,8 +721,11 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   The lanes running on past the commit are drawn dashed beside its files, so the graph stays whole while they are shown.
 - A commit's age (`just now`, `5 min`, `3 h`) is told again twice a minute while the history is on screen and as soon as it is shown again, so it never trails by more than half a minute: a list binds a row only when its item changes or it scrolls into view.
 - A commit leads its summary with a label per decoration — HEAD's branch in the accent, a remote branch dimmer, a tag outlined, and the stash `stash` in a local branch's label, its commits being in the history with nothing else saying what they are — three at most and `+N` for the rest; a branch and a tag of one name stay apart, and `origin/HEAD` and notes are not shown.
-- Each lane is named after its first decorated commit and handed down first parents (the stash names none), and a commit where other named lanes end says "side branched here".
+- Each lane is handed down first parents, and a commit's lane takes the first of the names reaching it, its own branches' and tags' and those of the lanes ending at it, a local branch before a remote one before a tag and then by name (the stash and a detached HEAD name none).
+  A commit where lanes meet says "side branched here" of the names its lane does not carry on.
   That is the graph's own reading, with no git call of its own, so a branch that has not diverged shares its lane and forks nowhere.
+  Nothing in it turns on which tip `git log --topo-order` lists first or on where HEAD is, so a branch behind its upstream keeps its name below the upstream's commits, and a commit, a fetch or a pull renames no row below what it moved.
+  On a branch behind its upstream those three spliced all 200 rows of the history, and now splice 3, 5 and 7 (`ACCENT_BENCH_GIT=refresh:`, one run each, 2026-11-23).
 - A commit row carries Check Out Commit and Copy Commit ID on hover and `:focus-within`, so the summary has the pane's width otherwise; two actions are two buttons, not a menu.
   Check Out is `git switch --detach`, unasked, git refusing it where work would be lost; moving onto a branch is the popover's job.
 - Hovering a commit shows its decorations, short id, lane ("On main"), author and whole message, from what the log already fetched.

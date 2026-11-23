@@ -348,11 +348,16 @@ fn field(shown: &str, key: &str) -> String {
 
 /// Watch the pane after one step of [`bench_git_refresh`] until `done` holds of what it shows,
 /// then for 2 s more, which the refreshes a step's `.git` writes schedule land in. Prints the
-/// time it took, how many states the pane showed let go of with the step's outcome missing
-/// once it had been held, how many an empty history without its bar, and each state on the
-/// way, from the step itself on.
+/// time it took, how many rows the history was spliced, how many states the pane showed let go
+/// of with the step's outcome missing once it had been held, how many an empty history without
+/// its bar, and each state on the way, from the step itself on.
 async fn timed_step(git: &Rc<crate::git::Panel>, step: &str, done: &dyn Fn(&str) -> bool) {
     let t = Instant::now();
+    let spliced = Rc::new(Cell::new(0));
+    let counting = git.log_store().connect_items_changed({
+        let spliced = spliced.clone();
+        move |_, _, _, added| spliced.set(spliced.get() + added)
+    });
     let mut states = vec![(0, git.shown())];
     let mut at = None;
     while t.elapsed() < Duration::from_secs(30) {
@@ -378,10 +383,12 @@ async fn timed_step(git: &Rc<crate::git::Panel>, step: &str, done: &dyn Fn(&str)
         .iter()
         .filter(|(_, s)| field(s, "rows") == "0" && !field(s, "bars").ends_with("/true"))
         .count();
+    git.log_store().disconnect(counting);
     let at = at.map_or("timeout".to_string(), |ms| ms.to_string());
     println!(
-        "bench git_refresh {step} ms={at} states={} stale={stale} bare={bare}",
-        states.len()
+        "bench git_refresh {step} ms={at} states={} spliced={} stale={stale} bare={bare}",
+        states.len(),
+        spliced.get()
     );
     for (ms, shown) in states {
         println!("bench git_refresh_state {step} +{ms} {shown}");

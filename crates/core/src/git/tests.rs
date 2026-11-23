@@ -580,14 +580,22 @@ fn a_lane_is_named_by_its_tip_and_a_fork_names_the_lanes_that_end_there() {
             (Some("side"), vec![]),
             (Some("main"), vec!["side"]),
         ],
-        "the base carries on in main's column, and side branched from it"
+        "the base carries on as main, and side branched from it"
     );
+    // Whichever tip `--topo-order` lists first.
+    let rows = lanes(vec![
+        node("s", &["b"], &["side"]),
+        node("m", &["b"], &["main"]),
+        node("b", &[], &[]),
+    ]);
+    assert_eq!(named(&rows)[2], (Some("main"), vec!["side"]));
 }
 
 #[test]
-fn a_lane_keeps_the_first_name_it_is_given_and_an_unnamed_one_forks_silently() {
+fn a_lane_takes_the_first_name_reaching_it_and_an_unnamed_one_forks_silently() {
     // A merge whose second parent's branch is gone: its lane has no name, and the base it came
-    // from says nothing. A branch merged into main by fast-forward sits on main's own lane.
+    // from says nothing. A branch merged into main by fast-forward names what is below it where
+    // its name comes first, as `done` does `main`.
     let rows = lanes(vec![
         node("wip", &["merge"], &[]),
         node("merge", &["a", "s"], &["main"]),
@@ -601,11 +609,63 @@ fn a_lane_keeps_the_first_name_it_is_given_and_an_unnamed_one_forks_silently() {
         [
             (None, vec![]),
             (Some("main"), vec![]),
-            (Some("main"), vec![]),
+            (Some("done"), vec![]),
             (None, vec![]),
-            (Some("main"), vec![]),
+            (Some("done"), vec![]),
         ]
     );
+}
+
+/// The row of commit `id`.
+fn row<'a>(rows: &'a [LogRow], id: &str) -> &'a LogRow {
+    rows.iter().find(|r| r.commit.id == id).unwrap()
+}
+
+#[test]
+fn a_commit_a_fetch_or_a_pull_leaves_the_rows_below_it_as_they_were() {
+    let upstream = |id: &str, refs: &str| {
+        let mut commit = node(id, &["m"], &[]);
+        commit.refs = parse_refs(refs);
+        commit
+    };
+    let (m, moved, b) = (
+        node("m", &["b"], &["main"]),
+        node("m", &["b"], &[]),
+        node("b", &[], &[]),
+    );
+    let (up, local, topic) = (
+        upstream("u", "refs/remotes/origin/main"),
+        node("l", &["m"], &["main"]),
+        node("t", &["m"], &["topic"]),
+    );
+    let histories = [
+        // `main` one behind its upstream once fetched, then a commit on it, which `--topo-order`
+        // lists either side of the upstream's, and a pull that fast-forwards instead.
+        vec![m.clone(), b.clone()],
+        vec![up.clone(), m.clone(), b.clone()],
+        vec![local.clone(), up.clone(), moved.clone(), b.clone()],
+        vec![up.clone(), local.clone(), moved.clone(), b.clone()],
+        vec![
+            upstream("u", "HEAD -> refs/heads/main, refs/remotes/origin/main"),
+            moved.clone(),
+            b.clone(),
+        ],
+        // A branch made on `main`, then a commit on `main`, listed either side of it.
+        vec![topic.clone(), m.clone(), b.clone()],
+        vec![local.clone(), topic.clone(), moved.clone(), b.clone()],
+        vec![topic.clone(), local.clone(), moved.clone(), b.clone()],
+    ];
+    let first = lanes(histories[0].clone());
+    for history in histories {
+        let rows = lanes(history);
+        check_invariants(&rows);
+        assert_eq!(row(&rows, "m").lane.as_deref(), Some("main"));
+        assert_eq!(
+            row(&rows, "b"),
+            row(&first, "b"),
+            "the rows below stay equal"
+        );
+    }
 }
 
 #[test]

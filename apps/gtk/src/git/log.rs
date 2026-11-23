@@ -362,6 +362,12 @@ impl Panel {
         });
     }
 
+    /// The history's rows, whose splices `ACCENT_BENCH_GIT=refresh` counts.
+    #[cfg(feature = "bench")]
+    pub fn log_store(&self) -> gio::ListStore {
+        self.log.clone()
+    }
+
     /// The commit the history's first row draws. `ACCENT_BENCH_GIT=refresh` and nothing else.
     #[cfg(feature = "bench")]
     pub(super) fn first_commit(&self) -> Option<String> {

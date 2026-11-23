@@ -106,9 +106,9 @@ pub(super) fn parse_refs(decorations: &str) -> Vec<Ref> {
 /// `--topo-order` ensures children precede parents.
 ///
 /// Freed columns are reused to keep width proportional to concurrent history lines. Branch names
-/// descend from the first decorated commit through first parents, surviving fast-forward merges.
-/// When columns converge, the commit's own column continues and the others represent branches
-/// forked there.
+/// descend through first parents, a commit taking the first of the names reaching it
+/// ([`lane_of`]). When columns converge, the commit's own column continues and the names that do
+/// not go on represent branches forked there.
 pub fn lanes(commits: Vec<Commit>) -> Vec<LogRow> {
     let mut lanes: Vec<Option<Lane>> = Vec::new();
     let mut rows = Vec::with_capacity(commits.len());
@@ -119,17 +119,22 @@ pub fn lanes(commits: Vec<Commit>) -> Vec<LogRow> {
             Some(&column) => column,
             None => free_slot(&mut lanes),
         };
-        // Every column drawn into this commit ends here, its own first.
-        let ending: Vec<Option<String>> = above
+        // Every column drawn into this commit ends here.
+        let ending: Vec<Ref> = above
             .iter()
-            .map(|&i| lanes[i].take().and_then(|l| l.name))
+            .filter_map(|&i| lanes[i].take().and_then(|l| l.name))
             .collect();
-        let lane = ending
-            .first()
-            .cloned()
-            .flatten()
-            .or_else(|| lane_name(&commit.refs));
-        let forks: Vec<String> = ending.into_iter().skip(1).flatten().collect();
+        let lane = lane_of(&ending, &commit.refs);
+        // Only where columns meet: one column ending in a straight line hands its lane over.
+        let mut forks: Vec<&Ref> = match above.len() > 1 {
+            true => ending
+                .iter()
+                .filter(|r| Some(*r) != lane.as_ref())
+                .collect(),
+            false => Vec::new(),
+        };
+        forks.sort_by_key(|r| (r.kind, &r.name));
+        let forks: Vec<String> = forks.into_iter().map(|r| r.name.clone()).collect();
 
         let through: Vec<usize> = (0..lanes.len())
             .filter(|&i| i != column && lanes[i].is_some())
@@ -161,7 +166,7 @@ pub fn lanes(commits: Vec<Commit>) -> Vec<LogRow> {
             above,
             below,
             through,
-            lane,
+            lane: lane.map(|r| r.name),
             forks,
         });
     }
@@ -171,15 +176,25 @@ pub fn lanes(commits: Vec<Commit>) -> Vec<LogRow> {
 /// One open column of the graph: the oid it is waiting for, and the branch it draws.
 struct Lane {
     waiting: String,
-    name: Option<String>,
+    name: Option<Ref>,
 }
 
-/// What a commit's decorations would name a column after: its first branch, or failing that its
-/// first tag. A detached HEAD and the stash name no line of history.
-fn lane_name(refs: &[Ref]) -> Option<String> {
-    refs.iter()
-        .find(|r| !matches!(r.kind, RefKind::Head | RefKind::Stash))
-        .map(|r| r.name.clone())
+/// The branch a commit's lane draws: the first, by kind and then by name, of the lanes `ending`
+/// at it and its own decorations `refs`, a local branch before a remote one and a remote one
+/// before a tag. A detached HEAD and the stash name no line of history.
+///
+/// Nothing here turns on which tip `--topo-order` listed first, or where HEAD is, so a commit, a
+/// fetch, a pull or a checkout leaves every row below the commits it moves as it was: a branch
+/// behind its upstream keeps its own name below the upstream's commits, before and after them.
+fn lane_of(ending: &[Ref], refs: &[Ref]) -> Option<Ref> {
+    let own = refs
+        .iter()
+        .filter(|r| !matches!(r.kind, RefKind::Head | RefKind::Stash));
+    ending
+        .iter()
+        .chain(own)
+        .min_by_key(|r| (r.kind, &r.name))
+        .cloned()
 }
 
 fn waiting_for<'a>(lanes: &'a [Option<Lane>], oid: &'a str) -> impl Iterator<Item = usize> + 'a {
