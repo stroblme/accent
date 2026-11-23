@@ -76,6 +76,7 @@ fn config_roundtrip_parses_the_documented_example() {
     assert_eq!(c.indent_width, 4);
     assert!(!c.forward_keys_to_terminal);
     assert_eq!(c.debug_terminal, DebugTerminal::Down);
+    assert!(c.graph_find_opens);
     assert_eq!(c.editor, Editor::Helix);
     assert_eq!(c.theme, Theme::Solarized);
     assert_eq!(c.focus_mode, FocusMode::High);
@@ -286,6 +287,7 @@ fn missing_config_file_is_default() {
     assert!(!c.full_width_preview);
     assert_eq!(c.focus_mode, FocusMode::Medium);
     assert_eq!(c.debug_terminal, DebugTerminal::Same);
+    assert!(!c.graph_find_opens);
     assert!(c.recent_vaults.is_empty());
     assert!(!config_path_exists(tmp.path()));
 }

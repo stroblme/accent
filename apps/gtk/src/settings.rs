@@ -200,6 +200,7 @@ fn fill(
         files_group(&rows),
         git_group(&rows),
         pdf_group(&rows),
+        graph_group(&rows),
         terminal_group(&rows),
         commands_group(&rows),
     ];
@@ -737,6 +738,19 @@ fn pdf_group(rows: &Rc<Rows>) -> adw::PreferencesGroup {
         "Draw with the Mouse",
         Some("Even when a pen is attached"),
         |c| &mut c.drawing.mouse,
+    ));
+    group
+}
+
+// ------------------------------------------------------------------------------------ graph
+
+fn graph_group(rows: &Rc<Rows>) -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::builder().title("Graph").build();
+    group.add(&switch_row(
+        rows,
+        "Open Found Files",
+        Some("Enter in the graph's find bar opens each match beside the graph"),
+        |c| &mut c.graph_find_opens,
     ));
     group
 }

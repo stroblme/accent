@@ -18,9 +18,10 @@ bench graph reset all=false roots=["bee.md"] nodes=["bee.md", "c.md"]
 bench graph hidden queries=0 shown_again=1 nodes+=["e.md"]
 bench graph find typed="bee" shown=["bee.md", "e.md"] readout="2 matches" kept=true zoom=Fit
 bench graph find step current=bee.md readout="1 of 2" keyboard=bar zoom=100 %
-bench graph find closed keyboard=graph current=bee.md shown=["bee.md", "c.md", "e.md"] zoom=Fit
+bench graph find opens current=e.md readout="2 of 2" opened=e.md keyboard=bar
+bench graph find closed keyboard=graph current=e.md shown=["bee.md", "c.md", "e.md"] zoom=Fit
 bench graph find enter typed="c" current=c.md
-bench graph find reset roots=["a.md"] shown=["#topic", "a.md", "c.md", "pic.png"] readout="1 of 4"
+bench graph find reset roots=["e.md"] shown=["a.md", "bee.md"] readout="2 matches"
 bench graph find none shown=[] invalid=("Invalid query", true) kept=true
 bench graph arrows moved=true
 bench graph enter a.md moved=true alone=true

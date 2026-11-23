@@ -21,7 +21,8 @@ use crate::graph::GraphTab;
 /// (`hidden`). It types `bee` over the canvas with real keys (XTEST), the first of which opens the
 /// pane's find bar, and prints what the bar's query holds, the nodes it leaves shown, the readout,
 /// whether `c.md`, hidden, kept its place and the zoom (`find`); presses Enter in the bar and
-/// prints the node the keyboard went to and where the keyboard is (`find step`), and once the bar
+/// prints the node the keyboard went to and where the keyboard is (`find step`), again under Open
+/// Found Files and prints the file opened beside the graph too (`find opens`), and once the bar
 /// is closed where the keyboard is, the nodes shown and the zoom (`find closed`). It types `c` and
 /// Enter at once and prints the node the keyboard went to (`find enter`), shows Reset Graph under
 /// the query and prints its roots, the nodes shown and the readout (`find reset`), and prints the
@@ -253,6 +254,27 @@ async fn check(app: &Rc<App>, rel: &str) {
         keyboard(app, &graph),
         graph.zoom_label()
     );
+    // Under Open Found Files the next Enter opens the file it finds beside the graph too, and
+    // the keyboard, handed back from an idle, stays in the bar.
+    app.config.borrow_mut().graph_find_opens = true;
+    super::git::xtest("key Return").await;
+    until("graph", "opens", 10_000, || {
+        graph.current().as_deref() == Some("e.md") && app.tab_for("e.md").is_some()
+    })
+    .await;
+    glib::timeout_future(Duration::from_millis(200)).await;
+    let opened = (app.tab_for("e.md"))
+        .and_then(|tab| app.pane_of(&tab.page))
+        .and_then(|pane| app.doc_of(&pane))
+        .map(|doc| doc.key());
+    println!(
+        "bench graph find opens current={} readout={:?} opened={} keyboard={}",
+        graph.current().unwrap_or_default(),
+        pane.find.readout().0,
+        opened.unwrap_or_default(),
+        keyboard(app, &graph)
+    );
+    app.config.borrow_mut().graph_find_opens = false;
     // Closed, every node is back and the view from before the query.
     pane.find.close();
     until("graph", "find closed", 10_000, || graph.laid_out()).await;

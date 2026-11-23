@@ -27,6 +27,7 @@ full_width_preview = true
 indent_width = 4
 forward_keys_to_terminal = false
 debug_terminal = "down"
+graph_find_opens = true
 editor = "helix"
 theme = "solarized"
 focus_mode = "high"
@@ -228,6 +229,9 @@ pub struct Config {
     /// window keeps (DESIGN.md, Keyboard → Terminal).
     pub forward_keys_to_terminal: bool,
     pub debug_terminal: DebugTerminal,
+    /// A step through the Graph tab's find bar also opens the file it reaches beside the graph,
+    /// as a click on its node does. Off by default: a step brings the node to the middle alone.
+    pub graph_find_opens: bool,
     /// The editor a text file opens in.
     #[serde(skip_serializing_if = "Editor::is_accent")]
     pub editor: Editor,
@@ -435,6 +439,7 @@ impl Default for Config {
             indent_width: 4,
             forward_keys_to_terminal: false,
             debug_terminal: DebugTerminal::Same,
+            graph_find_opens: false,
             editor: Editor::Accent,
             editor_command: String::new(),
             theme: Theme::System,

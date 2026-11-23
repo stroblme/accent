@@ -4,7 +4,8 @@
 //! is hidden ([`GraphView::set_filter`]) and the view fits what is left; a query of plain words
 //! also finds a node by its name, a tag and a ghost among them, after the files the vault ranks.
 //! Enter steps through what it found best first, each the node the keyboard is on, kept in the
-//! middle while the layout settles, and the first Enter takes the best.
+//! middle while the layout settles, and the first Enter takes the best; under Open Found Files
+//! each file found opens beside the graph too.
 
 use std::collections::HashSet;
 
@@ -184,7 +185,9 @@ impl App {
     }
 
     /// Enter or Shift+Enter over `graph`: the next node found or the one before, held until the
-    /// answer to a new query lands.
+    /// answer to a new query lands. Under Open Found Files (Preferences) a file found also opens
+    /// beside the graph as a click opens it, without growing the graph, the keyboard staying in
+    /// the bar.
     pub(crate) fn graph_step(self: &Rc<Self>, graph: &Rc<GraphTab>, forward: bool) {
         {
             let mut find = graph.finding.borrow_mut();
@@ -193,7 +196,17 @@ impl App {
                 return;
             }
         }
-        graph.step_match(forward);
+        let Some(key) = graph.step_match(forward) else {
+            return;
+        };
+        let file = {
+            let shown = graph.view.graph();
+            let node = shown.index_of(&key).map(|i| shown.nodes[i].kind);
+            matches!(node, Some(NodeKind::File(_)))
+        };
+        if file && self.config.borrow().graph_find_opens {
+            self.open_from_graph(graph, &key, false);
+        }
     }
 
     /// The bar over `graph` says what it found and why a query cannot be read, while the graph
