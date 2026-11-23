@@ -338,8 +338,14 @@ impl Worker {
         let (git, batch): (Vec<Msg>, Vec<Msg>) = batch
             .into_iter()
             .partition(|m| matches!(m, Msg::Fs(VaultEvent::Git(_))));
-        if !git.is_empty() {
-            self.emit(Event::GitChanged);
+        let written: BTreeSet<Option<PathBuf>> = (git.iter())
+            .filter_map(|m| match m {
+                Msg::Fs(VaultEvent::Git(path)) => Some(git_dir_of(path, &self.git_dirs)),
+                _ => None,
+            })
+            .collect();
+        for dir in written {
+            self.emit(Event::GitChanged(dir));
         }
         let mut rewatch = self.ref_dirs_moved(&git);
         for msg in &batch {
@@ -638,10 +644,12 @@ impl Worker {
             &|| stop.load(Ordering::Relaxed) != RUN,
             |index, p| {
                 let _ = events.send(Event::Progress(p));
-                let mut git = false;
+                let mut written = BTreeSet::new();
                 for msg in rx.try_iter().flat_map(Msg::apart) {
                     match msg {
-                        Msg::Fs(VaultEvent::Git(_)) => git = true,
+                        Msg::Fs(VaultEvent::Git(path)) => {
+                            written.insert(git_dir_of(&path, git_dirs));
+                        }
                         Msg::WatchGit(dirs) => {
                             if dirs != *git_dirs {
                                 *git_dirs = dirs;
@@ -660,8 +668,8 @@ impl Worker {
                         other => held.push(other),
                     }
                 }
-                if git {
-                    let _ = events.send(Event::GitChanged);
+                for dir in written {
+                    let _ = events.send(Event::GitChanged(dir));
                 }
             },
         );
@@ -1272,6 +1280,18 @@ impl Worker {
     fn emit(&self, event: Event) {
         let _ = self.events.send(event);
     }
+}
+
+/// The git dir of `known` a write at `path`, somewhere in a `.git`, was in: the deepest, as a
+/// submodule's lies in its superproject's. `None` for a `.git` none of them is, or one gone
+/// since, which is a repository made or removed.
+fn git_dir_of(path: &Path, known: &[PathBuf]) -> Option<PathBuf> {
+    known
+        .iter()
+        .filter(|dir| path.starts_with(dir))
+        .max_by_key(|dir| dir.as_os_str().len())
+        .filter(|dir| dir.is_dir())
+        .cloned()
 }
 
 /// Update watches for indexed directories, git directories, listed unindexed folders and the

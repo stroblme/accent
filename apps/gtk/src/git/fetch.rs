@@ -173,8 +173,9 @@ pub(super) fn fetch(
     }
     let at = reselect(selected, &known, &against);
     // Everything below is about the repository itself rather than the working tree, so a save
-    // does not pay for it: five to seven processes per keystroke were what this cost before.
-    let head = (depth >= Depth::Everything)
+    // does not pay for it: five to seven processes per keystroke were what this cost before. Nor
+    // a write in another repository's `.git`, which leaves the selected one's history as it was.
+    let head = (depth >= Depth::Everything && asked.get(at) == Some(&true))
         .then(|| against.get(at))
         .flatten();
     // A repository git will not talk about keeps the status it last had and raises no dialog: it

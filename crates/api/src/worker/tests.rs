@@ -1385,12 +1385,14 @@ fn a_commit_outside_the_app_reports_as_a_git_change() {
     assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
 
     // Asking for the repositories is what puts `.git` in the watch set.
-    assert_eq!(f.vault.repos().unwrap().len(), 1);
+    let git_dir = f.vault.repos().unwrap().remove(0).git_dir;
     git(&["add", "a.md"]);
     git(&["commit", "-qm", "one"]);
 
+    // Naming the repository it was in, so the pane asks git about that one alone.
     assert!(
-        f.wait(|e| matches!(e, Event::GitChanged)).is_some(),
+        f.wait(|e| matches!(e, Event::GitChanged(Some(dir)) if *dir == git_dir))
+            .is_some(),
         "a commit has to reach the pane"
     );
 
@@ -1408,10 +1410,32 @@ fn a_commit_outside_the_app_reports_as_a_git_change() {
     assert_eq!(crate::git::status(repo).unwrap().branch.ahead, 1);
     git(&["push", "-q"]);
     assert!(
-        f.wait(|e| matches!(e, Event::GitChanged)).is_some(),
+        f.wait(|e| matches!(e, Event::GitChanged(Some(_))))
+            .is_some(),
         "a push has to reach the pane"
     );
     assert_eq!(crate::git::status(repo).unwrap().branch.ahead, 0);
+
+    // A repository removed names none, which has the pane look for repositories again.
+    std::fs::remove_dir_all(&git_dir).unwrap();
+    assert!(
+        f.wait(|e| matches!(e, Event::GitChanged(None))).is_some(),
+        "a `.git` gone has to reach the pane"
+    );
+}
+
+#[test]
+fn a_git_write_names_the_deepest_git_dir_holding_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (top, sub) = (tmp.path().join(".git"), tmp.path().join(".git/modules/s"));
+    std::fs::create_dir_all(&sub).unwrap();
+    let known = [top.clone(), sub.clone()];
+    assert_eq!(super::git_dir_of(&sub.join("HEAD"), &known), Some(sub));
+    assert_eq!(super::git_dir_of(&top.join("index"), &known), Some(top));
+    // A `git init` in a folder, and a repository whose git dir has gone since.
+    let new = tmp.path().join("new/.git");
+    assert_eq!(super::git_dir_of(&new, &known), None);
+    assert_eq!(super::git_dir_of(&new.join("HEAD"), &[new]), None);
 }
 
 /// Verify `.gitignore` edits remove newly ignored trees and index newly
@@ -1759,11 +1783,11 @@ fn the_inbox_is_read_between_the_batches_of_a_walk() {
 
     let first = wait_for(
         &event_rx,
-        |e| matches!(e, Event::GitChanged | Event::Reconciled(_)),
+        |e| matches!(e, Event::GitChanged(_) | Event::Reconciled(_)),
         BUDGET,
     );
     assert!(
-        matches!(first, Some(Event::GitChanged)),
+        matches!(first, Some(Event::GitChanged(_))),
         "the git change waited for the walk: {first:?}"
     );
     assert!(

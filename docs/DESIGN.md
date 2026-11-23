@@ -665,10 +665,13 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A `git init` in a vault with no repository is such a write, so the pane shows itself unasked; Initialize Git Repository in the palette runs it at the vault root, on the host for a remote vault, and looks for the repository at once.
   A save or a watcher event asks `git status` only of the repositories holding what changed, so a file outside every repository costs no git process: a vault of 37 nested repositories ran 37 statuses for each save of a PDF drawn on at its root.
   A command, a pick and the background fetch ask about their own repository alone, its status and its history, and the refresh a command or a pick asks for starts at once.
+  So does a `.git` write, which the watcher reports with the git dir it was in, asking about that repository and those it is nested in, and about the history only where the picked one is among them.
+  On a vault of 37 repositories the writes of each Stage, Commit and Sync had the other 35 asked for their status and looked for again, 35 to 105 git calls a step, and now ask them nothing (`ACCENT_BENCH_GIT=refresh:`, one run each, 2026-11-23).
   A refresh already on its way read git before what that one waits on, so its answer is dropped when it lands and what it asked is asked again after.
   A refresh's git calls run together, each a round trip on a remote vault, and the other repositories' statuses go eight at a time.
   On a vault of 37 repositories with each call held 30 ms, as a distant host's round trip, a Stage now shows in 0.12 s where it took 1.6 s, a Commit in 0.23 s where it took 1.8 s and a pick in 0.06 s where it took 1.4 s (`ACCENT_BENCH_GIT=refresh:`, medians of three, local and remote alike, 2026-11-22).
-  The repositories are looked for again only after a walk, which a folder moved in with a repository in it gets, when one goes, or a folder holding one, and after a `.git` write, which may be a `git init` in a folder: that look is at most one per 3 s, one asked sooner waiting its turn rather than dropped.
+  The repositories are looked for again only after a walk, which a folder moved in with a repository in it gets, when one goes, or a folder holding one, and after a write in a `.git` the pane holds no repository of, a `git init` in a folder or a `.git` removed.
+  That look is at most one per 3 s, one asked sooner waiting its turn rather than dropped.
 - The commit message box takes `Ctrl+Return` while it has the keyboard, although the chord is Insert Line Below: the editing chords are bound only while the keyboard is in a tab (Editing).
 - Commit commits what is staged, or `git commit -a` where nothing is (tracked changes in, untracked files out, as VS Code does with an empty index).
   Where every change is an untracked file, `-a` has nothing to take: Commit keeps the message and says Stage untracked files before committing, where git would only refuse.

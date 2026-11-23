@@ -156,6 +156,31 @@ impl Panel {
         self.schedule(ask);
     }
 
+    /// A write in `git_dir`, a repository's own directory: everything about the repositories it
+    /// is the git dir of, a linked worktree's sharing its refs, and those they are nested in.
+    ///
+    /// A write in a `.git` the pane holds no repository of may be a new one's — `git init` in a
+    /// terminal, a clone into the vault root — so that one goes looking for repositories, which
+    /// is what makes the pane show itself with nothing to click. Where the vault has some, the
+    /// look is throttled: discovery is a `git rev-parse` per indexed directory, and a burst of
+    /// writes pays for it once.
+    pub fn git_written(self: &Rc<Self>, git_dir: Option<&Path>) {
+        let roots: Vec<PathBuf> = match git_dir {
+            Some(dir) => (self.state.borrow().repos.iter())
+                .filter(|repo| {
+                    repo.git_dir == dir || repo.git_dir.starts_with(dir.join("worktrees"))
+                })
+                .map(|repo| repo.root.clone())
+                .collect(),
+            None => Vec::new(),
+        };
+        match (roots.is_empty(), self.has_repos()) {
+            (false, _) => self.schedule(Ask::repos(roots)),
+            (true, true) => self.rediscover(),
+            (true, false) => self.schedule_refresh(Depth::Discover),
+        }
+    }
+
     fn schedule(self: &Rc<Self>, ask: Ask) {
         self.pending_ask
             .set(Some(joined(self.pending_ask.take(), ask)));
@@ -167,7 +192,8 @@ impl Panel {
     }
 
     /// Look for repositories again, at most once per [`REDISCOVER`]. For the indexing progress,
-    /// which arrives many times a second, and for `.git` writes: [`Panel::schedule_refresh`]
+    /// which arrives many times a second, and for writes in a `.git` the pane holds no repository
+    /// of ([`Panel::git_written`]): [`Panel::schedule_refresh`]
     /// restarts its timer on every call, so passing each tick on would put the refresh off until
     /// the walk was over. One asked too soon asks again a [`REDISCOVER`] later instead, unless a
     /// look starts meanwhile: a `git init` just after a commit is found all the same.
@@ -221,9 +247,9 @@ impl Panel {
         let changes = outstanding
             .as_ref()
             .is_some_and(|ask| selected.is_some_and(|repo| ask.asks(repo)));
-        let history = outstanding
-            .as_ref()
-            .is_some_and(|ask| ask.depth() >= Depth::Everything);
+        let history = outstanding.as_ref().is_some_and(|ask| {
+            ask.depth() >= Depth::Everything && selected.is_none_or(|repo| ask.asks(repo))
+        });
         for (pulse, on) in [(&self.changes_wait, changes), (&self.log_wait, history)] {
             match on {
                 true => pulse.start(WAIT_PULSE, WAIT_AFTER),

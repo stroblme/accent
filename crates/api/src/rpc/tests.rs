@@ -255,6 +255,32 @@ fn an_event_on_the_far_side_arrives_as_a_notification() {
     assert!(w.wait(|e| matches!(e, Event::FilesUsed(rels) if rels == &["c.md"])));
 }
 
+/// A commit on the host reaches the window naming the git dir it was in, as the host has it.
+#[test]
+fn a_git_write_on_the_far_side_names_its_repository() {
+    let git = |root: &std::path::Path, args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t.invalid"])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}");
+    };
+    let w = Wired::seeded(&|root| {
+        std::fs::write(root.join("a.md"), "one\n").unwrap();
+        git(root, &["init", "-q", "-b", "main"]);
+    });
+    assert!(w.wait(|e| matches!(e, Event::Reconciled(_))));
+    let repos: Vec<crate::Repo> = w.client.call("repos", json!([])).unwrap();
+    git(w._root.path(), &["add", "a.md"]);
+    git(w._root.path(), &["commit", "-qm", "one"]);
+    let dir = repos[0].git_dir.clone();
+    assert!(w.wait(|e| matches!(e, Event::GitChanged(Some(d)) if *d == dir)));
+}
+
 /// A language request runs where the files are, and what the provider has to say about the
 /// document comes back the way any other event does.
 #[test]

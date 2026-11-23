@@ -490,25 +490,11 @@ impl App {
             }
             Event::Conflict { original, .. } => self.sync_conflict_banner(&original, None),
             // A repository moved under us: a commit in a shell, a checkout, a rebase. The pane
-            // asks git what changed; nothing else in the window is affected.
-            //
-            // Where the vault has no repository at all, the one thing a `.git` write can mean is
-            // that it has one now — `git init` in a terminal, a clone into the vault root — and
-            // the watcher reports that write like any other, `.git` being watched on purpose. So
-            // that one goes looking for repositories instead, which is what makes the pane show
-            // itself with nothing to click. Where it has some, the write may still be a new
-            // repository's, a `git init` in one of its folders, so the pane looks as well, but
-            // throttled: discovery is a `git rev-parse` per indexed directory, and a burst of
-            // commits pays for it once.
-            Event::GitChanged => {
+            // asks git about that repository; nothing else in the window is affected
+            // (`git::Panel::git_written`).
+            Event::GitChanged(dir) => {
                 if let Some(git) = self.git.get() {
-                    match git.has_repos() {
-                        true => {
-                            git.schedule_refresh(git::Depth::Everything);
-                            git.rediscover();
-                        }
-                        false => git.schedule_refresh(git::Depth::Discover),
-                    }
+                    git.git_written(dir.as_deref());
                 }
             }
             // A remote vault is still coming up. It reads as the same wait as indexing, because

@@ -103,9 +103,11 @@ pub enum Event {
         original: String,
         conflict: String,
     },
-    /// Repository `.git` state changed, prompting the git pane to refresh
-    /// for commits, checkouts or staging done outside the app.
-    GitChanged,
+    /// A repository's own directory changed: a commit, a checkout or a stage, done in the app or
+    /// outside it. `Some` is the git dir written in, one of those [`Vault::repos`] last found, so
+    /// the git pane asks about that repository alone; `None` is a `.git` none of them is, or one
+    /// gone since, a repository made or removed, for which the pane looks for repositories again.
+    GitChanged(Option<std::path::PathBuf>),
     /// Remote connection progress, sharing the indexing-progress display.
     /// `fraction` is 0–1 for server uploads; `None` for steps of unknown duration.
     Connecting {

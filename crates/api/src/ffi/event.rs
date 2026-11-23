@@ -81,7 +81,7 @@ pub(crate) fn narrow(e: crate::Event) -> Option<Event> {
         // Git, the remote connection, language servers and their background jobs, debug sessions,
         // kernels and the watch on unindexed folders: none of them run on a phone, so nothing
         // here ever has to match them. A file added matters there only once it counts as used.
-        crate::Event::GitChanged
+        crate::Event::GitChanged(_)
         | crate::Event::FilesAdded(_)
         | crate::Event::UnindexedChanged(_)
         | crate::Event::Connecting { .. }
