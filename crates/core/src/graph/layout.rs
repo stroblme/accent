@@ -60,8 +60,11 @@ pub struct Layout {
     /// Where a dragged node is held.
     pin: Vec<Option<[f32; 2]>>,
     links: Vec<(u32, u32)>,
-    /// How many links each node has, which weighs a link's pull.
+    /// How many links each node has to nodes shown, which weighs a link's pull.
     degree: Vec<u32>,
+    /// Whether each node takes part: one left out, as the find bar hides it, keeps its place and
+    /// pushes and pulls nothing.
+    shown: Vec<bool>,
     /// How much of a force a step applies: 1 cold, decaying to [`ALPHA_MIN`].
     alpha: f32,
     /// How far apart the nodes settle, as [`Spread`] says.
@@ -87,6 +90,7 @@ impl Layout {
             pin: Vec::new(),
             links: Vec::new(),
             degree: Vec::new(),
+            shown: Vec::new(),
             alpha: 1.0,
             spread: 1.0,
             seed: 0x9e37_79b9,
@@ -107,6 +111,7 @@ impl Layout {
         self.vel.push([0.0; 2]);
         self.pin.push(None);
         self.degree.push(0);
+        self.shown.push(true);
         self.reheat();
         i
     }
@@ -120,6 +125,7 @@ impl Layout {
         self.vel.swap_remove(i);
         self.pin.swap_remove(i);
         self.degree.swap_remove(i);
+        self.shown.swap_remove(i);
         self.links.clear();
         self.reheat();
     }
@@ -127,6 +133,17 @@ impl Layout {
     /// The links, as pairs of node indices, in place of the ones before.
     pub fn set_links(&mut self, links: &[(usize, usize)]) {
         self.links = links.iter().map(|&(a, b)| (a as u32, b as u32)).collect();
+        self.count();
+        self.reheat();
+    }
+
+    /// Leave out the nodes `shown` says no to, one a node: the rest settle round one another, and
+    /// one left out stays where it is until it is shown again.
+    pub fn set_shown(&mut self, shown: &[bool]) {
+        if self.shown == shown {
+            return;
+        }
+        self.shown = shown.to_vec();
         self.count();
         self.reheat();
     }
@@ -167,21 +184,31 @@ impl Layout {
         if self.settled() {
             return 0.0;
         }
+        // With every node left out nothing can move, and the layout has settled.
+        if !self.pos.is_empty() && !self.shown.contains(&true) {
+            self.alpha = 0.0;
+            return 0.0;
+        }
         self.alpha -= self.alpha * ALPHA_DECAY;
         let alpha = self.alpha;
         self.pull_links(alpha);
         if !self.pos.is_empty() {
             let charge = CHARGE * self.spread * self.spread;
-            self.tree.build(&self.pos, charge);
-            for i in 0..self.pos.len() {
+            self.tree.build(&self.pos, &self.shown, charge);
+            for i in (0..self.pos.len()).filter(|&i| self.shown[i]) {
                 let [x, y] = self.tree.push_on(i, &self.pos, alpha, &mut self.seed);
                 self.vel[i][0] += x;
                 self.vel[i][1] += y;
             }
         }
         let mut moved = 0f32;
-        for ((p, v), pin) in self.pos.iter_mut().zip(&mut self.vel).zip(&self.pin) {
+        let nodes = self.pos.iter_mut().zip(&mut self.vel).zip(&self.pin);
+        for (((p, v), pin), &shown) in nodes.zip(&self.shown) {
             let d = match pin {
+                _ if !shown => {
+                    *v = [0.0; 2];
+                    [0.0; 2]
+                }
                 Some(at) => {
                     *v = [0.0; 2];
                     let d = [at[0] - p[0], at[1] - p[1]];
@@ -201,13 +228,16 @@ impl Layout {
         moved
     }
 
-    /// Each link a spring toward [`LINK_DISTANCE`] times the spread, read off where its ends are
-    /// headed. The weaker the more links its busier end has, and the busier end moves the less
-    /// (d3's `forceLink`).
+    /// Each link between two nodes shown a spring toward [`LINK_DISTANCE`] times the spread, read
+    /// off where its ends are headed. The weaker the more links its busier end has, and the busier
+    /// end moves the less (d3's `forceLink`).
     fn pull_links(&mut self, alpha: f32) {
         let length = LINK_DISTANCE * self.spread;
         for &(s, t) in &self.links {
             let (s, t) = (s as usize, t as usize);
+            if !(self.shown[s] && self.shown[t]) {
+                continue;
+            }
             let mut d = [0.0; 2];
             for (k, d) in d.iter_mut().enumerate() {
                 *d = self.pos[t][k] + self.vel[t][k] - self.pos[s][k] - self.vel[s][k];
@@ -229,8 +259,11 @@ impl Layout {
     fn count(&mut self) {
         self.degree = vec![0; self.pos.len()];
         for &(a, b) in &self.links {
-            self.degree[a as usize] += 1;
-            self.degree[b as usize] += 1;
+            let (a, b) = (a as usize, b as usize);
+            if self.shown[a] && self.shown[b] {
+                self.degree[a] += 1;
+                self.degree[b] += 1;
+            }
         }
     }
 
@@ -286,10 +319,11 @@ impl Quad {
 }
 
 impl Tree {
-    fn build(&mut self, pos: &[[f32; 2]], charge: f32) {
+    /// The tree over the nodes `shown`, the rest in no quad, so they push nothing.
+    fn build(&mut self, pos: &[[f32; 2]], shown: &[bool], charge: f32) {
         self.charge = charge;
         let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
-        for &[x, y] in pos {
+        for (&[x, y], _) in pos.iter().zip(shown).filter(|(_, s)| **s) {
             lo = [lo[0].min(x), lo[1].min(y)];
             hi = [hi[0].max(x), hi[1].max(y)];
         }
@@ -299,7 +333,7 @@ impl Tree {
         self.quads.push(Quad::leaf(NONE));
         self.next.clear();
         self.next.resize(pos.len(), NONE);
-        for i in 0..pos.len() {
+        for i in (0..pos.len()).filter(|&i| shown[i]) {
             self.insert(i as u32, pos);
         }
         // A quad's children come after it, so going backwards sums each before its parent.
@@ -519,6 +553,34 @@ mod tests {
         }
         l.set_links(&(1..60).map(|i| (i / 3, i)).collect::<Vec<_>>());
         l
+    }
+
+    /// A node left out keeps its place and pushes and pulls nothing, so the rest settle as they
+    /// would without it; shown again, it moves with them, and with every node left out the layout
+    /// has settled.
+    #[test]
+    fn a_node_left_out_stays_put_and_pushes_nothing() {
+        let mut hidden = tree(1.0);
+        let start = hidden.positions()[59];
+        let mut shown = vec![true; 60];
+        shown[59] = false;
+        hidden.set_shown(&shown);
+        let mut without = Layout::new();
+        for i in 0..59 {
+            without.add((i > 0).then_some(i / 3));
+        }
+        without.set_links(&(1..59).map(|i| (i / 3, i)).collect::<Vec<_>>());
+        settle(&mut hidden);
+        settle(&mut without);
+        assert_eq!(&hidden.positions()[..59], without.positions());
+        assert_eq!(hidden.positions()[59], start);
+        hidden.set_shown(&[true; 60]);
+        assert!(!hidden.settled());
+        settle(&mut hidden);
+        assert_ne!(hidden.positions()[59], start);
+        hidden.set_shown(&[false; 60]);
+        assert_eq!(hidden.step(), 0.0);
+        assert!(hidden.settled());
     }
 
     /// Twice the spread lays the same graph out twice as large, its shape kept.

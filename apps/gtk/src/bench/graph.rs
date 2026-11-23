@@ -18,7 +18,9 @@ use crate::graph::GraphTab;
 /// vault without its orphans and then with them (`all`, `orphans`), and prints Reset Graph's roots
 /// (`reset`). Behind another tab of its pane it has `e.md` link its root and prints how many
 /// questions went while it was hidden and once it was shown again, and the node that added
-/// (`hidden`). It types `c.md` over the canvas with real keys (XTEST), the first of which opens the
+/// (`hidden`). It hides `c.md` as the find bar's query would and prints the nodes shown and whether
+/// `c.md` kept its place (`filter`), then every node shown again (`unfiltered`).
+/// It types `c.md` over the canvas with real keys (XTEST), the first of which opens the
 /// pane's find bar, and prints what the bar's query holds, the node the keyboard went to and the
 /// bar's readout (`find`), and where the keyboard is once the bar is closed (`find closed`); it
 /// presses the four arrows and prints whether the keyboard moved (`arrows`), then Enter on `a.md`
@@ -211,6 +213,20 @@ async fn check(app: &Rc<App>, rel: &str) {
         "bench graph hidden queries={hidden} shown_again={} nodes+={added:?}",
         graph.questions() - asked - hidden
     );
+    // Filtered, a node hidden keeps its place while the rest settle round one another, and
+    // every node is back once the filter goes.
+    until("graph", "settled", 10_000, || graph.laid_out()).await;
+    let place = graph.place_of("c.md");
+    graph.filter(Some(&["bee.md", "e.md"]));
+    until("graph", "filtered", 10_000, || graph.laid_out()).await;
+    println!(
+        "bench graph filter shown={:?} kept={}",
+        graph.shown(),
+        place.is_some() && graph.place_of("c.md") == place
+    );
+    graph.filter(None);
+    until("graph", "unfiltered", 10_000, || graph.laid_out()).await;
+    println!("bench graph unfiltered shown={:?}", graph.shown());
     // Typed with real keys over the canvas, 30 ms apart: the first key opens the bar and lands in
     // its query, and the next comes while the bar is still sliding in.
     let canvas = graph.key_target();

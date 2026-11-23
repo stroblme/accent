@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use accent_core::graph::layout::{Layout as Force, Spread};
 use gtk::{gdk, glib};
 
-use super::camera::Camera;
+use super::camera::{self, Camera};
 use super::model::Paint;
 use super::raster::{self, Scene, View};
 
@@ -33,14 +33,16 @@ const STEP: Duration = Duration::from_micros(16_667);
 pub enum Cmd {
     /// A change of what the canvas shows, generation `generation`: the nodes `removed` taken out
     /// in this order as `Vec::swap_remove` does, then those `added` appended, each beside the
-    /// node it names, then every link, by the indices after the change, and each node's paint.
-    /// With `animate` the layout moves on its clock, else it settles at once.
+    /// node it names, then every link, by the indices after the change, each node's paint and
+    /// whether it is shown, which a node the find bar's query hides is not. With `animate` the
+    /// layout moves on its clock, else it settles at once.
     Change {
         generation: u64,
         removed: Vec<usize>,
         added: Vec<Option<usize>>,
         links: Vec<(usize, usize)>,
         paints: Vec<Paint>,
+        shown: Vec<bool>,
         animate: bool,
     },
     /// Node `i` held at a place, as a drag holds it.
@@ -134,11 +136,13 @@ struct Places {
     moved: bool,
 }
 
-/// What a generation's places are drawn with: its links, its nodes' paints, their neighbours.
+/// What a generation's places are drawn with: its links, its nodes' paints, their neighbours,
+/// and which of them are shown.
 struct Shape {
     links: Vec<(usize, usize)>,
     paints: Vec<Paint>,
     near: Vec<Vec<usize>>,
+    shown: Vec<bool>,
 }
 
 impl Worker {
@@ -208,9 +212,14 @@ fn lay_out(rx: &Receiver<Cmd>, shared: &Shared, spread: Spread) {
         links: Vec::new(),
         paints: Vec::new(),
         near: Vec::new(),
+        shown: Vec::new(),
     });
     let (mut generation, mut animate) = (0, true);
     let mut held = None::<(usize, [f32; 2])>;
+    // What a layout started from nothing is to show, which it takes once it has first settled
+    // round every node, so a node hidden from the start is not left on d3's first spiral, where
+    // it would come back from once shown. A change meanwhile updates it.
+    let mut pending = None::<Vec<bool>>;
     // The places, the node a drag holds at its pin, handed to the drawing thread.
     let hand =
         |force: &Force, generation, shape: &Arc<Shape>, held: Option<(usize, [f32; 2])>, cold| {
@@ -264,6 +273,7 @@ fn lay_out(rx: &Receiver<Cmd>, shared: &Shared, spread: Spread) {
                     added,
                     links,
                     paints,
+                    shown,
                     animate: a,
                 } => {
                     cold |= len == 0;
@@ -278,6 +288,10 @@ fn lay_out(rx: &Receiver<Cmd>, shared: &Shared, spread: Spread) {
                         force.add(near);
                     }
                     force.set_links(&links);
+                    match cold || pending.is_some() {
+                        true => pending = Some(shown.clone()),
+                        false => force.set_shown(&shown),
+                    }
                     let mut near = vec![Vec::new(); force.positions().len()];
                     for &(a, b) in &links {
                         near[a].push(b);
@@ -287,6 +301,7 @@ fn lay_out(rx: &Receiver<Cmd>, shared: &Shared, spread: Spread) {
                         links,
                         paints,
                         near,
+                        shown,
                     });
                     (generation, animate) = (g, a);
                     settle |= !a;
@@ -320,20 +335,41 @@ fn lay_out(rx: &Receiver<Cmd>, shared: &Shared, spread: Spread) {
         let moving = animate && !force.settled() && !force.positions().is_empty();
         match (settle, moving) {
             (true, _) => {
-                for _ in 0..MAX_SETTLE {
-                    if force.step() == 0.0 {
-                        break;
-                    }
+                settle_all(&mut force);
+                if unmask(&mut force, &mut pending) {
+                    settle_all(&mut force);
                 }
                 hand(&force, generation, &shape, held, false);
             }
             (false, true) => {
                 force.step();
+                unmask(&mut force, &mut pending);
                 hand(&force, generation, &shape, held, false);
                 std::thread::sleep(STEP.saturating_sub(t.elapsed()));
             }
             (false, false) => {}
         }
+    }
+}
+
+/// Step `force` until it settles, at most [`MAX_SETTLE`] steps.
+fn settle_all(force: &mut Force) {
+    for _ in 0..MAX_SETTLE {
+        if force.step() == 0.0 {
+            break;
+        }
+    }
+}
+
+/// Once `force` has settled, have it take the mask `pending` kept for it: whether that set it
+/// moving again.
+fn unmask(force: &mut Force, pending: &mut Option<Vec<bool>>) -> bool {
+    match pending.take_if(|_| force.settled()) {
+        Some(shown) => {
+            force.set_shown(&shown);
+            !force.settled()
+        }
+        None => false,
     }
 }
 
@@ -373,8 +409,9 @@ fn draw(shared: &Shared) {
         #[cfg(feature = "bench")]
         let t = Instant::now();
         let picture = view.and_then(|(serial, view)| {
+            let shown = camera::shown(&places.at, &places.shape.shown);
             let camera = match (view.camera.fitting, places.held) {
-                (true, false) => Camera::fit(&places.at, view.size),
+                (true, false) => Camera::fit(shown, view.size),
                 (true, true) => fitted,
                 (false, _) => view.camera,
             };
@@ -384,6 +421,7 @@ fn draw(shared: &Shared) {
                 paints: &places.shape.paints,
                 near: &places.shape.near,
                 links: if bare { &[] } else { &places.shape.links },
+                shown: &places.shape.shown,
             };
             picture(&scene, &view, camera, serial)
         });
@@ -452,6 +490,7 @@ mod tests {
             added: vec![None; added],
             links: vec![(0, 1)],
             paints: vec![Paint::Ink; nodes],
+            shown: vec![true; nodes],
             animate,
         }
     }
@@ -515,6 +554,42 @@ mod tests {
             assert!(t.elapsed() < Duration::from_secs(10), "the thread runs on");
             std::thread::sleep(Duration::from_millis(1));
         }
+    }
+
+    /// A layout started from nothing with a node hidden settles round every node first, so the
+    /// hidden one leaves d3's first spiral as the rest do, and then hides it. A node hidden later
+    /// keeps its place, and with every node hidden the layout settles at once.
+    #[test]
+    fn a_cold_layout_hides_its_nodes_once_settled_round_all_of_them() {
+        let change = |generation, added, shown: [bool; 3]| Cmd::Change {
+            generation,
+            removed: Vec::new(),
+            added: vec![None; added],
+            links: vec![(0, 1), (1, 2)],
+            paints: vec![Paint::Ink; 3],
+            shown: shown.to_vec(),
+            animate: false,
+        };
+        let settled = |worker: &Worker, generation| loop {
+            let f = frame(worker);
+            if f.generation == generation && f.settled {
+                break f;
+            }
+        };
+        let mut spiral = Force::new();
+        for _ in 0..3 {
+            spiral.add(None);
+        }
+        let worker = Worker::start(Spread::default());
+        worker.send(change(1, 3, [true, true, false]));
+        let first = settled(&worker, 1);
+        assert_ne!(first.at[2], spiral.positions()[2]);
+        worker.send(change(2, 0, [true, false, true]));
+        let second = settled(&worker, 2);
+        assert_eq!(second.at[1], first.at[1]);
+        assert_ne!(second.at[2], first.at[2]);
+        worker.send(change(3, 0, [false; 3]));
+        assert_eq!(settled(&worker, 3).at, second.at);
     }
 
     /// A cold layout settled at once shows its nodes, then a settled frame with its links.

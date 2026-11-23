@@ -92,9 +92,10 @@ impl Camera {
 
     /// Showing every point of `points` on a canvas of `size` with [`MARGIN`] round them, never
     /// above 100 %, and still fitting: a single node or none at 100 % in the middle.
-    pub fn fit(points: &[[f32; 2]], size: [f64; 2]) -> Camera {
+    pub fn fit(points: impl IntoIterator<Item = [f32; 2]>, size: [f64; 2]) -> Camera {
         let mut camera = Camera::default();
-        let Some(&first) = points.first() else {
+        let mut points = points.into_iter();
+        let Some(first) = points.next() else {
             camera.centre([0.0; 2], size);
             return camera;
         };
@@ -121,24 +122,35 @@ impl Camera {
     }
 
     /// The node whose disc, `radius(i)` world units or [`MIN_RADIUS`] pixels, holds canvas point
-    /// `at` give or take [`SLOP`], the nearest where several do.
+    /// `at` give or take [`SLOP`], the nearest where several do; a node of no radius is hidden.
     pub fn hit(
         &self,
         at: [f64; 2],
         points: &[[f32; 2]],
-        radius: impl Fn(usize) -> f32,
+        radius: impl Fn(usize) -> Option<f32>,
     ) -> Option<usize> {
         let mut best = None::<(usize, f64)>;
         for (i, &p) in points.iter().enumerate() {
+            let Some(radius) = radius(i) else {
+                continue;
+            };
             let s = self.to_screen(p);
             let d2 = (s[0] - at[0]).powi(2) + (s[1] - at[1]).powi(2);
-            let reach = (f64::from(radius(i)) * self.zoom).max(MIN_RADIUS) + SLOP;
+            let reach = (f64::from(radius) * self.zoom).max(MIN_RADIUS) + SLOP;
             if d2 <= reach * reach && best.is_none_or(|(_, b)| d2 < b) {
                 best = Some((i, d2));
             }
         }
         best.map(|(i, _)| i)
     }
+}
+
+/// The places in `at` of the nodes `shown` says are, in order.
+pub(super) fn shown<'a>(
+    at: &'a [[f32; 2]],
+    shown: &'a [bool],
+) -> impl Iterator<Item = [f32; 2]> + 'a {
+    at.iter().zip(shown).filter(|(_, s)| **s).map(|(p, _)| *p)
 }
 
 /// Of `candidates`, the nearest to `from` within 45° either side of `arrow`, the lower index
@@ -255,7 +267,7 @@ mod tests {
     fn a_fit_shows_every_point_and_never_enlarges() {
         let size = [800.0, 600.0];
         let points = [[-1000.0, -10.0], [1000.0, 10.0]];
-        let camera = Camera::fit(&points, size);
+        let camera = Camera::fit(points, size);
         assert!(camera.fitting);
         for p in points {
             let s = camera.to_screen(p);
@@ -263,10 +275,10 @@ mod tests {
             assert!((0.0..=size[1]).contains(&s[1]));
         }
         // Two nodes a link apart are shown at 100 %, in the middle.
-        let near = Camera::fit(&[[0.0, 0.0], [30.0, 0.0]], size);
+        let near = Camera::fit([[0.0, 0.0], [30.0, 0.0]], size);
         assert_eq!(near.zoom, 1.0);
         assert_eq!(near.to_screen([15.0, 0.0]), [400.0, 300.0]);
-        assert_eq!(Camera::fit(&[], size).to_screen([0.0; 2]), [400.0, 300.0]);
+        assert_eq!(Camera::fit([], size).to_screen([0.0; 2]), [400.0, 300.0]);
     }
 
     /// A Fit stays put whatever picture lands next: a fitting canvas takes a fitted picture's
@@ -275,8 +287,8 @@ mod tests {
     #[test]
     fn a_landed_picture_moves_only_a_fitting_canvas_to_its_fit() {
         let size = [800.0, 600.0];
-        let fit = Camera::fit(&[[-100.0, 0.0], [300.0, 50.0]], size);
-        let fitted = Camera::fit(&[[-120.0, 0.0], [320.0, 60.0]], size);
+        let fit = Camera::fit([[-100.0, 0.0], [300.0, 50.0]], size);
+        let fitted = Camera::fit([[-120.0, 0.0], [320.0, 60.0]], size);
         let mut panned = fit;
         panned.pan([40.0, 0.0]);
         assert_eq!(fit.landed(fitted), fitted);
@@ -305,15 +317,18 @@ mod tests {
     }
 
     /// A press finds the nearest node whose disc it is on, a few pixels' slop included, and a
-    /// node zoomed far out is still found at its smallest size.
+    /// node zoomed far out is still found at its smallest size. A hidden node is never found.
     #[test]
     fn a_press_hits_the_nearest_disc() {
         let camera = Camera::default();
         let points = [[0.0, 0.0], [20.0, 0.0], [100.0, 0.0]];
-        let radius = |_| 6.0;
+        let radius = |_| Some(6.0);
         assert_eq!(camera.hit([2.0, 0.0], &points, radius), Some(0));
         assert_eq!(camera.hit([12.0, 0.0], &points, radius), Some(1));
         assert_eq!(camera.hit([60.0, 0.0], &points, radius), None);
+        let first_hidden = |i| (i > 0).then_some(6.0);
+        assert_eq!(camera.hit([2.0, 0.0], &points, first_hidden), None);
+        assert_eq!(camera.hit([12.0, 0.0], &points, first_hidden), Some(1));
         let far = Camera {
             zoom: 0.01,
             ..camera

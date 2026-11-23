@@ -100,6 +100,13 @@ pub(super) fn radius(degree: usize) -> f32 {
     (4.0 + 1.5 * (degree as f32).sqrt()).min(12.0)
 }
 
+/// Whether each of `nodes` is shown: every one without a query, else those `filter` keeps.
+pub(super) fn shown(nodes: &[Node], filter: Option<&HashSet<String>>) -> Vec<bool> {
+    (nodes.iter())
+        .map(|n| filter.is_none_or(|keys| keys.contains(&n.key)))
+        .collect()
+}
+
 /// `key` once `from`, a file or a folder, has moved to `to`; `None` for a key it does not hold.
 pub(super) fn moved(key: &str, from: &str, to: &str) -> Option<String> {
     match key.strip_prefix(from) {
@@ -458,6 +465,15 @@ mod tests {
         let mut both = part(&["a.md", "b.md"], &[(0, 1), (1, 0)]);
         both.edges[1].kind = EdgeKind::Embed;
         assert_eq!(shown(&both).links, [(0, 1)]);
+    }
+
+    /// Without a query every node is shown, and with one only those it keeps.
+    #[test]
+    fn a_query_shows_the_nodes_it_keeps() {
+        let graph = shown(&part(&["a.md", "b.md", "c.md"], &[(0, 1)]));
+        assert_eq!(super::shown(&graph.nodes, None), [true; 3]);
+        let keys: HashSet<String> = ["c.md".into(), "a.md".into(), "z.md".into()].into();
+        assert_eq!(super::shown(&graph.nodes, Some(&keys)), [true, false, true]);
     }
 
     #[test]

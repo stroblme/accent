@@ -5,7 +5,9 @@
 //!
 //! The canvas owns the [`Graph`] and where each of its nodes is. Every change to what it shows
 //! goes through [`GraphView::apply`], into the graph and the layout's [`Worker`] together, so the
-//! two keep their nodes in the same order. With animations on the worker moves the layout on its
+//! two keep their nodes in the same order. The find bar's query hides nodes rather than taking
+//! them out ([`GraphView::set_filter`]), so a hidden node keeps its place and index, and comes
+//! back where it was once the query is gone. With animations on the worker moves the layout on its
 //! own clock and the canvas shows the newest places at each frame, so the nodes settle as they
 //! are watched; with them off it settles in one go. How the canvas wants the graph drawn, its
 //! camera, size and what is lit, goes to the worker as each frame is drawn, and until a picture
@@ -104,6 +106,11 @@ mod imp {
         pub front: RefCell<Option<String>>,
         /// The node the keyboard is on, by key, ringed while the canvas has the keyboard.
         pub current: RefCell<Option<String>>,
+        /// The keys of the nodes the find bar's query leaves shown, none without a query, and
+        /// whether each node is shown, in the graph's order: one hidden is neither drawn nor
+        /// found, and keeps its place in the layout.
+        pub filter: RefCell<Option<HashSet<String>>>,
+        pub mask: RefCell<Vec<bool>>,
         /// Counts the changes sent to the layout, so only places of what is shown land.
         pub generation: Cell<u64>,
         pub worker: RefCell<Option<Worker>>,
@@ -264,6 +271,14 @@ impl GraphView {
             }
             None => imp.graph.borrow_mut().apply(changes),
         }
+        let added = changes.added.iter().map(|(_, near)| *near).collect();
+        self.send(changes.removed.clone(), added);
+    }
+
+    /// Send the graph as it is to the layout as the next generation, `removed` and `added` its
+    /// nodes' change, with whether each is shown, and set the layout moving.
+    fn send(&self, removed: Vec<usize>, added: Vec<Option<usize>>) {
+        let imp = self.imp();
         imp.hover.set(None);
         let generation = imp.generation.get() + 1;
         imp.generation.set(generation);
@@ -273,21 +288,24 @@ impl GraphView {
             imp.frames.set(0);
             imp.shown_at.set(None);
         }
-        let (links, paints) = {
+        let (links, paints, shown) = {
             let graph = imp.graph.borrow();
             let paints = graph.nodes.iter().map(|n| model::paint_of(n.kind));
-            (graph.links.clone(), paints.collect())
+            let shown = model::shown(&graph.nodes, imp.filter.borrow().as_ref());
+            (graph.links.clone(), paints.collect(), shown)
         };
+        imp.mask.replace(shown.clone());
         let animate = self.animations();
         imp.worker
             .borrow_mut()
             .get_or_insert_with(|| Worker::start(imp.spread.get()))
             .send(Cmd::Change {
                 generation,
-                removed: changes.removed.clone(),
-                added: changes.added.iter().map(|(_, near)| *near).collect(),
+                removed,
+                added,
                 links,
                 paints,
+                shown,
                 animate,
             });
         // Along with the change, so its first frame is drawn already.
@@ -305,6 +323,7 @@ impl GraphView {
         imp.graph.replace(Graph::default());
         imp.graph.borrow_mut().roots = roots;
         imp.at.borrow_mut().clear();
+        imp.mask.borrow_mut().clear();
         imp.hover.set(None);
         imp.dragging.take();
         // Through the setter, so the zoom readout says Fit again.
@@ -317,6 +336,26 @@ impl GraphView {
 
     fn animations(&self) -> bool {
         self.settings().is_gtk_enable_animations()
+    }
+
+    /// Show only the nodes keyed in `keys`, the rest hidden with their links where they are, or
+    /// every node for none: the layout settles what is shown round one another, a node the graph
+    /// gains meanwhile hidden until `keys` names it.
+    pub fn set_filter(&self, keys: Option<HashSet<String>>) {
+        let imp = self.imp();
+        if *imp.filter.borrow() == keys {
+            return;
+        }
+        imp.filter.replace(keys);
+        let shown = model::shown(&imp.graph.borrow().nodes, imp.filter.borrow().as_ref());
+        if *imp.mask.borrow() != shown {
+            self.send(Vec::new(), Vec::new());
+        }
+    }
+
+    /// Whether node `i` is shown, not hidden by the find bar's query.
+    fn visible(&self, i: usize) -> bool {
+        self.imp().mask.borrow().get(i).copied().unwrap_or(false)
     }
 
     /// Take the layout's frames from the next frame of the canvas's on, until it settles.
@@ -488,10 +527,14 @@ impl GraphView {
         self.follow_front();
     }
 
-    /// Where the file in front is, in the layout's units, once the layout has placed it.
+    /// Where the file in front is, in the layout's units, once the layout has placed it and
+    /// while it is shown.
     fn front_at(&self) -> Option<[f32; 2]> {
         let imp = self.imp();
         let i = (imp.front.borrow().as_deref()).and_then(|key| self.graph().index_of(key))?;
+        if !self.visible(i) {
+            return None;
+        }
         let at = imp.at.borrow().get(i).copied();
         at.filter(|_| imp.placed.get())
     }
@@ -572,6 +615,12 @@ impl GraphView {
     pub fn rename(&self, from: &str, to: &str) {
         let imp = self.imp();
         imp.graph.borrow_mut().rename(from, to);
+        if let Some(keys) = imp.filter.borrow_mut().as_mut() {
+            let moved = keys
+                .drain()
+                .map(|k| model::moved(&k, from, to).unwrap_or(k));
+            *keys = moved.collect();
+        }
         for key in [&imp.current, &imp.front] {
             let moved = key.borrow().as_deref().map(|k| model::moved(k, from, to));
             if let Some(Some(moved)) = moved {
@@ -620,30 +669,27 @@ impl GraphView {
         self.queue_draw();
     }
 
-    /// An arrow from the node the keyboard is on: to the nearest node it links to that way, else
-    /// the nearest node that way at all. The first press puts the keyboard on the file in front.
+    /// An arrow from the node the keyboard is on: to the nearest node shown it links to that way,
+    /// else the nearest node shown that way at all. The first press puts the keyboard on the file
+    /// in front.
     fn arrow(&self, arrow: Arrow) {
         let imp = self.imp();
         let next = {
             let graph = imp.graph.borrow();
             let at = imp.at.borrow();
-            let current = imp
-                .current
-                .borrow()
-                .as_deref()
-                .and_then(|k| graph.index_of(k));
-            let front = imp
-                .front
-                .borrow()
-                .as_deref()
-                .and_then(|k| graph.index_of(k));
-            let next = match current {
-                None => front.or((!graph.nodes.is_empty()).then_some(0)),
+            let index = |key: &RefCell<Option<String>>| {
+                let i = (key.borrow().as_deref()).and_then(|k| graph.index_of(k));
+                i.filter(|&i| self.visible(i))
+            };
+            let next = match index(&imp.current) {
+                None => index(&imp.front).or_else(|| (0..at.len()).find(|&i| self.visible(i))),
                 Some(i) => {
-                    let near = graph.adjacency[i].iter().map(|&j| (j, at[j]));
+                    let near = (graph.adjacency[i].iter())
+                        .filter(|&&j| self.visible(j))
+                        .map(|&j| (j, at[j]));
                     camera::step(at[i], arrow, near).or_else(|| {
-                        let all = (0..at.len()).filter(|&j| j != i).map(|j| (j, at[j]));
-                        camera::step(at[i], arrow, all)
+                        let all = (0..at.len()).filter(|&j| j != i && self.visible(j));
+                        camera::step(at[i], arrow, all.map(|j| (j, at[j])))
                     })
                 }
             };
@@ -654,9 +700,10 @@ impl GraphView {
         }
     }
 
-    /// Open the node the keyboard is on, as a single click does.
+    /// Open the node the keyboard is on, as a single click does, while it is shown.
     fn open_current(&self) {
         let i = (self.imp().current.borrow().as_deref()).and_then(|k| self.graph().index_of(k));
+        let i = i.filter(|&i| self.visible(i));
         let open = self.imp().open.borrow().clone();
         if let (Some(i), Some(open)) = (i, open) {
             open(i, false);
@@ -772,7 +819,11 @@ impl GraphView {
 
     /// Fitted again to what it shows, at once, and kept so as it settles.
     pub fn fit(&self) {
-        let camera = Camera::fit(&self.imp().at.borrow(), self.size());
+        let imp = self.imp();
+        let camera = {
+            let (at, mask) = (imp.at.borrow(), imp.mask.borrow());
+            Camera::fit(camera::shown(&at, &mask), self.size())
+        };
         self.set_camera(camera);
     }
 
@@ -800,15 +851,13 @@ impl GraphView {
         }
     }
 
-    /// The node under canvas point `at`.
+    /// The node shown under canvas point `at`.
     fn node_at(&self, at: [f64; 2]) -> Option<usize> {
         let graph = self.imp().graph.borrow();
         let places = self.imp().at.borrow();
+        let radius = |i: usize| (self.visible(i)).then(|| model::radius(graph.adjacency[i].len()));
         (places.len() == graph.nodes.len())
-            .then(|| {
-                self.camera()
-                    .hit(at, &places, |i| model::radius(graph.adjacency[i].len()))
-            })
+            .then(|| self.camera().hit(at, &places, radius))
             .flatten()
     }
 
@@ -1056,7 +1105,8 @@ impl GraphView {
         let view = {
             let graph = imp.graph.borrow();
             let index = |key: &RefCell<Option<String>>| {
-                (key.borrow().as_deref()).and_then(|key| graph.index_of(key))
+                let i = (key.borrow().as_deref()).and_then(|key| graph.index_of(key));
+                i.filter(|&i| self.visible(i))
             };
             let camera = imp.camera.get();
             // The worker fits a fitting camera to what it draws, which then holds all of it, and
@@ -1299,6 +1349,9 @@ impl GraphView {
             if placed.len() == LABELS_MAX {
                 break;
             }
+            if !self.visible(i) {
+                continue;
+            }
             let must = always.contains(&Some(i));
             if must && placed.iter().any(|&(j, _)| j == i) {
                 continue;
@@ -1487,6 +1540,21 @@ impl GraphView {
         wheel
             .as_ref()
             .is_some_and(|w| w.state() == adw::AnimationState::Playing)
+    }
+
+    /// The keys of the nodes shown, sorted.
+    pub fn shown_keys(&self) -> Vec<String> {
+        let graph = self.graph();
+        let shown = (graph.nodes.iter().enumerate()).filter(|&(i, _)| self.visible(i));
+        let mut keys: Vec<String> = shown.map(|(_, n)| n.key.clone()).collect();
+        keys.sort();
+        keys
+    }
+
+    /// Where `key`'s node is, in the layout's units.
+    pub fn place_of(&self, key: &str) -> Option<[f32; 2]> {
+        let i = self.graph().index_of(key)?;
+        self.imp().at.borrow().get(i).copied()
     }
 
     /// Whether the front's node is on the canvas, as [`GraphView::shows`] has it.

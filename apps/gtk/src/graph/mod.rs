@@ -495,6 +495,22 @@ impl GraphTab {
         self.view.easing()
     }
 
+    /// The keys of the nodes shown, sorted.
+    pub fn shown(&self) -> Vec<String> {
+        self.view.shown_keys()
+    }
+
+    /// Show only the nodes keyed in `keys`, as the find bar's query does, or every node.
+    pub fn filter(&self, keys: Option<&[&str]>) {
+        let keys = keys.map(|keys| keys.iter().map(|k| k.to_string()).collect());
+        self.view.set_filter(keys);
+    }
+
+    /// Where `key`'s node is, in the layout's units.
+    pub fn place_of(&self, key: &str) -> Option<[f32; 2]> {
+        self.view.place_of(key)
+    }
+
     /// A wheel notch over the canvas.
     pub fn notch(&self) {
         self.view.notch();

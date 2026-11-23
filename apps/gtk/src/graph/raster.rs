@@ -50,12 +50,14 @@ pub struct View {
     pub colours: Colours,
 }
 
-/// What is drawn: the nodes' places and paints, their neighbours, and the links between them.
+/// What is drawn: the nodes' places and paints, their neighbours, and the links between them,
+/// of the nodes shown: one the find bar's query hides is drawn not at all, nor are its links.
 pub struct Scene<'a> {
     pub at: &'a [[f32; 2]],
     pub paints: &'a [Paint],
     pub near: &'a [Vec<usize>],
     pub links: &'a [(usize, usize)],
+    pub shown: &'a [bool],
 }
 
 pub struct Pixels {
@@ -80,7 +82,9 @@ pub fn draw(scene: &Scene, view: &View, camera: Camera) -> Pixels {
         (view.size[0] * scale).ceil() as usize,
         (view.size[1] * scale).ceil() as usize,
     );
-    let n = scene.at.len().min(scene.paints.len()).min(scene.near.len());
+    let n = (scene.at.len().min(scene.paints.len()))
+        .min(scene.near.len())
+        .min(scene.shown.len());
     let device = |p: [f32; 2]| {
         let s = camera.to_screen(p);
         [(s[0] * scale) as f32, (s[1] * scale) as f32]
@@ -104,16 +108,13 @@ pub fn draw(scene: &Scene, view: &View, camera: Camera) -> Pixels {
     let hairline = scale as f32;
 
     let touches = |&(a, b): &(usize, usize)| lit.is_some_and(|l| a == l || b == l);
-    for &(a, b) in scene.links.iter().filter(|l| !touches(l)) {
-        if a < n && b < n {
-            px.line(screen[a], screen[b], hairline);
-        }
+    let drawn = |&(a, b): &(usize, usize)| a < n && b < n && scene.shown[a] && scene.shown[b];
+    for &(a, b) in scene.links.iter().filter(|l| drawn(l) && !touches(l)) {
+        px.line(screen[a], screen[b], hairline);
     }
     px.paint_lines(alpha(ink, theme::GRAPH_EDGE_ALPHA));
-    for &(a, b) in scene.links.iter().filter(|l| touches(l)) {
-        if a < n && b < n {
-            px.line(screen[a], screen[b], hairline);
-        }
+    for &(a, b) in scene.links.iter().filter(|l| drawn(l) && touches(l)) {
+        px.line(screen[a], screen[b], hairline);
     }
     px.paint_lines(alpha(ink, theme::GRAPH_FAINT_ALPHA));
 
@@ -130,7 +131,9 @@ pub fn draw(scene: &Scene, view: &View, camera: Camera) -> Pixels {
         (Paint::Tag, _) => 7,
         (Paint::Ghost, _) => 8,
     };
-    let mut order: Vec<usize> = (0..n).filter(|&i| Some(i) != front).collect();
+    let mut order: Vec<usize> = (0..n)
+        .filter(|&i| scene.shown[i] && Some(i) != front)
+        .collect();
     order.sort_by_key(|&i| slot(i));
     let ring = 1.5 * scale as f32;
     for i in order {
