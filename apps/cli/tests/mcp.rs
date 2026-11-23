@@ -5,6 +5,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
@@ -12,19 +13,27 @@ use serde_json::{Value, json};
 /// Create an isolated vault with an external symlink and private index, config, and cache directories.
 struct Scratch {
     dir: PathBuf,
+    /// The server's `TMPDIR`, which a job's stop socket goes in: short and under `/tmp` whatever
+    /// the caller's `TMPDIR` is, as a unix socket's path is at most 108 bytes.
+    tmp: PathBuf,
 }
 
 impl Scratch {
     fn new(name: &str) -> Scratch {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
         let dir = std::env::temp_dir().join(format!("accent-mcp-{}-{name}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let tmp = PathBuf::from(format!("/tmp/accent-mcp-{}-{n}", std::process::id()));
+        for left in [&dir, &tmp] {
+            let _ = std::fs::remove_dir_all(left);
+        }
+        std::fs::create_dir_all(&tmp).unwrap();
         for sub in [
             "vault/Templates",
             "outside",
             "config",
             "cache",
             "state",
-            "tmp",
             "home",
         ] {
             std::fs::create_dir_all(dir.join(sub)).unwrap();
@@ -41,7 +50,7 @@ impl Scratch {
         );
         write("outside/secret.md", "secret kumquat\n");
         std::os::unix::fs::symlink(dir.join("outside"), dir.join("vault/link")).unwrap();
-        Scratch { dir }
+        Scratch { dir, tmp }
     }
 
     fn read(&self, rel: &str) -> String {
@@ -56,6 +65,7 @@ impl Scratch {
 impl Drop for Scratch {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
+        let _ = std::fs::remove_dir_all(&self.tmp);
     }
 }
 
@@ -84,7 +94,7 @@ impl Client {
             .env("XDG_CONFIG_HOME", scratch.dir.join("config"))
             .env("XDG_CACHE_HOME", scratch.dir.join("cache"))
             .env("XDG_STATE_HOME", scratch.dir.join("state"))
-            .env("TMPDIR", scratch.dir.join("tmp"))
+            .env("TMPDIR", &scratch.tmp)
             // A held terminal runs `$SHELL` under `$HOME` from this environment: a plain `sh` in
             // a scratch home, never the developer's shell and its startup files.
             .env("SHELL", "/bin/sh")
