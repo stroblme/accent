@@ -1,6 +1,7 @@
 bench graph open front=a.md nodes=["a.md", "b.md", "c.md", "e.md", "gone.md?"] links=5
 bench graph split b.md front=b.md shown=true panes=2
 bench graph narrowed lit_before=b.md lit=none
+bench graph ease easing=true ended=true kept=true
 bench graph click c.md opened=c.md pane=2 preview=true keyboard=graph tabs=1
 bench graph grow c.md roots=["a.md", "b.md", "c.md"] nodes=["a.md", "b.md", "c.md", "e.md", "f.md", "gone.md?"] front=c.md
 bench graph click b.md opened=b.md pane=2 preview=true keyboard=graph tabs=1

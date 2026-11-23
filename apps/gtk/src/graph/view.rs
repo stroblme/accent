@@ -746,7 +746,19 @@ impl GraphView {
         self.imp().camera.get()
     }
 
+    /// Move the camera, ending an ease under way where it has got to, so a pan, a zoom or a step
+    /// made while the graph eases over is not undone by the ease's next frames. Pausing changes
+    /// no value, where skipping or resetting the ease would move the camera once more.
     fn set_camera(&self, camera: Camera) {
+        let wheel = self.imp().wheel.borrow().clone();
+        if let Some(wheel) = wheel {
+            wheel.pause();
+        }
+        self.put_camera(camera);
+    }
+
+    /// Move the camera, as each frame of an ease does.
+    fn put_camera(&self, camera: Camera) {
         self.imp().camera.set(camera);
         self.queue_draw();
         if let Some(zoomed) = self.imp().zoomed.borrow().clone() {
@@ -981,7 +993,7 @@ impl GraphView {
                     from[1] + (to[1] - from[1]) * t,
                 ];
                 camera.fitting = false;
-                view.set_camera(camera);
+                view.put_camera(camera);
             }
         ));
         let animation = adw::TimedAnimation::new(self, 0.0, 1.0, crate::widgets::WHEEL_MS, target);
@@ -1462,6 +1474,11 @@ impl GraphView {
         let s = camera.to_screen(p);
         camera.pan([at[0] - s[0], at[1] - s[1]]);
         self.set_camera(camera);
+    }
+
+    /// A wheel notch down, as the wheel lands one.
+    pub fn notch(&self) {
+        self.ease_pan([0.0, -NOTCH]);
     }
 
     /// Whether the canvas is easing over, as a wheel notch or the file in front has it.

@@ -289,7 +289,9 @@ async fn check(app: &Rc<App>, rel: &str) {
 /// with the node where the narrower canvas leaves it off: once the split is laid out the canvas
 /// has eased over to the node, the file in front now (`split`). Then, the pointer resting on the
 /// node at the canvas's right edge, the divider moves left from under it, which GTK tells the
-/// canvas nothing of: once laid out the node is lit no more (`narrowed`).
+/// canvas nothing of: once laid out the node is lit no more (`narrowed`). Last a pan made while a
+/// wheel notch eases over ends the ease, and the camera stays where the pan left it once the ease
+/// would have ended (`ease`).
 async fn split(app: &Rc<App>, graph: &GraphTab) {
     let canvas = graph.key_target();
     let (w, h) = (f64::from(canvas.width()), f64::from(canvas.height()));
@@ -334,6 +336,17 @@ async fn split(app: &Rc<App>, graph: &GraphTab) {
         "bench graph narrowed lit_before={} lit={}",
         lit.as_deref().unwrap_or("none"),
         graph.lit().as_deref().unwrap_or("none")
+    );
+    graph.notch();
+    let easing = graph.easing();
+    let (w, h) = (f64::from(canvas.width()), f64::from(canvas.height()));
+    graph.put("b.md", [0.5 * w, 0.5 * h]);
+    let (ended, at) = (!graph.easing(), graph.offset());
+    let ease = u64::from(crate::widgets::WHEEL_MS) + 100;
+    glib::timeout_future(Duration::from_millis(ease)).await;
+    println!(
+        "bench graph ease easing={easing} ended={ended} kept={}",
+        graph.offset() == at
     );
 }
 

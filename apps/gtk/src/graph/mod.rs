@@ -495,6 +495,16 @@ impl GraphTab {
         self.view.easing()
     }
 
+    /// A wheel notch over the canvas.
+    pub fn notch(&self) {
+        self.view.notch();
+    }
+
+    /// Where the world's origin is on the canvas.
+    pub fn offset(&self) -> [f64; 2] {
+        self.view.camera().offset
+    }
+
     /// Whether the front's node is on the canvas.
     pub fn front_shown(&self) -> bool {
         self.view.front_shown()
