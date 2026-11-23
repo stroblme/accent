@@ -145,6 +145,9 @@ bench indent_closer_already_out "fn f() {\n" (1, 0) Proceed
 bench indent_tabs "\tg(\n\t\t" (1, 2) Stop
 bench indent_back_tab "\ta\n    b" (1, 5) Stop
 bench indent_line_below "def f():  # x\n    " (1, 4)
+bench indent_unit_return "def f():\n  if x:\n    " (2, 4) Stop
+bench indent_unit_back_tab "def f():\n  if x:\n  " (2, 2) Stop
+bench indent_unit_tab "  a\n  b"
 bench pair_open "f()" (0, 2) Stop
 bench pair_step_over "f()" (0, 3) Stop
 bench pair_backspace "g" (0, 1) Stop

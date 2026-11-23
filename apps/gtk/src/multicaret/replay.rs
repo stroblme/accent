@@ -82,9 +82,9 @@ impl View {
                 // for code and leaves a note with its literal tab — so every caret answers the
                 // way the primary one does, each from the column it is actually in.
                 Edit::Tab => {
-                    let width = self.tab_width() as usize;
-                    let column = visual_column(&line_prefix(&buffer, &at), width);
-                    let text = tab_insert(column, width, self.is_insert_spaces_instead_of_tabs());
+                    let column = visual_column(&line_prefix(&buffer, &at), self.tab_width() as _);
+                    let level = crate::editor::indent_width(self.upcast_ref());
+                    let text = tab_insert(column, level, self.is_insert_spaces_instead_of_tabs());
                     buffer.insert(&mut at, &text);
                 }
                 Edit::Backspace | Edit::Delete | Edit::DeleteWord(_) if !span.is_empty() => {}

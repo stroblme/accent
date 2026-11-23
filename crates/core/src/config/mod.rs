@@ -219,9 +219,9 @@ pub struct Config {
     /// Let the preview's page fill its pane instead of taking [`Config::column_width`]'s share
     /// of it, for a note whose tables are wider than a column of prose. Off by default.
     pub full_width_preview: bool,
-    /// How many columns one indent is worth in a code tab: the width of a tab character and of
-    /// the run of spaces Tab writes in its place. Prose is not measured in columns and keeps
-    /// GtkSourceView's own.
+    /// How many columns one indent is worth in a code tab: the width of a tab character, and of
+    /// the run of spaces Tab writes in its place in a file whose lines show no indent of their own
+    /// yet. Prose is not measured in columns and keeps GtkSourceView's own.
     pub indent_width: u32,
     /// Hand a focused shell every key, accent's own shortcuts included, but Copy and Paste in
     /// Terminal. Off by default: the shell then gets every key but a small reserved set the

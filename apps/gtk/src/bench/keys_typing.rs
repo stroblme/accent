@@ -124,6 +124,19 @@ pub(super) fn bench_indent(view: &multicaret::View) {
         at.line(),
         at.line_offset()
     );
+    // A file indented by two under an Indent Width of four steps by two, as its open reads it:
+    // Return after an opener, Shift+Tab, and Tab at a column of carets.
+    set(Some("python3"), "def f():\n  if x:");
+    editor::adopt_indent(view.upcast_ref(), &text(), source.language().as_ref());
+    press("unit_return", gdk::Key::Return);
+    press("unit_back_tab", gdk::Key::ISO_Left_Tab);
+    buffer.set_text("a\nb");
+    buffer.place_cursor(&buffer.start_iter());
+    view.add_caret(true);
+    view.press(gdk::Key::Tab, gdk::ModifierType::empty());
+    println!("bench indent_unit_tab {:?}", text());
+    view.clear_carets();
+    view.set_indent_width(-1);
     source.set_language(None);
 }
 

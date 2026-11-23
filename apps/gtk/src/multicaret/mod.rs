@@ -222,7 +222,8 @@ fn visual_column(prefix: &str, width: usize) -> usize {
     })
 }
 
-/// What Tab inserts at `column`: a literal tab, or the spaces that reach the next tab stop.
+/// What Tab inserts at `column`: a literal tab, or the spaces that reach the next indent stop,
+/// every `width` columns.
 fn tab_insert(column: usize, width: usize, spaces: bool) -> String {
     match spaces {
         true => " ".repeat(width - column % width),

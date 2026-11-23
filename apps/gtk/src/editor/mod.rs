@@ -46,6 +46,8 @@ pub(crate) use drag::content as drag_content;
 use follow::Follow;
 pub(crate) use follow::url_under;
 #[cfg(feature = "bench")]
+pub(crate) use indent::adopt as adopt_indent;
+#[cfg(feature = "bench")]
 pub(crate) use indent::on_key as indent_key;
 pub(crate) use indent::{reindent, stop_before, width as indent_width};
 pub(crate) use keys::attach as attach_keys;
@@ -625,10 +627,8 @@ impl Tab {
             Flavour::Note(_) | Flavour::Csv(_) => None,
         };
         if language.is_some() {
-            // As `open::build` has it: everything but a makefile indents with spaces.
-            let tabs_are_syntax = language.as_ref().is_some_and(|l| l.id() == "makefile");
-            self.view
-                .set_insert_spaces_instead_of_tabs(!tabs_are_syntax);
+            // As `open::build` has it, a makefile among them.
+            indent::adopt(&self.view, &self.text(), language.as_ref());
         }
         self.buffer.set_language(language.as_ref());
         // A new delimiter retags every record, which an incremental pass would not.
@@ -749,6 +749,10 @@ impl Tab {
         let etag = text.etag;
         self.save.digest.set(Some(text.digest()));
         self.set_text(&text.text);
+        // Read as the file is at open, which a formatter may have indented anew.
+        if !self.flavour().is_note() {
+            indent::adopt(&self.view, &text.text, self.buffer.language().as_ref());
+        }
         let iter = self
             .buffer
             .iter_at_offset(anchor.offset.min(self.buffer.char_count()));
@@ -1034,7 +1038,8 @@ impl Tab {
 
     // --- preferences ---------------------------------------------------------------------
 
-    /// Set tab and wrap width from preferences for notes and code. Note Tab
+    /// Set tab and wrap width from preferences for notes and code, and the indent level of a code
+    /// file that shows none of its own (`indent::adopt`). Note Tab
     /// still inserts a literal tab or list indent; CommonMark interprets
     /// tabs at four-column stops.
     pub fn set_indent_width(&self, columns: u32) {

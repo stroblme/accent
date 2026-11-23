@@ -65,17 +65,16 @@ pub(crate) fn build(
     caret_to_click(&view);
     view.set_show_line_numbers(false);
     // The Indent Width preference's default, which `Tab::set_indent_width` replaces in a tab. A
-    // companion beside a tab takes the tab's (`diff::Compare::follow_editor`) and two companions
-    // keep this, so both sides of a comparison count a tab and a wrap level alike.
+    // companion beside a tab takes the tab's, and its indent level too
+    // (`diff::Compare::follow_editor`), and two companions keep this, so both sides of a
+    // comparison count a tab and a wrap level alike.
     view.set_tab_width(4);
     if !flavour.is_note() {
         view.set_auto_indent(true);
         view.set_indent_on_tab(true);
         view.set_smart_backspace(true);
         view.set_highlight_current_line(true);
-        // Everything but a makefile, where a leading tab is syntax.
-        let tabs_are_syntax = language.as_ref().is_some_and(|l| l.id() == "makefile");
-        view.set_insert_spaces_instead_of_tabs(!tabs_are_syntax);
+        indent::adopt(&view, text, language.as_ref());
     }
     // Apostrophe-like page: generous side gutters, room to breathe at the ends. `set_page`,
     // called from `set_font` below, puts the zoomed values here.

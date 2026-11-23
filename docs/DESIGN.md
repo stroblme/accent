@@ -769,8 +769,13 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 ### Code editor
 
 - The same view, told what it is by an `editor::Flavour` of `Note`, `Code` or `Csv`: one tab type, not two, and a code tab gets none of the markdown tags.
-- Code takes a GtkSourceView language guessed from the path and the content type, so `LICENSE` and `Makefile` open as what they are; bracket matching, auto-indent, and a four-space tab that stays a real tab where a makefile needs one.
-- **Indentation follows the code as it is typed**, one rule in every language and no server (user decision 2026-10-19): Return after a line whose code ends in `{`, `(`, `[` or `:` indents one level deeper, by the Indent Width, and between such an opener and its closer puts the closer on a line of its own at the outer level; a closer typed on a blank line goes back out to the level of the block it closes.
+- Code takes a GtkSourceView language guessed from the path and the content type, so `LICENSE` and `Makefile` open as what they are; bracket matching, auto-indent, and a Tab that steps by the file's own indent.
+- **Each file indents by its own unit** (user decision 2026-11-22), read from its lines as VS Code's `detectIndentation` reads them when it opens or is read again after a change on disk.
+  A file in which more lines open with a tab than with a space indents with tabs, and any other by the step of two to eight spaces that a line most often goes deeper by than the one above it.
+  Tab, Shift+Tab, Backspace in an indent, Return and a wrapped row all step by that unit, so a file indented by two moves two columns at a time under an Indent Width of four.
+  The Indent Width is the unit of a file with no indented line yet, until it is next opened, and the width a tab is shown at, while a makefile always indents with tabs.
+  A notebook's cell reads its own lines, and a read-only column beside the editor takes the editor's unit.
+- **Indentation follows the code as it is typed**, one rule in every language and no server (user decision 2026-10-19): Return after a line whose code ends in `{`, `(`, `[` or `:` indents one level deeper, by the file's unit, and between such an opener and its closer puts the closer on a line of its own at the outer level; a closer typed on a blank line goes back out to the level of the block it closes.
   A comment after the opener does not hide it and one inside a string is not one, as the language's highlighting tells them apart; a file with no language only copies the line's indent, as every other Return does.
   Each is one undo step.
   Language servers were asked first: of those accent starts, only clangd indents on a typed newline (`textDocument/onTypeFormatting`), and VS Code itself indents by per-language rules with format-on-type off.

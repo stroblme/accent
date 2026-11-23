@@ -240,7 +240,71 @@ fn columns(indent: &str, tab_width: usize) -> usize {
     })
 }
 
-/// One indent level in columns: the Indent Width preference, which is the view's tab width.
+/// One level of a file's indent, as its lines show it.
+#[derive(Debug, PartialEq)]
+enum Unit {
+    Tab,
+    Spaces(u32),
+}
+
+/// The indent unit `text` shows, read as VS Code's `detectIndentation` reads one from the first
+/// 10 000 lines: a tab where more lines open with a tab than with a space, else the step of two to
+/// eight spaces by which a line most often goes deeper than the one above it, the narrower on a
+/// tie. None for text with no line indented yet.
+fn detect(text: &str) -> Option<Unit> {
+    let (mut tabs, mut spaced) = (0, 0);
+    let mut steps = [0; 9];
+    // The spaces the last line with text opened with, none past one indented with a tab.
+    let mut above = Some(0);
+    for line in text.lines().take(10_000) {
+        let indent = leading_indent(line);
+        if indent.len() == line.len() {
+            continue;
+        }
+        match indent.chars().next() {
+            Some('\t') => tabs += 1,
+            Some(_) => spaced += 1,
+            None => {}
+        }
+        let spaces = (!indent.contains('\t')).then_some(indent.len());
+        if let (Some(above), Some(spaces)) = (above, spaces)
+            && (2..=8).contains(&spaces.saturating_sub(above))
+        {
+            steps[spaces - above] += 1;
+        }
+        above = spaces;
+    }
+    if tabs > spaced {
+        return Some(Unit::Tab);
+    }
+    (2..=8)
+        .filter(|&step| steps[step] > 0)
+        .max_by_key(|&step| (steps[step], std::cmp::Reverse(step)))
+        .map(|step| Unit::Spaces(step as u32))
+}
+
+/// Give a code view the indent unit its `text` shows, which Tab, Shift+Tab, Backspace in an
+/// indent, Return and a wrapped row's hang all step by: GtkSourceView's indent width, or its tab
+/// width (the Indent Width preference) for a file with none yet or one indented with tabs. A
+/// makefile indents with tabs whatever its lines show, a leading tab being its syntax.
+pub(crate) fn adopt(
+    view: &sourceview5::View,
+    text: &str,
+    language: Option<&sourceview5::Language>,
+) {
+    let unit = match language.is_some_and(|l| l.id() == "makefile") {
+        true => Some(Unit::Tab),
+        false => detect(text),
+    };
+    view.set_insert_spaces_instead_of_tabs(unit != Some(Unit::Tab));
+    view.set_indent_width(match unit {
+        Some(Unit::Spaces(width)) => width as i32,
+        _ => -1,
+    });
+}
+
+/// One indent level in columns: the file's own ([`adopt`]), or the Indent Width preference, which
+/// is the view's tab width, where the file has none or indents with tabs.
 pub(crate) fn width(view: &sourceview5::View) -> usize {
     match view.indent_width() {
         width if width > 0 => width as usize,
@@ -267,7 +331,24 @@ fn outdent(indent: &str, width: usize) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{outdent, stop_before};
+    use super::{Unit, detect, outdent, stop_before};
+
+    /// A file's unit is the step its lines go deeper by, or a tab where most lines open with one;
+    /// a comment's ` * ` and a continuation lined up under a bracket do not outvote it.
+    #[test]
+    fn a_file_indents_by_the_step_its_lines_go_deeper_by() {
+        let two = "fn f() {\n  if x {\n    g(a,\n      b);\n  }\n}\n";
+        assert_eq!(detect(two), Some(Unit::Spaces(2)));
+        let four = concat!(
+            "/**\n * doc\n */\n",
+            "def f():\n    if x:\n        y = g(a,\n              b)\n    z",
+        );
+        assert_eq!(detect(four), Some(Unit::Spaces(4)));
+        let tabs = "f() {\n\tif x {\n\t\ty\n\t}\n  z\n}";
+        assert_eq!(detect(tabs), Some(Unit::Tab));
+        assert_eq!(detect("a\n\nb\n   \n"), None);
+        assert_eq!(detect("/*\n * a\n */"), None);
+    }
 
     #[test]
     fn outdent_takes_one_level_off_the_end() {
