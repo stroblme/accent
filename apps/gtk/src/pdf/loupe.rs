@@ -326,10 +326,10 @@ impl PdfTab {
 
     /// The loupe against the screen: `none`, or whether it shows, the hand, the part of the
     /// reading view it enlarges as `(x, y, w, h)`, its size, whether it is above the line, and
-    /// where its popover is on the screen and whether it is all on it, the drill's window being
-    /// at the screen's corner; then how many device pixels of what it shows there are to one of
-    /// the view's, two once its band has landed, how long that band took in milliseconds, and the
-    /// longest the loupe has taken to paint. Only drills ask.
+    /// where its popover is on the screen and whether the box it draws is all on it, the drill's
+    /// window being at the screen's corner; then how many device pixels of what it shows there
+    /// are to one of the view's, two once its band has landed, how long that band took in
+    /// milliseconds, and the longest the loupe has taken to paint. Only drills ask.
     #[cfg(feature = "bench")]
     pub fn loupe_report(&self) -> String {
         let loupe = self.loupe.borrow();
@@ -352,11 +352,23 @@ impl PdfTab {
         let surface = loupe.popover.surface().and_downcast::<gdk::Popup>();
         let placed =
             (surface.as_ref()).map(|s| (s.position_x(), s.position_y(), s.width(), s.height()));
+        // The box the popover draws, its `contents`, without the margin GTK 4.24 keeps round it
+        // for a shadow and lets run past the screen's edge as it slides the popover along it.
+        let (tx, ty) = loupe.popover.surface_transform();
+        let drawn = (loupe.popover.first_child())
+            .filter(|child| child.css_name() == "contents")
+            .and_then(|child| child.compute_bounds(&loupe.popover))
+            .zip(placed)
+            .map(|(b, (x, y, _, _))| {
+                let x = x + (tx + f64::from(b.x())).round() as i32;
+                let y = y + (ty + f64::from(b.y())).round() as i32;
+                (x, y, b.width().round() as i32, b.height().round() as i32)
+            });
         let monitor = (surface.as_ref()).and_then(|s| s.display().monitor_at_surface(s));
         let inside = |(x, y, w, h): (i32, i32, i32, i32), m: gdk::Rectangle| {
             x >= m.x() && y >= m.y() && x + w <= m.x() + m.width() && y + h <= m.y() + m.height()
         };
-        let on_screen = (placed.zip(monitor)).is_some_and(|(p, m)| inside(p, m.geometry()));
+        let on_screen = (drawn.zip(monitor)).is_some_and(|(p, m)| inside(p, m.geometry()));
         let above = placed
             .zip(top)
             .is_some_and(|((_, y, _, h), top)| f64::from(y + h) <= top + 1.0);

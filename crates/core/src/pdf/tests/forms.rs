@@ -72,8 +72,9 @@ fn a_widget_draws_its_appearance() {
 
 /// A text field with no appearance stream of its own in a form that says `NeedAppearances` is
 /// drawn by pdfium from its value, in its `/DA`'s colour. A character the `/DA` font cannot
-/// encode is in the file and reads back, as pdfium reads it too, but pdfium draws the field
-/// without it, as poppler does: "Hi α" is drawn as "Hi".
+/// encode is in the file and reads back, as pdfium reads it too, and is drawn only where the
+/// system font pdfium falls back on has it: "Hi α" is drawn as "Hi" on Ubuntu, whose Droid Sans
+/// Fallback has no α, and whole on openSUSE, whose STIX has one.
 #[test]
 fn need_appearances_draws_the_value_without_an_ap() {
     let page = |value: &str| {
@@ -111,17 +112,22 @@ fn need_appearances_draws_the_value_without_an_ap() {
             (page.annotations().iter()).find_map(|a| a.as_form_field()?.as_text_field()?.value());
         assert_eq!(read.as_deref(), Some("Hi α"), "as pdfium reads it");
     }
-    // Its red pixels and how far across they reach, which pdfium's line set a pixel lower for
-    // the glyph it could not find leaves as they were.
+    // Its red pixels and where they start, which pdfium's line set a pixel lower for a glyph it
+    // could not find leaves as they were.
     let drawn = |doc: &PdfDoc| {
         let image = doc.render_page(0, 2.0, Theme::Plain).unwrap();
         let w = image.width as usize;
         let reds = (image.data.as_chunks::<4>().0.iter().enumerate()).filter(|(_, px)| red(**px));
         let xs: Vec<usize> = reds.map(|(i, _)| i % w).collect();
-        (xs.len(), xs.iter().min().copied(), xs.iter().max().copied())
+        (xs.len(), xs.iter().min().copied())
     };
     assert!(painted(&alpha, 0, box_, red));
-    assert_eq!(drawn(&alpha), drawn(&hi), "the α is not drawn");
+    let ((alpha_ink, alpha_left), (hi_ink, hi_left)) = (drawn(&alpha), drawn(&hi));
+    assert_eq!(alpha_left, hi_left, "Hi starts where it starts alone");
+    assert!(
+        alpha_ink >= hi_ink,
+        "Hi is drawn whole, whatever becomes of the α"
+    );
 }
 
 /// Every field accent reads is the one pdfium reads, by name, kind, value and box.
