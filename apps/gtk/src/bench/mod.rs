@@ -112,8 +112,9 @@ use folders::{
 };
 use git::{
     bench_git, bench_git_branch, bench_git_close, bench_git_commit_focus, bench_git_focus,
-    bench_git_init, bench_git_markers, bench_git_press, bench_git_rebase, bench_git_refresh,
-    bench_git_scroll, bench_git_switch, bench_git_sync_all, bench_git_sync_over_fetch,
+    bench_git_init, bench_git_log_failed, bench_git_markers, bench_git_press, bench_git_rebase,
+    bench_git_refresh, bench_git_scroll, bench_git_switch, bench_git_sync_all,
+    bench_git_sync_over_fetch,
 };
 use goals::bench_goals;
 use image::{bench_image, bench_image_look, bench_preview_look};
@@ -127,6 +128,11 @@ pub(crate) use loading::SLOW_READ_MS;
 /// Whether the next comparison a Git row asks for fails to read, as one over a dropped link
 /// does: `ACCENT_BENCH_FAIL_GIT_READ`.
 pub(crate) static FAIL_GIT_READ: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the Git pane's next `git log` fails, as one over a dropped link does:
+/// `ACCENT_BENCH_FAIL_GIT_LOG`.
+pub(crate) static FAIL_GIT_LOG: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 /// How long each of the Git pane's calls holds on its worker, as one round trip to a distant
@@ -189,7 +195,7 @@ use user_commands::bench_commands;
 ///   (post-commit focus), `switch` (repository-switch races), `markers:<rel>`
 ///   (conflict resolution), `branch` (branch popover, branch-name validation),
 ///   `syncall`, `refresh:<rel>,<other>` (each refresh's timing and what the pane shows while it
-///   is on its way).
+///   is on its way), `log_failed` (a history whose first read fails, and its Retry).
 /// - `ACCENT_BENCH_START=1`: start screen on a `--new-window` launch,
 ///   handled by `start::bench_start` without an `App`.
 /// - `ACCENT_BENCH_KEYS=1`: editor key semantics and completion acceptance.
@@ -367,6 +373,8 @@ use user_commands::bench_commands;
 ///   distant host would, for `GIT=refresh:`.
 /// - `ACCENT_BENCH_FAIL_GIT_READ=1`: the first comparison a Git row asks for fails to read, for
 ///   its tab's Retry in the `COMPARE=row:` drill.
+/// - `ACCENT_BENCH_FAIL_GIT_LOG=1`: the Git pane's first `git log` fails, for the history's
+///   Retry in the `GIT=log_failed` drill.
 /// - `ACCENT_BENCH_FOLLOW=<rel_note>`: Ctrl-hover, missing targets and anchors;
 ///   `hover:<rel_note>`: XTEST hover size and wheel behavior; `click:<rel_note>`: an XTEST
 ///   Ctrl+click jump within the note leaves nothing selected.
@@ -521,6 +529,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         .and_then(|ms| ms.parse().ok())
     {
         SLOW_GIT_MS.store(ms, std::sync::atomic::Ordering::Relaxed);
+    }
+    if std::env::var_os("ACCENT_BENCH_FAIL_GIT_LOG").is_some() {
+        FAIL_GIT_LOG.store(true, std::sync::atomic::Ordering::Relaxed);
     }
     if std::env::var_os("ACCENT_BENCH_FAIL_GIT_READ").is_some() {
         FAIL_GIT_READ.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1182,6 +1193,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
                 (None, "switch") => bench_git_switch(&app),
                 (None, "branch") => bench_git_branch(&app),
                 (None, "syncall") => bench_git_sync_all(&app),
+                (None, "log_failed") => bench_git_log_failed(&app),
                 _ => bench_git(&app),
             };
         }

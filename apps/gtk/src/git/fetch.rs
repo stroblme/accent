@@ -129,6 +129,8 @@ pub(super) struct Fetched {
     /// Whether the selected repository's status was asked: one of some paths' may leave it out.
     pub(super) selected_asked: bool,
     pub(super) commits: Option<Vec<Commit>>,
+    /// Why git would not give the history, where it was asked and refused.
+    pub(super) log_refused: Option<String>,
     pub(super) branches: Option<git::Branches>,
     pub(super) submodules: Option<Vec<Submodule>>,
     /// The commits a pull would bring in, which is what marks the history's rows. Asked for only
@@ -214,10 +216,15 @@ pub(super) fn fetch(
         });
         let log = head.map(|repo| {
             scope.spawn(move || {
+                // A link that drops, for `ACCENT_BENCH_FAIL_GIT_LOG`.
+                #[cfg(feature = "bench")]
+                if crate::bench::FAIL_GIT_LOG.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                    return Err("the host did not answer".to_string());
+                }
                 vault
                     .git_log(repo, 0, rows)
                     .inspect_err(|e| tracing::debug!("git log: {e}"))
-                    .ok()
+                    .map_err(|e| e.to_string())
             })
         });
         let branches = head.map(|repo| {
@@ -250,12 +257,17 @@ pub(super) fn fetch(
         }
         (
             joined(mine),
-            joined(log).flatten(),
+            joined(log),
             joined(branches).flatten(),
             joined(submodules).flatten(),
         )
     });
     let (status, incoming) = mine.unwrap_or_default();
+    let (commits, log_refused) = match commits {
+        Some(Ok(commits)) => (Some(commits), None),
+        Some(Err(why)) => (None, Some(why)),
+        None => (None, None),
+    };
     if let Some(slot) = statuses.get_mut(at) {
         *slot = status;
     }
@@ -266,6 +278,7 @@ pub(super) fn fetch(
         statuses,
         selected_asked: asked.get(at).copied().unwrap_or(true),
         commits,
+        log_refused,
         branches,
         submodules,
         incoming,

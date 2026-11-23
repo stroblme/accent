@@ -305,6 +305,38 @@ pub(super) fn bench_git_refresh(app: &Rc<App>, rels: &str) {
     });
 }
 
+/// A history whose first `git log` fails (`ACCENT_BENCH_FAIL_GIT_LOG`): what stands in its place
+/// and whether a toast said it too, then what its Retry brings.
+pub(super) fn bench_git_log_failed(app: &Rc<App>) {
+    app.show_pane("git");
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        let git = || app.git.get().cloned();
+        let failed = || git().and_then(|git| git.history_failure());
+        let Some(why) = until("git", "history failed", 30000, failed).await else {
+            return bench_quit(&app);
+        };
+        // The opening's own toasts, an index's count, come and go meanwhile.
+        let toasted = app
+            .toasts
+            .shown()
+            .iter()
+            .any(|t| t.contains("did not answer"));
+        let rows = git().map_or(0, |git| git.log_rows());
+        println!("bench git_log_failed why={why:?} rows={rows} toasted={toasted}");
+        if let Some(git) = git() {
+            git.bench_retry_history();
+            until("git", "history rows", 30000, || git.log_rows() > 0).await;
+            println!(
+                "bench git_log_failed retried failure={:?} rows={}",
+                git.history_failure(),
+                git.log_rows() > 0
+            );
+        }
+        bench_quit(&app);
+    });
+}
+
 /// The value of `key` in a [`crate::git::Panel::shown`] line.
 fn field(shown: &str, key: &str) -> String {
     shown

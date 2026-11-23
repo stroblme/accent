@@ -160,9 +160,57 @@ impl Panel {
     /// repository does, every row on screen naming a commit of the one it replaces.
     pub(super) fn redraw_log(self: &Rc<Self>) {
         self.collapse();
+        self.history_failed(None);
         let commits = self.state.borrow().commits.clone();
         self.has_more.set(commits.len() >= PAGE);
         self.fill_log(commits);
+    }
+
+    /// Say in the history's place why git would not give it, with Retry, or with `None` put the
+    /// list back. For a history with no rows to keep: a first load whose `git log` failed (a
+    /// host past its deadline, a link that dropped), which left the list empty with no word.
+    pub(super) fn history_failed(&self, why: Option<&str>) {
+        if let Some(why) = why {
+            let why = glib::markup_escape_text(&crate::loading::sentence(why));
+            self.log_failed.set_description(Some(&why));
+        }
+        let page = match why {
+            Some(_) => "failed",
+            None => "list",
+        };
+        self.log_page.set_visible_child_name(page);
+    }
+
+    /// Ask git for the selected repository's history again, as the failure's Retry does.
+    pub(super) fn retry_history(self: &Rc<Self>) {
+        let picked = {
+            let state = self.state.borrow();
+            state
+                .repos
+                .get(state.selected)
+                .map(|repo| repo.root.clone())
+        };
+        self.refresh_now(Ask::repos(picked), |_| ());
+    }
+
+    /// Why the history failed, where it says so in its place. `ACCENT_BENCH_GIT=log_failed`.
+    #[cfg(feature = "bench")]
+    pub fn history_failure(&self) -> Option<String> {
+        let shown = self.log_page.visible_child_name().as_deref() == Some("failed");
+        shown.then(|| {
+            self.log_failed
+                .description()
+                .unwrap_or_default()
+                .to_string()
+        })
+    }
+
+    /// Press the history failure's Retry. `ACCENT_BENCH_GIT=log_failed`.
+    #[cfg(feature = "bench")]
+    pub fn bench_retry_history(&self) {
+        if let Some(retry) = self.log_failed.child().and_downcast::<gtk::Button>() {
+            retry.emit_clicked();
+        }
     }
 
     /// Show, or hide again, the files one commit changed.

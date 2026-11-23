@@ -396,6 +396,16 @@ drill_git_refresh() {
 	has "$dir/git-refresh" 'bench git_refresh stage_commit committed=note.md'
 }
 
+# A history whose first `git log` fails, as one over a link that drops does, says so in its place
+# with Retry and no toast, and Retry brings its rows.
+drill_git_log_failed() {
+	history_repo
+	launch 60 ACCENT_BENCH_FAIL_GIT_LOG=1 ACCENT_BENCH_GIT=log_failed >"$dir/git-log-failed"
+	has "$dir/git-log-failed" \
+		'bench git_log_failed why="the host did not answer." rows=0 toasted=false' \
+		'bench git_log_failed retried failure=None rows=true'
+}
+
 # On a slow host, each read held 800 ms, a Git row's tab is up before git answers and shows the
 # loading page: one of its own for a file from the history, which opens with its unchanged runs
 # hidden as a quick one does, and the file's own for a change in the working tree. The first read

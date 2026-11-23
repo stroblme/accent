@@ -262,6 +262,9 @@ pub struct Panel {
     /// The history list, which Commit hands the keyboard to ([`Panel::focus_head`]), and whose
     /// rows the bench activates without a pointer.
     log_view: gtk::ListView,
+    /// The history's list, or in its place why git would not give it ([`Panel::history_failed`]).
+    log_page: gtk::Stack,
+    log_failed: adw::StatusPage,
     /// Whether git has history the store does not hold, which is what puts the Load More row at
     /// the end of the log. Also the re-entrancy guard: it is cleared while a page is in flight.
     has_more: Cell<bool>,
@@ -388,6 +391,7 @@ impl Panel {
         self.syncing.set(false);
         self.changes.remove_all();
         self.log.remove_all();
+        self.history_failed(None);
         self.has_more.set(false);
         self.fetched_once.set(false);
         self.fetch_failed.set(false);
@@ -469,7 +473,19 @@ impl Panel {
             .build();
 
         let (changes_list, changes_wait) = with_bar(&scroller(&changes_view));
-        let (log_list, log_wait) = with_bar(&scroller(&log_view));
+        // Under the bar, which pulses over the failure while its Retry asks again.
+        let log_failed =
+            crate::widgets::status_page("dialog-warning-symbolic", "Cannot Read the History", "");
+        let retry = gtk::Button::builder()
+            .label("Retry")
+            .halign(gtk::Align::Center)
+            .css_classes(["pill"])
+            .build();
+        log_failed.set_child(Some(&retry));
+        let log_page = gtk::Stack::builder().vexpand(true).build();
+        log_page.add_named(&scroller(&log_view), Some("list"));
+        log_page.add_named(&log_failed, Some("failed"));
+        let (log_list, log_wait) = with_bar(&log_page);
         let divider = gtk::Paned::builder()
             .orientation(gtk::Orientation::Vertical)
             .start_child(&changes_list)
@@ -540,6 +556,8 @@ impl Panel {
             changes,
             log,
             log_view: log_view.clone(),
+            log_page,
+            log_failed,
             has_more: Cell::new(false),
             state: RefCell::new(state),
             pending: crate::widgets::Debounce::new(DEBOUNCE),
@@ -581,6 +599,7 @@ impl Panel {
         panel.wire_commit();
         panel.wire_changes(&changes_view);
         panel.wire_log(&log_view);
+        on_click(&panel, &retry, Panel::retry_history);
         panel
     }
 
@@ -1448,7 +1467,7 @@ fn scroller(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
 /// `list` under a progress bar across its top, faded out until a refresh on its way to the list
 /// has taken long enough to show it (DESIGN.md, Loading), and the bar's pulse. Laid over the list,
 /// so it reserves no height.
-fn with_bar(list: &gtk::ScrolledWindow) -> (gtk::Overlay, crate::widgets::Pulse) {
+fn with_bar(list: &impl IsA<gtk::Widget>) -> (gtk::Overlay, crate::widgets::Pulse) {
     let bar = gtk::ProgressBar::builder()
         .opacity(0.0)
         .valign(gtk::Align::Start)

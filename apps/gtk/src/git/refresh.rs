@@ -381,6 +381,8 @@ impl Panel {
         };
         let page = moved.then(|| fetched.commits.clone().unwrap_or_default());
         let read_history = fetched.commits.is_some();
+        // A refused log leaves the rows on screen, and where it is a first load there are none.
+        let failed = (fetched.log_refused).filter(|_| self.state.borrow().commits.is_empty());
 
         {
             let mut state = self.state.borrow_mut();
@@ -421,6 +423,9 @@ impl Panel {
         if let Some(page) = page {
             self.has_more.set(page.len() >= fetched.rows);
             self.fill_log(page);
+        }
+        if read_history || failed.is_some() {
+            self.history_failed(failed.as_deref());
         }
         // The first refresh to read the history after a commit from the button has the commit.
         if read_history && self.to_head.take() {

@@ -715,6 +715,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   That is told from the file on disk, not from its tab, which can be behind the disk: such a tab reads the file again, and the comparison fills in with it.
 - `Ctrl+Shift+G` shows the pane with the keyboard in the commit box.
 - The lower half, across a vertical `GtkPaned`, is the history: 200 commits at a time behind Load More, each in its lane's colour (the hue rotation, Colour).
+  Where git refuses a history's first read, a host past its deadline or a link that drops, the list says why in its place with Retry and no toast, as a comparison's tab does.
+  A read refused once the rows are on screen leaves them there.
   A commit expands on a single click into the files it changed, each opening the commit against its first parent as a diff tab.
   The lanes running on past the commit are drawn dashed beside its files, so the graph stays whole while they are shown.
 - A commit's age (`just now`, `5 min`, `3 h`) is told again twice a minute while the history is on screen and as soon as it is shown again, so it never trails by more than half a minute: a list binds a row only when its item changes or it scrolls into view.
