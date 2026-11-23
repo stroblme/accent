@@ -18,7 +18,8 @@ use std::sync::LazyLock;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Import {
     /// The vault path without an extension, or with the one it was written with where the
-    /// language writes one (`#include "a.h"`, `./x.js`); one any folder may end in when `near`.
+    /// language writes one (`#include "a.h"`, `./x.js`); one any folder may end in when `near`;
+    /// one in the folder of the crate `krate` names where it is set.
     pub target: String,
     pub near: bool,
     /// [`module_key`] of `target`: what a file has to be called to be one of its candidates.
@@ -26,6 +27,13 @@ pub struct Import {
     /// [`module_key`] of the folder `target` is in, where its last name may be an item of the
     /// module above rather than a module (`use super::reconcile::link_kind_of`, `from m import f`).
     pub up_key: Option<String>,
+    /// [`module_key`] of the folder above that one, where the last two names may be a module
+    /// written inline and its item (`use crate::index::testing::fixture`). Rust's alone.
+    pub up2_key: Option<String>,
+    /// The crate a Rust `use` of another crate names (`accent_core`), which the index finds by
+    /// the name its `Cargo.toml` gives it ([`crate_name`]): `target` is then in the crate's
+    /// folder, `src/index` for `use accent_core::index`.
+    pub krate: Option<String>,
 }
 
 /// The paths `text`, read as `lang` from the file `rel`, imports, each once, in the order it
@@ -34,7 +42,7 @@ pub struct Import {
 pub fn imports(lang: Lang, rel: &str, masked: &str, text: &str) -> Vec<Import> {
     let mut out = Vec::new();
     match lang {
-        Lang::Rust => rust(rel, masked, &mut out),
+        Lang::Rust => rust(rel, masked, text, &mut out),
         Lang::Python => python(rel, masked, &mut out),
         Lang::Script => script(rel, masked, text, &mut out),
         Lang::C => c(masked, text, &mut out),
@@ -45,12 +53,12 @@ pub fn imports(lang: Lang, rel: &str, masked: &str, text: &str) -> Vec<Import> {
             for spec in typst::includes(text) {
                 match spec.strip_prefix('/') {
                     _ if spec.starts_with('@') => {}
-                    Some(rooted) => push(&mut out, rooted.to_string(), true, false),
+                    Some(rooted) => push(&mut out, rooted.to_string(), true, 0),
                     None => push(
                         &mut out,
                         path::resolve(path::parent_dir(rel), &spec),
                         false,
-                        false,
+                        0,
                     ),
                 }
             }
@@ -60,13 +68,17 @@ pub fn imports(lang: Lang, rel: &str, masked: &str, text: &str) -> Vec<Import> {
 }
 
 /// What a file is looked up by when it is a candidate for an import, and what an import's target
-/// is: its name up to the first `.`, but a Go file's, an `__init__.py`'s, a `mod.rs`'s and a
-/// script's `index`, which stand for their folder, and so take its name. Lower-cased, which only
-/// narrows the lookup: [`rank`] compares paths as written. `None` where that leaves nothing.
+/// is: its name up to the first `.`, but a Go file's, an `__init__.py`'s, a `mod.rs`'s, a crate
+/// root's (`lib.rs`, `main.rs`) and a script's `index`, which stand for their folder, and so take
+/// its name. Lower-cased, which only narrows the lookup: [`rank`] compares paths as written.
+/// `None` where that leaves nothing.
 pub fn module_key(path: &str) -> Option<String> {
     let name = path::basename(path);
     let folder = name.ends_with(".go")
-        || matches!(name, "mod.rs" | "__init__.py" | "__init__.pyi")
+        || matches!(
+            name,
+            "mod.rs" | "lib.rs" | "main.rs" | "__init__.py" | "__init__.pyi"
+        )
         || name
             .split_once('.')
             .is_some_and(|(stem, ext)| stem == "index" && SCRIPT_EXT.contains(&ext));
@@ -80,18 +92,23 @@ pub fn module_key(path: &str) -> Option<String> {
 const SCRIPT_EXT: [&str; 8] = ["js", "jsx", "ts", "tsx", "mjs", "cjs", "mts", "cts"];
 
 /// How well the file `cand` answers the import of `target` that `src` writes, smaller better,
-/// `None` for not at all. The import's own path before the module above it (only with `up`),
+/// `None` for not at all. The import's own path before the modules above it (`ups` of them),
 /// then the file names its language gives a module in their order, then the folders between the
-/// two files; a Go package, a folder, by how much of its path the file's folder ends in. What the
-/// index resolves its imports by, as the SQL function `import_rank`.
-pub fn rank(src: &str, target: &str, near: bool, up: bool, cand: &str) -> Option<i64> {
+/// two files; a Go package, a folder, by how much of its path the file's folder ends in. A file
+/// never answers its own import. What the index resolves its imports by, as the SQL function
+/// `import_rank`.
+pub fn rank(src: &str, target: &str, near: bool, ups: usize, cand: &str) -> Option<i64> {
     let lang = lang_of(src)?;
+    if cand == src {
+        return None;
+    }
     if lang == Lang::Go {
         return go_rank(src, target, cand);
     }
-    let above = up
-        .then(|| path::parent_dir(target))
-        .filter(|p| !p.is_empty());
+    let above = std::iter::successors(Some(target), |t| Some(path::parent_dir(t)))
+        .skip(1)
+        .take(ups)
+        .take_while(|p| !p.is_empty());
     for (reading, base) in std::iter::once(target).chain(above).enumerate() {
         for (form, want) in forms(lang, base).iter().enumerate() {
             let found = match near {
@@ -110,7 +127,8 @@ pub fn rank(src: &str, target: &str, near: bool, up: bool, cand: &str) -> Option
 /// The paths a module at `base` may be, best first, as `lang` names its files.
 fn forms(lang: Lang, base: &str) -> Vec<String> {
     let ends: &[&str] = match lang {
-        Lang::Rust => &[".rs", "/mod.rs"],
+        // A crate's own folder is its root's, `src/lib.rs` or `src/main.rs`.
+        Lang::Rust => &[".rs", "/mod.rs", "/lib.rs", "/main.rs"],
         Lang::Python => &[".py", ".pyi", "/__init__.py"],
         Lang::Script => &[
             "",
@@ -183,16 +201,27 @@ fn distance(src: &str, cand: &str) -> i64 {
     (a + b - 2 * shared).min(999) as i64
 }
 
-fn push(out: &mut Vec<Import>, target: String, near: bool, up: bool) {
+/// Add the import of `target`, whose last `ups` names (two at most) may be items rather than
+/// modules, unless `out` has it.
+fn push(out: &mut Vec<Import>, target: String, near: bool, ups: usize) {
+    push_in(out, None, target, near, ups);
+}
+
+/// [`push`] for a path in the folder of the crate `krate`, where it is set.
+fn push_in(out: &mut Vec<Import>, krate: Option<String>, target: String, near: bool, ups: usize) {
     let Some(key) = module_key(&target) else {
         return;
     };
-    let up_key = up.then(|| module_key(path::parent_dir(&target))).flatten();
+    let up = path::parent_dir(&target);
     let import = Import {
+        key,
+        up_key: (ups >= 1).then(|| module_key(up)).flatten(),
+        up2_key: (ups >= 2)
+            .then(|| module_key(path::parent_dir(up)))
+            .flatten(),
         target,
         near,
-        key,
-        up_key,
+        krate,
     };
     if !out.contains(&import) {
         out.push(import);
@@ -200,9 +229,10 @@ fn push(out: &mut Vec<Import>, target: String, near: bool, up: bool) {
 }
 
 fn join(dir: &str, rest: &str) -> String {
-    match dir.is_empty() {
-        true => rest.to_string(),
-        false => format!("{dir}/{rest}"),
+    match (dir.is_empty(), rest.is_empty()) {
+        (true, _) => rest.to_string(),
+        (_, true) => dir.to_string(),
+        _ => format!("{dir}/{rest}"),
     }
 }
 
@@ -250,17 +280,20 @@ fn crate_dir(rel: &str) -> Option<String> {
     matches!(path::basename(rel), "lib.rs" | "main.rs").then(|| path::parent_dir(rel).to_string())
 }
 
-/// `mod x;` and `use crate::…`, `self::…`, `super::…`. A `use` of another crate is left out,
-/// the standard library's and a workspace crate's alike, and so are the trailing names of types,
-/// traits and constants, which start upper-case: `use crate::index::{Index, links}` imports
-/// `index` and `index::links`. A `mod x { … }` written in the file is a module the paths inside
-/// it start from, and one they never leave is no import.
-fn rust(rel: &str, masked: &str, out: &mut Vec<Import>) {
+/// `mod x;`, read at the path a `#[path = "…"]` before it gives where there is one, and
+/// `use crate::…`, `self::…`, `super::…`, a module the file declares (`use index::Index` beside
+/// `mod index;`) and another crate's, the standard library's aside. The trailing names of types,
+/// traits and constants are left out, as they start upper-case: `use crate::index::{Index,
+/// links}` imports `index` and `index::links`. A `mod x { … }` written in the file is a module the
+/// paths inside it start from, and one they never leave is no import.
+fn rust(rel: &str, masked: &str, text: &str, out: &mut Vec<Import>) {
     static MOD: LazyLock<Regex> = LazyLock::new(|| {
         regex(
-            r"(?m)^[ \t]*(?:#\[[^\n]*\][ \t]*)*(?:pub(?:[ \t]*\([^)\n]*\))?[ \t]+)?mod[ \t]+(\w+)[ \t]*;",
+            r"(?m)^[ \t]*((?:#\[[^\n]*\]\s*)*)(?:pub(?:[ \t]*\([^)\n]*\))?[ \t]+)?mod[ \t]+(\w+)[ \t]*;",
         )
     });
+    // Not past the `=`: the string after it is blanked to spaces, which `literal` reads past.
+    static PATH: LazyLock<Regex> = LazyLock::new(|| regex(r"#\[[ \t]*path[ \t]*="));
     static USE: LazyLock<Regex> = LazyLock::new(|| {
         regex(r"(?m)^[ \t]*(?:pub(?:[ \t]*\([^)\n]*\))?[ \t]+)?use[ \t]+([^;]*);")
     });
@@ -270,21 +303,44 @@ fn rust(rel: &str, masked: &str, out: &mut Vec<Import>) {
         let names = inline.iter().filter(|(span, _)| span.contains(&at));
         names.map(|(_, name)| *name).collect()
     };
+    // What `use name::…` may start from outside every inline module besides a crate.
+    let mut declared: Vec<&str> = Vec::new();
     for c in MOD.captures_iter(masked) {
+        let (attrs, name) = (c.get(1).expect("the attributes"), &c[2]);
+        let within = around(attrs.start());
+        if within.is_empty() {
+            declared.push(c.get(2).expect("the name").as_str());
+        }
+        // Next to the file, wherever the file is (the Rust reference's rule outside an inline
+        // module, which this applies inside one too).
+        let file = PATH
+            .find(attrs.as_str())
+            .and_then(|m| literal(text, attrs.start() + m.end(), false, false));
+        if let Some(file) = file {
+            let target = path::resolve(path::parent_dir(rel), file);
+            let target = target.strip_suffix(".rs").unwrap_or(&target);
+            let target = target.strip_suffix("/mod").unwrap_or(target);
+            push(out, target.to_string(), false, 0);
+            continue;
+        }
         let mut dir = module_dir(rel);
-        for name in around(c.get(0).expect("the match").start()) {
+        for name in within {
             dir = join(&dir, name);
         }
-        push(out, join(&dir, &c[1]), false, false);
+        push(out, join(&dir, name), false, 0);
     }
+    let outermost = inline
+        .iter()
+        .filter(|(span, _)| around(span.start).len() == 1);
+    declared.extend(outermost.map(|(_, name)| *name));
     for c in USE.captures_iter(masked) {
         let tree: String = AS.replace_all(&c[1], "").split_whitespace().collect();
         let depth = around(c.get(0).expect("the match").start()).len();
         let mut paths = Vec::new();
         expand(&tree, &[], &mut paths);
         for segments in paths {
-            if let Some((target, up)) = rust_path(rel, &segments, depth) {
-                push(out, target, false, up);
+            if let Some((krate, target, ups)) = rust_path(rel, &segments, depth, &declared) {
+                push_in(out, krate, target, false, ups);
             }
         }
     }
@@ -356,32 +412,62 @@ fn expand(tree: &str, prefix: &[String], out: &mut Vec<Vec<String>>) {
     }
 }
 
-/// The target one `use` path names from `rel`, `depth` inline modules in, and whether its last
-/// name may be an item of the module above.
-fn rust_path(rel: &str, segments: &[String], depth: usize) -> Option<(String, bool)> {
+/// The target one `use` path names from `rel`, `depth` inline modules in, where the file declares
+/// the modules `declared`: the crate it is in where it names another one, the path, and how many
+/// of its last names may be items or inline modules rather than module files.
+fn rust_path(
+    rel: &str,
+    segments: &[String],
+    depth: usize,
+    declared: &[&str],
+) -> Option<(Option<String>, String, usize)> {
     let supers = segments.iter().take_while(|s| *s == "super").count();
-    let (base, rest) = match segments.first()?.as_str() {
-        "crate" => (crate_dir(rel)?, &segments[1..]),
-        "self" if depth == 0 => (module_dir(rel), &segments[1..]),
+    let first = segments.first()?.as_str();
+    let (krate, base, rest) = match first {
+        "crate" => (None, crate_dir(rel)?, &segments[1..]),
+        "self" if depth == 0 => (None, module_dir(rel), &segments[1..]),
         // Past the inline modules it is written in, each `super` is a folder up.
         "super" if supers > depth => {
             let mut dir = module_dir(rel);
             for _ in depth..supers {
                 dir = path::parent_dir(&dir).to_string();
             }
-            (dir, &segments[supers..])
+            (None, dir, &segments[supers..])
         }
-        _ => return None,
+        _ if depth == 0 && declared.contains(&first) => (None, module_dir(rel), segments),
+        // The crates every program has, which no vault holds, and a type or a variant in scope.
+        "std" | "core" | "alloc" | "proc_macro" | "test" | "self" | "super" => return None,
+        _ if first.starts_with(char::is_uppercase) => return None,
+        _ => (Some(first.to_string()), "src".to_string(), &segments[1..]),
     };
     let modules = rest
         .iter()
         .rposition(|s| !s.starts_with(char::is_uppercase));
     let rest = &rest[..modules.map_or(0, |i| i + 1)];
-    // `crate::Item` is the crate's root, which every module of it uses.
-    if rest.is_empty() && segments[0] == "crate" {
+    // `crate::Item` is the crate's root, which every module of it uses; another crate's root is
+    // what the file depends on.
+    if rest.is_empty() && first == "crate" {
         return None;
     }
-    Some((join(&base, &rest.join("/")), !rest.is_empty()))
+    Some((krate, join(&base, &rest.join("/")), rest.len().min(2)))
+}
+
+/// The name a `use` gives the library crate the manifest `text` makes, its `[lib] name` or its
+/// package's with `-` read as `_`; `None` for a manifest that makes none, a workspace's own.
+pub fn crate_name(text: &str) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Manifest {
+        package: Option<Named>,
+        lib: Option<Named>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Named {
+        name: Option<String>,
+    }
+    let manifest: Manifest = toml::from_str(text).ok()?;
+    let lib = manifest.lib.and_then(|lib| lib.name);
+    let package = manifest.package.and_then(|package| package.name);
+    Some(lib.or(package)?.replace('-', "_"))
 }
 
 // -------------------------------------------------------------------------------------- Python
@@ -441,7 +527,7 @@ fn python(rel: &str, masked: &str, out: &mut Vec<Import>) {
     // The two patterns' rows in the order the file writes them.
     found.sort_by_key(|(at, ..)| *at);
     for (_, target, near, up) in found {
-        push(out, target, near, up);
+        push(out, target, near, usize::from(up));
     }
 }
 
@@ -465,7 +551,7 @@ fn script(rel: &str, masked: &str, text: &str, out: &mut Vec<Import>) {
                 .strip_suffix("/index")
                 .map(str::to_string)
                 .unwrap_or(target);
-            push(out, target, false, false);
+            push(out, target, false, 0);
         }
     }
 }
@@ -478,7 +564,7 @@ fn c(masked: &str, text: &str, out: &mut Vec<Import>) {
     static INCLUDE: LazyLock<Regex> = LazyLock::new(|| regex(r"(?m)^[ \t]*#[ \t]*include\b"));
     for m in INCLUDE.find_iter(masked) {
         if let Some(header) = literal(text, m.end(), false, true) {
-            push(out, header.to_string(), true, false);
+            push(out, header.to_string(), true, 0);
         }
     }
 }
@@ -501,7 +587,7 @@ fn go(masked: &str, text: &str, out: &mut Vec<Import>) {
         for line in lines.lines() {
             let line = line.split("//").next().unwrap_or_default();
             if let Some(p) = LINE.captures(line) {
-                push(out, p[1].to_string(), true, false);
+                push(out, p[1].to_string(), true, 0);
             }
         }
     }
@@ -517,7 +603,7 @@ fn java(masked: &str, out: &mut Vec<Import>) {
     });
     for c in IMPORT.captures_iter(masked) {
         if c.get(2).is_none() {
-            push(out, c[1].replace('.', "/"), true, true);
+            push(out, c[1].replace('.', "/"), true, 1);
         }
     }
 }
@@ -529,7 +615,7 @@ fn lean(masked: &str, out: &mut Vec<Import>) {
     static IMPORT: LazyLock<Regex> = LazyLock::new(|| regex(r"(?m)^import[ \t]+([^\n]*)"));
     for c in IMPORT.captures_iter(masked) {
         for module in c[1].split_whitespace() {
-            push(out, module.replace('.', "/"), true, false);
+            push(out, module.replace('.', "/"), true, 0);
         }
     }
 }
@@ -547,6 +633,23 @@ mod tests {
 
     fn targets(lang: Lang, rel: &str, text: &str) -> Vec<String> {
         read(lang, rel, text).into_iter().map(|row| row.0).collect()
+    }
+
+    /// `(target, up_key, up2_key, krate)` of what the Rust `text` imports from `rel`.
+    type RustRow = (String, Option<String>, Option<String>, Option<String>);
+    fn rust_rows(rel: &str, text: &str) -> Vec<RustRow> {
+        let masked = super::super::mask(Lang::Rust, text);
+        let rows = imports(Lang::Rust, rel, &masked, text).into_iter();
+        rows.map(|i| {
+            assert_eq!(Some(&i.key), module_key(&i.target).as_ref());
+            (i.target, i.up_key, i.up2_key, i.krate)
+        })
+        .collect()
+    }
+
+    fn rust_row(target: &str, up: Option<&str>, up2: Option<&str>, krate: Option<&str>) -> RustRow {
+        let owned = |s: Option<&str>| s.map(str::to_string);
+        (target.to_string(), owned(up), owned(up2), owned(krate))
     }
 
     #[test]
@@ -569,26 +672,72 @@ mod inline {
     use super::super::up;
 }
 "#;
-        let row = |t: &str, up: Option<&str>| {
-            let key = module_key(t).unwrap();
-            (t.to_string(), false, key, up.map(str::to_string))
-        };
+        let row = |t: &str, up, up2| rust_row(t, up, up2, None);
         assert_eq!(
-            read(Lang::Rust, "crates/core/src/index/links.rs", text),
+            rust_rows("crates/core/src/index/links.rs", text),
             [
-                row("crates/core/src/index/links/a", None),
-                row("crates/core/src/index/links/tests", None),
-                row("crates/core/src/index/links/inline/nested", None),
-                row("crates/core/src/index", Some("src")),
-                row("crates/core/src/index/links", Some("index")),
+                row("crates/core/src/index/links/a", None, None),
+                row("crates/core/src/index/links/tests", None, None),
+                row("crates/core/src/index/links/inline/nested", None, None),
+                rust_row("src", None, None, Some("accent_api")),
+                row("crates/core/src/index", Some("src"), None),
+                row("crates/core/src/index/links", Some("index"), Some("src")),
                 row(
                     "crates/core/src/index/reconcile/link_kind_of",
-                    Some("reconcile")
+                    Some("reconcile"),
+                    Some("index")
                 ),
-                row("crates/core/src/index/links/b", Some("links")),
-                row("crates/core/src/index/up", Some("index")),
+                row("crates/core/src/index/links/b", Some("links"), None),
+                row("crates/core/src/index/up", Some("index"), None),
             ]
         );
+    }
+
+    #[test]
+    fn rust_modules_at_a_path_declared_ones_and_other_crates() {
+        let text = r#"
+#[cfg(unix)]
+#[path = "../platform/unix.rs"]
+mod platform;
+mod index;
+use index::Index;
+use platform::open;
+use accent_core::index::links::Kind;
+use log::debug;
+use super::Item;
+"#;
+        assert_eq!(
+            rust_rows("crates/api/src/local/mod.rs", text),
+            [
+                rust_row("crates/api/src/platform/unix", None, None, None),
+                rust_row("crates/api/src/local/index", None, None, None),
+                rust_row("crates/api/src/local/index", Some("local"), None, None),
+                rust_row(
+                    "crates/api/src/local/platform/open",
+                    Some("platform"),
+                    Some("local"),
+                    None
+                ),
+                rust_row(
+                    "src/index/links",
+                    Some("index"),
+                    Some("src"),
+                    Some("accent_core")
+                ),
+                rust_row("src/debug", Some("src"), None, Some("log")),
+                rust_row("crates/api/src", None, None, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_manifest_names_its_library_crate_as_a_use_does() {
+        let package = "[package]\nname = \"accent-core\"\nversion = \"1.0.0\"\n";
+        assert_eq!(crate_name(package).as_deref(), Some("accent_core"));
+        let lib = "[package]\nname = \"accent-android\"\n\n[lib]\nname = \"ffi\"\n";
+        assert_eq!(crate_name(lib).as_deref(), Some("ffi"));
+        assert_eq!(crate_name("[workspace]\nmembers = [\"a\"]\n"), None);
+        assert_eq!(crate_name("not toml ["), None);
     }
 
     #[test]
@@ -692,7 +841,7 @@ mod inline {
 
     #[test]
     fn rank_puts_each_import_to_the_file_it_means() {
-        let r = |src, target, near, up, cand| rank(src, target, near, up, cand);
+        let r = |src, target, near, up: bool, cand| rank(src, target, near, usize::from(up), cand);
         // Rust: a module's own file before its `mod.rs`, and an item's module above it.
         assert_eq!(r("src/lib.rs", "src/a", false, false, "src/a.rs"), Some(0));
         assert_eq!(

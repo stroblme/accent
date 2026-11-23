@@ -423,7 +423,7 @@ impl Index {
                     ctx.get_raw(0).as_str()?,
                     ctx.get_raw(1).as_str()?,
                     ctx.get(2)?,
-                    ctx.get(3)?,
+                    ctx.get::<i64>(3)? as usize,
                     ctx.get_raw(4).as_str()?,
                 ))
             },

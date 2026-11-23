@@ -1,6 +1,6 @@
 //! Disk to rows: the full walk and the watcher's single-file path share one `upsert`.
 
-use super::imports::{BEST_IMPORT, resolve_imports_of};
+use super::imports::{BEST_IMPORT, MANIFEST, resolve_crate_imports, resolve_imports_of};
 use super::links::{BEST_FILE, resolve_links_of};
 use super::schema::{BATCH, MAX_INDEXED_BODY, OPENED_CAP};
 use super::{Change, Index, Phase, Progress, ReconcileStats};
@@ -257,9 +257,9 @@ impl Index {
                         let (touched, added) = (stats.touched, stats.added);
                         let f = &scan.files[job];
                         bodies += content.text.as_ref().map_or(0, String::len) as u64;
-                        upsert(&tx, f, content, &mut stats)?;
+                        let keyed = upsert(&tx, f, content, &mut stats)?;
                         if stats.touched == touched {
-                            changed.push(&f.rel_path);
+                            changed.push((&f.rel_path, keyed));
                         }
                         if f.kind != FileKind::Dir {
                             stats.changed.push(f.rel_path.clone());
@@ -279,9 +279,9 @@ impl Index {
                     // they are the ones its keys name. The cold build has no earlier answer to
                     // keep and resolves once, at the end.
                     if !cold {
-                        for rel in changed {
+                        for (rel, keyed) in changed {
                             resolve_links_of(&tx, rel)?;
-                            resolve_imports_of(&tx, rel)?;
+                            resolve_imports_of(&tx, rel, keyed)?;
                         }
                     }
                     tx.commit()?;
@@ -567,7 +567,7 @@ impl Index {
         let existing_id = existing.map(|(id, ..)| id);
         let content = read_content(meta);
         let tx = self.write_tx()?;
-        upsert(&tx, meta, content, &mut ReconcileStats::default())?;
+        let keyed = upsert(&tx, meta, content, &mut ReconcileStats::default())?;
         // A path that was a second one to another file is this one's row now.
         drop_aliases(&tx, rel, false)?;
         write_bodies(&tx)?;
@@ -577,7 +577,7 @@ impl Index {
         // transaction, or a reader in between sees the note link to nothing: a page edit asking
         // for the backlinks of a PDF right after the last one rewrote a note would skip it.
         resolve_links_of(&tx, rel)?;
-        resolve_imports_of(&tx, rel)?;
+        resolve_imports_of(&tx, rel, keyed)?;
         tx.commit()?;
         Ok(match existing_id {
             Some(_) => Change::Updated(meta.kind),
@@ -741,6 +741,8 @@ struct Content {
     analysis: Option<markdown::Analysis>,
     symbols: Vec<crate::code::Decl>,
     imports: Vec<Import>,
+    /// The crate a `Cargo.toml` makes, by the name a `use` gives it.
+    krate: Option<String>,
     /// What `kind:` calls the file, `files.doc`.
     doc: Option<Doc>,
 }
@@ -819,6 +821,10 @@ fn read_content(f: &walk::FileMeta) -> Content {
             .unwrap_or_default(),
         _ => Default::default(),
     };
+    let krate = match path::basename(&f.rel_path) == MANIFEST {
+        true => text.as_deref().and_then(crate::code::imports::crate_name),
+        false => None,
+    };
     // A `.py` is a notebook where its text makes marimo's app, an `.xml` a diagram where its
     // first element is draw.io's; anything else is what its name says.
     let doc = match f.kind {
@@ -838,12 +844,15 @@ fn read_content(f: &walk::FileMeta) -> Content {
         analysis,
         symbols,
         imports,
+        krate,
         doc,
     }
 }
 
 /// Replace one scanned entry's file row and everything derived from it with what its
-/// [`Content`] says. Returns the file id.
+/// [`Content`] says. Returns whether the file's module key is new to the index, the row being
+/// new or of another kind, which other files' imports may now be answered by
+/// ([`resolve_imports_of`]).
 ///
 /// The one place a file becomes index rows, shared by the full reconcile and the watcher's
 /// [`Index::update_file`] so the two can never drift apart.
@@ -852,22 +861,25 @@ fn upsert(
     f: &walk::FileMeta,
     content: Content,
     stats: &mut ReconcileStats,
-) -> Result<i64> {
+) -> Result<bool> {
     let Content {
         hash,
         text,
         analysis,
         symbols,
         imports,
+        krate,
         doc,
     } = content;
     // The row it replaces, as this transaction sees it rather than as the caller's diff did:
     // another process sharing the index (`accent-cli mcp` beside the app) may have written it
     // since, and a row taken for new would keep the links and tags it already had twice over.
-    let existing_id: Option<i64> = tx
-        .prepare_cached("SELECT id FROM files WHERE rel_path = ?1")?
-        .query_row([&f.rel_path], |r| r.get(0))
+    let existing: Option<(i64, i64)> = tx
+        .prepare_cached("SELECT id, kind FROM files WHERE rel_path = ?1")?
+        .query_row([&f.rel_path], |r| Ok((r.get(0)?, r.get(1)?)))
         .optional()?;
+    let existing_id = existing.map(|(id, _)| id);
+    let keyed = existing.is_none_or(|(_, kind)| kind != f.kind.as_i64());
     stats.bytes_read += text.as_ref().map_or(0, |t| t.len() as u64);
 
     // Syncthing preserves origin mtimes, so mtime alone lies both ways; the hash is
@@ -897,7 +909,7 @@ fn upsert(
             f.size as i64,
         ])?;
         stats.touched += 1;
-        return Ok(id);
+        return Ok(false);
     }
 
     // The `path::stem` fallback is what gives a file the analyser never saw a title.
@@ -1031,9 +1043,16 @@ fn upsert(
     }
     for i in imports {
         tx.prepare_cached(
-            "INSERT INTO imports(src_file, target, near, key, up_key) VALUES(?1,?2,?3,?4,?5)",
+            "INSERT INTO imports(src_file, target, near, key, up_key, up2_key, crate)
+             VALUES(?1,?2,?3,?4,?5,?6,?7)",
         )?
-        .execute(params![id, i.target, i.near, i.key, i.up_key])?;
+        .execute(params![
+            id, i.target, i.near, i.key, i.up_key, i.up2_key, i.krate
+        ])?;
+    }
+    if let Some(name) = krate {
+        tx.prepare_cached("INSERT INTO crates(file_id, name, dir) VALUES(?1,?2,?3)")?
+            .execute(params![id, name, path::parent_dir(&f.rel_path)])?;
     }
     // Set aside for [`write_bodies`], which the caller runs before it commits.
     if let Some(body) = text.as_ref() {
@@ -1042,7 +1061,7 @@ fn upsert(
         )?
         .execute(params![id, body, title.as_deref().unwrap_or_default()])?;
     }
-    Ok(id)
+    Ok(keyed)
 }
 
 /// Apply pending body deletions and insertions together through the FTS triggers. Per-file
@@ -1103,6 +1122,8 @@ fn clear_derived(tx: &rusqlite::Transaction<'_>, id: i64) -> Result<()> {
     tx.prepare_cached("DELETE FROM symbols WHERE file_id = ?1")?
         .execute([id])?;
     tx.prepare_cached("DELETE FROM imports WHERE src_file = ?1")?
+        .execute([id])?;
+    tx.prepare_cached("DELETE FROM crates WHERE file_id = ?1")?
         .execute([id])?;
     tx.prepare_cached("DELETE FROM note_aliases WHERE file_id = ?1")?
         .execute([id])?;
@@ -1171,6 +1192,9 @@ fn resolve_keys(tx: &rusqlite::Transaction<'_>, keys: &[String]) -> Result<()> {
 /// Every row of one file, and the links that pointed at it re-resolved: with its keys gone they
 /// find the next candidate — a namesake deeper in the vault — or dangle.
 pub(super) fn delete_file_rows(tx: &rusqlite::Transaction<'_>, id: i64) -> Result<()> {
+    let manifest = tx
+        .prepare_cached("SELECT 1 FROM crates WHERE file_id = ?1")?
+        .exists([id])?;
     clear_derived(tx, id)?;
     tx.prepare_cached("DELETE FROM aliases WHERE file_id = ?1")?
         .execute([id])?;
@@ -1187,6 +1211,10 @@ pub(super) fn delete_file_rows(tx: &rusqlite::Transaction<'_>, id: i64) -> Resul
         "UPDATE imports SET resolved_file = {BEST_IMPORT} WHERE resolved_file = ?1"
     ))?
     .execute([id])?;
+    // A crate gone takes every import of it with it.
+    if manifest {
+        resolve_crate_imports(tx)?;
+    }
     tx.prepare_cached(
         "DELETE FROM opened WHERE rel_path = (SELECT rel_path FROM files WHERE id = ?1)",
     )?

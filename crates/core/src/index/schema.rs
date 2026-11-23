@@ -1,7 +1,7 @@
 //! The tables, and the knobs that shape how they are filled.
 
 /// Bump on any schema change: `Index::open_or_rebuild` then deletes the cache and starts a new one.
-pub(super) const SCHEMA_VERSION: i64 = 22;
+pub(super) const SCHEMA_VERSION: i64 = 23;
 
 /// Maximum indexed body size for non-markdown files. Stricter than [`crate::fs::MAX_TEXT`]
 /// because indexing repeatedly consumes database space and FTS query work, whereas opening a
@@ -95,15 +95,22 @@ CREATE TABLE symbols(
 -- `BEST_IMPORT`), NULL while nothing in the vault answers. Not a `links` kind: backlinks, dangling
 -- links and missing notes, the rewrites a move makes and a PDF's highlights all read `links`, and
 -- none of them is about imports. `near` says `target` is a path any folder may end in; `up_key`
--- is the key of the module above, where the last name may be an item of it.
+-- is the key of the module above, where the last name may be an item of it, and `up2_key` the
+-- one above that, where the last two may be a module written inline and its item. `crate` names
+-- the crate of another `Cargo.toml` a Rust `use` reaches, whose folder (`crates`) `target` is in.
 CREATE TABLE imports(
     src_file      INTEGER NOT NULL,
     target        TEXT NOT NULL,
     near          INTEGER NOT NULL,
     key           TEXT NOT NULL,
     up_key        TEXT,
+    up2_key       TEXT,
+    crate         TEXT,
     resolved_file INTEGER
 );
+-- The library crate each `Cargo.toml` makes, by the name a `use` gives it
+-- (`code::imports::crate_name`), and the manifest's folder.
+CREATE TABLE crates(file_id INTEGER NOT NULL, name TEXT NOT NULL, dir TEXT NOT NULL);
 
 -- `body` stays column 0 so `snippet(notes_fts, 0, ...)` keeps quoting the note text, and so the
 -- bm25 weights below read in the same order: body first, title second.
@@ -208,6 +215,10 @@ CREATE INDEX idx_files_module   ON files(module_key);
 CREATE INDEX idx_imports_src    ON imports(src_file);
 CREATE INDEX idx_imports_key    ON imports(key);
 CREATE INDEX idx_imports_up     ON imports(up_key);
+CREATE INDEX idx_imports_up2    ON imports(up2_key);
+CREATE INDEX idx_imports_crate  ON imports(crate);
+CREATE INDEX idx_crates_name    ON crates(name);
+CREATE INDEX idx_crates_file    ON crates(file_id);
 CREATE INDEX idx_imports_resolved ON imports(resolved_file);
 -- The PDFs whose text is still to be read, newest first: a claim is a lookup rather than a pass
 -- over every PDF already read, which `idx_files_kind_mt` would be, and the planner picks that one
