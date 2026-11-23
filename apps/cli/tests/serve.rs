@@ -43,6 +43,8 @@ fn serve_answers_over_the_pipe_and_stops_when_it_closes() {
         .arg("--db")
         .arg(scratch.dir.join("index.db"))
         .env("XDG_CACHE_HOME", scratch.dir.join("cache"))
+        // The home a shell's `~/` path is read from, which only the host knows.
+        .env("HOME", scratch.dir.join("home"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -127,6 +129,38 @@ fn serve_answers_over_the_pipe_and_stops_when_it_closes() {
     assert_eq!(
         part["edges"],
         serde_json::json!([{"from": 0, "to": 1, "kind": "Link"}])
+    );
+
+    // A path a shell's output names, from the host's home or outside the vault: a file is
+    // answered with its absolute path and then read as a language server's dependency is, and a
+    // folder, inside the vault too, or nothing is answered with null.
+    let home = scratch.dir.join("home");
+    std::fs::create_dir_all(home.join("notes")).unwrap();
+    std::fs::write(home.join("notes/x.md"), "from home\n").unwrap();
+    std::fs::write(home.join("unasked.md"), "").unwrap();
+    let (file, vault) = (home.join("notes/x.md"), scratch.vault());
+    let (file, vault) = (file.to_str().unwrap(), vault.to_str().unwrap());
+    let asked = [
+        ("~/notes/x.md", serde_json::json!(file)),
+        (file, serde_json::json!(file)),
+        ("~/notes", serde_json::Value::Null),
+        (vault, serde_json::Value::Null),
+        ("~/missing.md", serde_json::Value::Null),
+    ];
+    for (id, (path, want)) in (105..).zip(asked) {
+        ask(id, "shell_file", &serde_json::json!([path]).to_string());
+        let answer = next(Some(id.into()));
+        assert_eq!(answer["result"], want, "{path}: {answer}");
+    }
+    ask(110, "read_named", &serde_json::json!([file]).to_string());
+    let answer = next(Some(110));
+    assert_eq!(answer["result"]["Text"]["text"], "from home\n", "{answer}");
+    let unasked = home.join("unasked.md");
+    ask(111, "read_named", &serde_json::json!([unasked]).to_string());
+    let answer = next(Some(111));
+    assert!(
+        answer.get("error").is_some(),
+        "a file nothing named: {answer}"
     );
 
     // The window closed. Nothing else tells the server to stop.

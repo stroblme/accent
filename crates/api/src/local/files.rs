@@ -7,7 +7,7 @@ mod links;
 mod replace;
 mod templates;
 
-use crate::{Error, Result};
+use crate::{Error, Result, locked};
 
 use super::{Local, Msg};
 use crate::{Etag, fs};
@@ -128,14 +128,39 @@ impl Local {
         fs::read_text(&self.resolve(rel)?).map_err(named(rel))
     }
 
-    /// Read a host dependency only while a live language session has named its absolute path.
+    /// Read a host dependency only while a live language session has named its absolute path, or
+    /// a file a shell's output named once [`shell_file`](Self::shell_file) has found it.
     pub fn read_named(&self, abs: &str) -> Result<fs::Read> {
-        if !std::path::Path::new(abs).is_absolute() || !self.lang.named(abs) {
+        let shell = || locked(&self.shell_files).contains(abs);
+        if !std::path::Path::new(abs).is_absolute() || !(self.lang.named(abs) || shell()) {
             return Err(
                 accent_core::Error::Invalid(format!("no language session named {abs}")).into(),
             );
         }
         fs::read_text(std::path::Path::new(abs)).map_err(named(abs))
+    }
+
+    /// The file a shell's output names here, absolute or from home (`~/`), by its absolute path:
+    /// `None` where a folder or nothing is, so a folder lights no link. One found is then
+    /// [`read_named`](Self::read_named)'s to read.
+    pub fn shell_file(&self, path: &str) -> Result<Option<String>> {
+        let path = match path.strip_prefix("~/") {
+            Some(rest) => match std::env::var_os("HOME") {
+                Some(home) => std::path::Path::new(&home).join(rest),
+                None => return Ok(None),
+            },
+            None => std::path::PathBuf::from(path),
+        };
+        if !path.is_absolute() {
+            return Err(
+                accent_core::Error::Invalid(format!("{} is relative", path.display())).into(),
+            );
+        }
+        let Some(abs) = path.to_str().filter(|_| path.is_file()) else {
+            return Ok(None);
+        };
+        locked(&self.shell_files).insert(abs.to_string());
+        Ok(Some(abs.to_string()))
     }
 
     /// The file's etag, or `None` when there is no file there. One `stat`, which is how a tab

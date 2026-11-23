@@ -56,7 +56,8 @@ const ASK_AGAIN: Duration = Duration::from_secs(2);
 /// A file a shell's output names, which Ctrl+click opens at its line and column.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FileLink {
-    /// Absolute, on this machine or on the remote vault's host, as `host` says.
+    /// Absolute, on this machine or on the remote vault's host, as `host` says. A host's `~/`
+    /// path stays as printed until the host has said where it is ([`known`]).
     pub path: PathBuf,
     pub line: Option<u32>,
     pub column: Option<u32>,
@@ -70,7 +71,8 @@ type Open = Rc<dyn Fn(FileLink)>;
 enum Disk {
     /// This machine's.
     Local,
-    /// The remote vault's host, through the vault, which reads its own files only.
+    /// The remote vault's host, through the vault, which reads its own files and those a shell
+    /// named there.
     Vault(Arc<Vault>),
 }
 
@@ -84,8 +86,9 @@ pub(super) struct Files {
     hovered: RefCell<Option<String>>,
     /// VTE's tag for the one path lit.
     lit: Cell<Option<i32>>,
-    /// A host's answers, by path, and when each came.
-    known: RefCell<HashMap<PathBuf, (bool, Instant)>>,
+    /// A host's answers, by the path asked, and when each came: the file's absolute path there,
+    /// or `None` for a folder or nothing.
+    known: RefCell<HashMap<PathBuf, (Option<PathBuf>, Instant)>>,
     /// When the holder was last asked where the shell is.
     asked: Cell<Option<Instant>>,
     /// The file the context menu was opened over, which its Open Link opens.
@@ -307,7 +310,7 @@ fn target_at(term: &Rc<Term>, x: f64, y: f64) -> Option<Target> {
     }
     let file = file_text_at(term, x, y)
         .and_then(|text| file_link(term, &text))
-        .filter(|file| known(term, file) == Some(true));
+        .and_then(|file| known(term, file).flatten());
     term.files.menu.replace(file.clone());
     file.map(Target::File)
 }
@@ -445,9 +448,11 @@ fn osc8_path(uri: &str, remote: bool) -> Option<String> {
 fn file_link(term: &Term, text: &str) -> Option<FileLink> {
     let host = matches!(term.files.to.borrow().as_ref()?.0, Disk::Vault(_));
     let (path, line, column) = place(text);
-    // A host's home is not known here, so a `~/` path there is left as text.
-    let home = (!host).then(glib::home_dir);
-    let path = resolve(path, term.link_dir().as_deref(), home.as_deref())?;
+    // A host's home is not known here, so a `~/` path there is the host's to resolve.
+    let path = match host && path.starts_with("~/") {
+        true => PathBuf::from(path),
+        false => resolve(path, term.link_dir().as_deref(), &glib::home_dir())?,
+    };
     Some(FileLink {
         path,
         line,
@@ -456,25 +461,25 @@ fn file_link(term: &Term, text: &str) -> Option<FileLink> {
     })
 }
 
-/// Whether `file` is there, if that is known without asking a host.
-fn known(term: &Term, file: &FileLink) -> Option<bool> {
+/// `file` where it is there, or `Some(None)` where it is not, if that is known without asking a
+/// host; a host's file has the path the host answered with.
+fn known(term: &Term, file: FileLink) -> Option<Option<FileLink>> {
     match &term.files.to.borrow().as_ref()?.0 {
-        Disk::Local => Some(file.path.is_file()),
-        Disk::Vault(vault) if file.path.strip_prefix(vault.root()).is_err() => Some(false),
-        Disk::Vault(_) => term
-            .files
-            .known
-            .borrow()
-            .get(&file.path)
-            .filter(|(_, when)| when.elapsed() < FRESH)
-            .map(|(there, _)| *there),
+        Disk::Local => Some(file.path.is_file().then_some(file)),
+        Disk::Vault(_) => {
+            let answers = term.files.known.borrow();
+            let (there, _) = answers
+                .get(&file.path)
+                .filter(|(_, when)| when.elapsed() < FRESH)?;
+            Some(there.clone().map(|path| FileLink { path, ..file }))
+        }
     }
 }
 
 /// Look `text` up and call `found` with its file once that is known to be there: at once on this
-/// machine, and on a host once the vault's `stat` has answered, the answer kept a while. A
-/// relative path in a shell that reports no folder (no OSC 7) waits for the holder to say where
-/// the shell is first.
+/// machine, and on a host once the vault's [`shell_file`](Vault::shell_file) has answered, the
+/// answer kept a while. A relative path in a shell that reports no folder (no OSC 7) waits for
+/// the holder to say where the shell is first.
 fn find(term: &Rc<Term>, text: &str, found: impl FnOnce(FileLink) + 'static) {
     let path = place(text).0;
     let relative = !path.starts_with('/') && !path.starts_with("~/");
@@ -505,38 +510,44 @@ fn look(term: &Rc<Term>, text: &str, found: impl FnOnce(FileLink) + 'static) {
     let Some(file) = file_link(term, text) else {
         return;
     };
-    match known(term, &file) {
-        Some(true) => return found(file),
-        Some(false) => return,
+    match known(term, file.clone()) {
+        Some(Some(file)) => return found(file),
+        Some(None) => return,
         None => {}
     }
     let vault = match term.files.to.borrow().as_ref() {
         Some((Disk::Vault(vault), _)) => vault.clone(),
         _ => return,
     };
-    let Some(rel) = file
-        .path
-        .strip_prefix(vault.root())
-        .ok()
-        .and_then(Path::to_str)
-        .map(str::to_string)
-    else {
+    let Some(asked) = file.path.to_str().map(str::to_string) else {
         return;
     };
     let weak = Rc::downgrade(term);
     glib::spawn_future_local(async move {
-        let there =
-            crate::work::off_thread("look for a terminal's file", move || vault.exists(&rel))
-                .await
-                .unwrap_or(false);
+        let root = vault.root().to_path_buf();
+        let there = crate::work::off_thread("look for a terminal's file", move || {
+            vault.shell_file(&asked)
+        })
+        .await
+        .and_then(Result::ok)
+        .flatten()
+        .map(PathBuf::from)
+        // From outside the vault only text opens, as a language server's dependency does there.
+        .filter(|path| {
+            path.starts_with(&root)
+                || matches!(
+                    crate::doc::kind_of(&path.to_string_lossy()),
+                    crate::doc::Kind::Note | crate::doc::Kind::Text
+                )
+        });
         let Some(term) = weak.upgrade() else { return };
-        let answer = (there, Instant::now());
+        let answer = (there.clone(), Instant::now());
         term.files
             .known
             .borrow_mut()
             .insert(file.path.clone(), answer);
-        if there {
-            found(file);
+        if let Some(path) = there {
+            found(FileLink { path, ..file });
         }
     });
 }
@@ -603,9 +614,9 @@ fn place(text: &str) -> (&str, Option<u32>, Option<u32>) {
 
 /// The absolute path `path` names from `dir` and `home`, its `.` and `..` read as written: the
 /// files may be on a host, which is not this machine's to ask.
-fn resolve(path: &str, dir: Option<&Path>, home: Option<&Path>) -> Option<PathBuf> {
+fn resolve(path: &str, dir: Option<&Path>, home: &Path) -> Option<PathBuf> {
     let joined = match path.strip_prefix("~/") {
-        Some(rest) => home?.join(rest),
+        Some(rest) => home.join(rest),
         None if path.starts_with('/') => PathBuf::from(path),
         None => dir?.join(path),
     };
@@ -742,19 +753,18 @@ mod tests {
         assert_eq!(place("a/b.rs:"), ("a/b.rs:", None, None));
     }
 
-    /// A relative path is read from the shell's folder and `~/` from home, which a host has none
-    /// of here; `..` is taken as written.
+    /// A relative path is read from the shell's folder and `~/` from home; `..` is taken as
+    /// written.
     #[test]
     fn paths_resolve_from_the_shell_folder() {
         let (dir, home) = (Path::new("/v/src"), Path::new("/home/me"));
-        let at = |path| resolve(path, Some(dir), Some(home));
+        let at = |path| resolve(path, Some(dir), home);
         assert_eq!(at("a.rs"), Some(PathBuf::from("/v/src/a.rs")));
         assert_eq!(at("./a/../b.rs"), Some(PathBuf::from("/v/src/b.rs")));
         assert_eq!(at("../x.md"), Some(PathBuf::from("/v/x.md")));
         assert_eq!(at("~/n.md"), Some(PathBuf::from("/home/me/n.md")));
         assert_eq!(at("/etc/hosts"), Some(PathBuf::from("/etc/hosts")));
-        assert_eq!(resolve("~/n.md", Some(dir), None), None);
-        assert_eq!(resolve("a.rs", None, Some(home)), None);
+        assert_eq!(resolve("a.rs", None, home), None);
     }
 
     /// What lights a path matches it alone, between the same edges.

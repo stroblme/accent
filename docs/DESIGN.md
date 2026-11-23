@@ -941,8 +941,10 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   The shell's folder is the one OSC 7 last reported, and for a shell that reports none the holder is asked where its process is, else it is the folder the shell started in.
   A path lights up as a URL does only once its file is found, since VTE lights every match of a pattern it holds, so the pattern is asked under the pointer alone and a path whose file is there is handed to VTE as one of its own.
   `Ctrl`+click opens it at its line and column, in the vault as Go to Definition opens a place and from outside it as Open File opens a file, and Copy Link Address copies its absolute path.
-  On a remote vault's host the path is the host's, looked up with one `stat` through the vault as the pointer comes onto it and kept for 5 s, so the pointer moving along it asks nothing more.
-  A host's file outside the vault and a `~/` path there light nothing, since the host reads no file outside the vault but a language server's dependency (Language servers), and neither does a shell on any other host, whose files the window has no way to look up.
+  On a remote vault's host the path is the host's, looked up with one call through the vault as the pointer comes onto it and kept for 5 s, so the pointer moving along it asks nothing more.
+  The host reads a `~/` path from its own home, which the window does not know, and answers with a file alone, so a folder lights nothing.
+  A host's text file outside the vault opens read-only from the host as a language server's dependency does (Language servers), and any other file there lights nothing.
+  A shell on any other host lights nothing, since the window has no way to look up its files.
   VTE lights an OSC 8 link whatever it names, so there the file is looked for on the click.
 - A program's OSC 52 copy (Codex, Claude Code, Vim over ssh) reaches the clipboard, which VTE does not do itself: `accent-cli attach`, which every shell's output passes through here and on a host alike, keeps the copy beside the holder and raises the valueless `vte.ext.accent.clipboard` termprop, and the tab takes the copy with `accent-cli clip`, over the master on a host.
   A termprop cannot carry the copy (2 KiB at most, and a burst keeps only its last value).
@@ -1928,6 +1930,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Any other, a sibling crate a path dependency names, joins all the same and stays editable (user decisions 2026-10-13).
   A file from outside the vault no running server named is a tab like any other from there, and joins once a definition lands on it again (a restored tab, say).
   On a remote vault, a dependency named by a host language session has its own host-file tab key, distinct from a loose file at the same path on this machine. The host reads its absolute path only while that session names it; the tab is read-only and has no local file monitor. Such tabs are not restored after a restart, when no session has named them yet. Other loose tabs still read this machine's disk.
+  A file outside the vault that a shell's output names opens the same way once the host has found it there (Terminal).
 - A C or C++ header goes to clangd as its language does: a `.h` as C (`languageId` `c`, GtkSourceView's own reading of the name), a `.hpp` as C++ — clangd takes the dialect from the compile command, so a C++ header named `.h` is read as C++ all the same.
 - **Typst** is tinymist's, started with its PDF export on every save beside the main document (`exportPdf: onSave`, `$dir/$name`) and its compile status on (user decisions 2026-11-07), which it reads from the `workspace/didChangeConfiguration` sent after the handshake, never asking for them.
   It builds one document a session, so before a file is opened or saved it is told that file's main document by `tinymist.pinMain` where that changed, sent without waiting for its answer so it reaches tinymist first.

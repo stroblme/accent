@@ -349,15 +349,17 @@ impl App {
 
     /// Open the file a link in a shell's output names, at its line and column: as the vault's
     /// file where it is in the vault, else as a file from outside it on this machine, as Open
-    /// File opens one. A host's file outside a remote vault is never lit, so never opened.
+    /// File opens one, or on a remote vault's host, read there as a language server's dependency
+    /// is.
     pub fn open_terminal_link(self: &Rc<Self>, link: terminal::FileLink) {
         let vault = self.vault().filter(|v| v.is_remote() == link.host);
         let rel = vault.and_then(|v| link.path.strip_prefix(v.root()).ok());
         let key = match rel.and_then(Path::to_str) {
-            Some(rel) => rel.to_string(),
-            None if !link.host => link.path.to_string_lossy().into_owned(),
-            None => return,
+            Some(rel) => Some(rel.to_string()),
+            None if !link.host => Some(link.path.to_string_lossy().into_owned()),
+            None => link.path.to_str().and_then(doc::host_file_key),
         };
+        let Some(key) = key else { return };
         let at = accent_api::Pos {
             line: link.line.unwrap_or(1).saturating_sub(1),
             character: link.column.unwrap_or(1).saturating_sub(1),

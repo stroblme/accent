@@ -1644,6 +1644,11 @@ impl Local {
         opening: synced::Opening,
         version: u64,
     ) -> Task<Option<Support>> {
+        // A file outside the vault no session named, a shell's say, is nobody's to answer for,
+        // and nothing is held for it, as no close comes for a document that joined nothing.
+        if Path::new(rel).is_absolute() && !self.lang.named(rel) {
+            return Task::spawn(async { Ok(Some(Support::default())) });
+        }
         let text = match opening {
             synced::Opening::Whole(text) => text,
             synced::Opening::File(digest) => {

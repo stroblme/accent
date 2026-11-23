@@ -409,6 +409,9 @@ methods! {
     read_text(rel: ref str) -> fs::Read;
     /// Read an absolute dependency file only if a live host language session named it.
     read_named(abs: ref str) -> fs::Read;
+    /// The file a shell's output names where the files are, absolute or from home (`~/`), by its
+    /// absolute path there, or `None` for a folder or nothing: a host's home is the host's to say.
+    shell_file(path: ref str) -> Option<String>;
     stat(rel: ref str) -> Option<Etag>;
     /// Write a note where nothing is, as a Save over a note deleted under its tab writes it back:
     /// a file made at `rel` meanwhile refuses the write with `ChangedOnDisk`.

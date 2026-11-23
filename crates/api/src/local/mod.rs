@@ -2,6 +2,7 @@
 //! of its own reads), one writing worker and shared path validation. [`Local`] also serves remote RPC requests through
 //! `accent-cli serve`; [`files`] handles files and [`index`] handles queries.
 
+use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -60,6 +61,9 @@ pub(crate) struct Local {
     /// What the last Replace All rewrote, as it was before: [`Local::undo_replace`]'s to write
     /// back. `None` when there is nothing to undo, or when it was too much to keep.
     undo: Mutex<Option<Vec<files::Before>>>,
+    /// The files a shell's output named that [`Local::shell_file`] found, by the absolute path it
+    /// answered, which [`Local::read_named`] then reads.
+    shell_files: Mutex<HashSet<String>>,
 }
 
 // ---------------------------------------------------------------------- open
@@ -158,6 +162,7 @@ impl Local {
                 worker: Some(handle),
                 pdf_text,
                 undo: Mutex::new(None),
+                shell_files: Mutex::default(),
             },
             event_rx,
         ))
