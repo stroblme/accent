@@ -144,6 +144,9 @@ pub struct Alias {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Skipped {
+    /// Where it is in the vault, through the link a linked folder is walked by, once the walk
+    /// knows its place there, so the vault's worker finds a link to nothing in a linked folder
+    /// too (`ReconcileStats::dangling`); where it is on disk before that.
     pub path: PathBuf,
     pub reason: SkipReason,
 }
@@ -681,7 +684,7 @@ fn walk_passes(
         if quit.load(Ordering::Relaxed) {
             break;
         }
-        let out = walk_pass(&pass, opts, &canonical_root, &followed, &sink);
+        let out = walk_pass(&pass, opts, root, &canonical_root, &followed, &sink);
         skipped.extend(out.skipped);
         for (target, prefix) in out.targets {
             queue.push_back(Pass {
@@ -726,6 +729,7 @@ enum Msg {
 fn walk_pass(
     pass: &Pass,
     opts: &ScanOptions,
+    vault: &Path,
     canonical_root: &Path,
     followed: &Arc<Mutex<Vec<PathBuf>>>,
     on_file: &(dyn Fn(FileMeta) -> WalkState + Send + Sync),
@@ -752,6 +756,7 @@ fn walk_pass(
         let tx = tx.clone();
         let followed = Arc::clone(followed);
         let canonical_root = canonical_root.to_path_buf();
+        let vault = vault.to_path_buf();
         let walk_root = pass.root.clone();
         let prefix = pass.prefix.clone();
         let follow_links = opts.follow_links;
@@ -795,6 +800,7 @@ fn walk_pass(
                 Ok(r) => format!("{prefix}/{}", r.to_string_lossy()),
                 Err(_) => return WalkState::Continue,
             };
+            let in_vault = || vault.join(&rel_path);
             // A directory git ignores is not walked; the file tree opens it a level at a time
             // (`unindexed_children`), and `ignored_files` walks it, told which it is. A directory
             // *symlink* is weighed below, once its target says it is one.
@@ -803,7 +809,7 @@ fn walk_pass(
                 && ignores.matched(&rel_path, true).is_ignore()
             {
                 let _ = tx.send(Msg::Skip(Skipped {
-                    path: path.to_path_buf(),
+                    path: in_vault(),
                     reason: SkipReason::GitIgnored,
                 }));
                 if !enter_ignored {
@@ -838,7 +844,7 @@ fn walk_pass(
                             };
                             if let Some(reason) = refused {
                                 let _ = tx.send(Msg::Skip(Skipped {
-                                    path: path.to_path_buf(),
+                                    path: in_vault(),
                                     reason,
                                 }));
                                 return WalkState::Skip;
@@ -852,7 +858,7 @@ fn walk_pass(
                                 }
                                 Err(reason) => {
                                     let _ = tx.send(Msg::Skip(Skipped {
-                                        path: path.to_path_buf(),
+                                        path: in_vault(),
                                         reason,
                                     }));
                                     return WalkState::Skip;
@@ -863,7 +869,7 @@ fn walk_pass(
                     }
                     Err(_) => {
                         let _ = tx.send(Msg::Skip(Skipped {
-                            path: path.to_path_buf(),
+                            path: in_vault(),
                             reason: SkipReason::Dangling,
                         }));
                         return WalkState::Skip;
@@ -1017,6 +1023,23 @@ mod tests {
         assert!(rels(&r).contains(&"a.md"), "{:?}", rels(&r));
         assert!(rels(&r).contains(&"linked/ext.md"), "{:?}", rels(&r));
         assert!(r.skipped.is_empty(), "{:?}", r.skipped);
+    }
+
+    /// A link to nothing in a linked folder is skipped at its path in the vault, where the vault's
+    /// worker looks at it again once its file appears.
+    #[test]
+    fn a_link_to_nothing_in_a_linked_folder_is_skipped_at_its_path_in_the_vault() {
+        let outside = tempfile::tempdir().unwrap();
+        symlink("gone.md", outside.path().join("dead.md")).unwrap();
+        let vault = tempfile::tempdir().unwrap();
+        symlink(outside.path(), vault.path().join("linked")).unwrap();
+
+        let r = scan(vault.path(), &ScanOptions::default());
+        let dead = Skipped {
+            path: vault.path().join("linked/dead.md"),
+            reason: SkipReason::Dangling,
+        };
+        assert_eq!(r.skipped, [dead]);
     }
 
     #[test]

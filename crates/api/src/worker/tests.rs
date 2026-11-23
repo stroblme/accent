@@ -388,6 +388,28 @@ fn a_link_to_nothing_is_listed_with_its_file_once_that_appears() {
     );
 }
 
+/// A link to nothing the walk finds in a folder linked in from outside the vault is listed with
+/// its file once that appears, as one in the vault is. Depends on real inotify events.
+#[test]
+fn a_link_to_nothing_in_a_linked_folder_is_listed_once_its_file_appears() {
+    let outside = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink("gone.md", outside.path().join("dead.md")).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path(), root.path().join("linked")).unwrap();
+    let f = Fixture::open_dir(root, VaultConfig::default());
+    std::fs::write(outside.path().join("gone.md"), "here\n").unwrap();
+    let listed = || {
+        let listed = f.vault.list_dir("linked").unwrap();
+        listed
+            .iter()
+            .any(|r| r.rel_path == "linked/dead.md" && r.alias)
+    };
+    assert!(
+        poll_until(listed, BUDGET),
+        "the link was not listed with its file"
+    );
+}
+
 /// Both paths to a file a link into the vault names are listed, the link as the second one, and
 /// the index keeps one row, under the file's own path however deep, as a Reload of either folder
 /// keeps it.
