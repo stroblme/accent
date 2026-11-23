@@ -1,7 +1,7 @@
 //! The graph's canvas (DESIGN.md, Graph): the links and nodes as the layout's thread drew them,
 //! the names on top, and the input that moves round it, the keyboard's included: the arrows move
-//! it from node to node, Enter opens the node it is on, and typing starts the pane's find bar on
-//! the nodes' names.
+//! it from node to node, Enter opens the node it is on, and typing starts the pane's find bar,
+//! whose query hides the nodes it does not answer.
 //!
 //! The canvas owns the [`Graph`] and where each of its nodes is. Every change to what it shows
 //! goes through [`GraphView::apply`], into the graph and the layout's [`Worker`] together, so the
@@ -111,6 +111,11 @@ mod imp {
         /// found, and keeps its place in the layout.
         pub filter: RefCell<Option<HashSet<String>>>,
         pub mask: RefCell<Vec<bool>>,
+        /// The view from before the query, put back once it is gone.
+        pub before: Cell<Option<Camera>>,
+        /// The node a find bar's step went to, by key, kept in the middle while the layout
+        /// settles, until the camera is moved otherwise.
+        pub follow: RefCell<Option<String>>,
         /// Counts the changes sent to the layout, so only places of what is shown land.
         pub generation: Cell<u64>,
         pub worker: RefCell<Option<Worker>>,
@@ -328,6 +333,10 @@ impl GraphView {
         imp.dragging.take();
         // Through the setter, so the zoom readout says Fit again.
         self.set_camera(Camera::default());
+        // The view from before a query held now is the fit of the graph laid out afresh.
+        if imp.before.get().is_some() {
+            imp.before.set(Some(Camera::default()));
+        }
         imp.placed.set(false);
         imp.picture.take();
         imp.from.take();
@@ -340,16 +349,30 @@ impl GraphView {
 
     /// Show only the nodes keyed in `keys`, the rest hidden with their links where they are, or
     /// every node for none: the layout settles what is shown round one another, a node the graph
-    /// gains meanwhile hidden until `keys` names it.
-    pub fn set_filter(&self, keys: Option<HashSet<String>>) {
+    /// gains meanwhile hidden until `keys` names it. With `fit` the view is fitted to what is
+    /// shown, and once there is no query the view from before it is put back (user decision
+    /// 2026-11-23).
+    pub fn set_filter(&self, keys: Option<HashSet<String>>, fit: bool) {
         let imp = self.imp();
-        if *imp.filter.borrow() == keys {
-            return;
+        let (was, now) = (imp.filter.borrow().is_some(), keys.is_some());
+        if *imp.filter.borrow() != keys {
+            imp.filter.replace(keys);
+            let shown = model::shown(&imp.graph.borrow().nodes, imp.filter.borrow().as_ref());
+            if *imp.mask.borrow() != shown {
+                self.send(Vec::new(), Vec::new());
+            }
         }
-        imp.filter.replace(keys);
-        let shown = model::shown(&imp.graph.borrow().nodes, imp.filter.borrow().as_ref());
-        if *imp.mask.borrow() != shown {
-            self.send(Vec::new(), Vec::new());
+        match (was, now) {
+            (false, true) => imp.before.set(Some(self.camera())),
+            (true, false) => {
+                if let Some(before) = imp.before.take() {
+                    self.set_camera(before);
+                }
+            }
+            _ => {}
+        }
+        if fit && now {
+            self.fit();
         }
     }
 
@@ -388,6 +411,10 @@ impl GraphView {
         imp.at.replace(frame.at);
         imp.settled.set(frame.settled);
         imp.placed.set(true);
+        self.follow();
+        if frame.settled {
+            imp.follow.take();
+        }
         #[cfg(feature = "bench")]
         if frame.moved {
             imp.frames.set(imp.frames.get() + 1);
@@ -407,6 +434,19 @@ impl GraphView {
             return glib::ControlFlow::Break;
         }
         glib::ControlFlow::Continue
+    }
+
+    /// Keep the node a step went to in the middle as the layout moves it, unless a drag holds one.
+    fn follow(&self) {
+        let imp = self.imp();
+        let key = imp.follow.borrow().clone();
+        let i = key.and_then(|key| self.graph().index_of(&key));
+        let p = i.and_then(|i| imp.at.borrow().get(i).copied());
+        if let Some(p) = p.filter(|_| imp.dragging.borrow().is_none()) {
+            let mut camera = self.camera();
+            camera.centre(p, self.size());
+            self.put_camera(camera);
+        }
     }
 
     /// Show `picture`, crossfading to it from the one shown where it lights another node or, the
@@ -621,7 +661,7 @@ impl GraphView {
                 .map(|k| model::moved(&k, from, to).unwrap_or(k));
             *keys = moved.collect();
         }
-        for key in [&imp.current, &imp.front] {
+        for key in [&imp.current, &imp.front, &imp.follow] {
             let moved = key.borrow().as_deref().map(|k| model::moved(k, from, to));
             if let Some(Some(moved)) = moved {
                 key.replace(Some(moved));
@@ -631,13 +671,9 @@ impl GraphView {
         self.queue_draw();
     }
 
-    /// The node the keyboard is on, by key.
-    pub fn current(&self) -> Option<String> {
-        self.imp().current.borrow().clone()
-    }
-
     /// Put the keyboard on node `key`, said to a screen reader as its name and links, and
-    /// `centre` it, as a find bar's step does, or else keep it on the canvas.
+    /// `centre` it, as a find bar's step does, kept there while the layout settles, or else keep
+    /// it on the canvas.
     pub fn set_current(&self, key: &str, centre: bool) {
         let imp = self.imp();
         let (i, said) = {
@@ -665,6 +701,9 @@ impl GraphView {
             camera.centre(p, self.size());
             camera.fitting = false;
             self.set_camera(camera);
+        }
+        if centre && !imp.settled.get() {
+            imp.follow.replace(Some(key.to_string()));
         }
         self.queue_draw();
     }
@@ -794,9 +833,11 @@ impl GraphView {
     }
 
     /// Move the camera, ending an ease under way where it has got to, so a pan, a zoom or a step
-    /// made while the graph eases over is not undone by the ease's next frames. Pausing changes
-    /// no value, where skipping or resetting the ease would move the camera once more.
+    /// made while the graph eases over is not undone by the ease's next frames, and ending a
+    /// step's following of its node. Pausing changes no value, where skipping or resetting the
+    /// ease would move the camera once more.
     fn set_camera(&self, camera: Camera) {
+        self.imp().follow.take();
         let wheel = self.imp().wheel.borrow().clone();
         if let Some(wheel) = wheel {
             wheel.pause();
@@ -1085,6 +1126,7 @@ impl GraphView {
         let Some(animation) = imp.wheel.borrow().clone() else {
             return;
         };
+        imp.follow.take();
         let now = self.camera().offset;
         let going = match animation.state() {
             adw::AnimationState::Playing => imp.easing.get().1,
@@ -1509,6 +1551,11 @@ impl GraphView {
 
     pub fn front(&self) -> Option<String> {
         self.imp().front.borrow().clone()
+    }
+
+    /// The node the keyboard is on, by key.
+    pub fn current(&self) -> Option<String> {
+        self.imp().current.borrow().clone()
     }
 
     /// The node lit, by key.

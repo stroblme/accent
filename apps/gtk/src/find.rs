@@ -81,6 +81,9 @@ pub struct Wiring {
     /// Whether that is a PDF, which pdfium matches by words alone, so Regular Expression is
     /// greyed over it.
     pub pdf: Box<dyn Fn() -> bool>,
+    /// Whether that is the graph, which reads the Search pane's ranked query, so none of the
+    /// toggles means anything over it.
+    pub ranked: Box<dyn Fn() -> bool>,
     /// Record where the reader is in this pane, so Back returns to where the search started.
     pub mark: Box<dyn Fn()>,
 }
@@ -435,6 +438,7 @@ impl Bar {
         }
         self.sync_toggles();
         self.show_replace();
+        self.set_matches_tooltip(None);
         if let Some(tab) = tab {
             let lines = tab.buffer.connect_changed(glib::clone!(
                 #[weak(rename_to = bar)]
@@ -498,16 +502,20 @@ impl Bar {
         options([case, word, regex])
     }
 
-    /// Hide Regular Expression over a PDF, whose search is pdfium's and matches none, keeping its
-    /// state.
+    /// Hide Regular Expression over a PDF, whose search is pdfium's and matches none, and every
+    /// toggle over the graph, which reads the Search pane's query, each keeping its state.
     fn sync_toggles(&self) {
         let pdf = self.wiring.get().is_some_and(|w| (w.pdf)());
-        let [_, _, regex] = &self.toggles;
+        let ranked = self.wiring.get().is_some_and(|w| (w.ranked)());
+        let [case, word, regex] = &self.toggles;
+        let hidden = [(case, ranked), (word, ranked), (regex, pdf || ranked)];
         // The query takes its keyboard, which GTK would hand to the window's first control.
-        if pdf && regex.has_focus() {
+        if hidden.iter().any(|(t, hide)| *hide && t.has_focus()) {
             self.query.grab_focus();
         }
-        regex.set_visible(!pdf);
+        for (toggle, hide) in hidden {
+            toggle.set_visible(!hide);
+        }
         if pdf {
             self.query.remove_css_class("error");
         }
@@ -560,10 +568,12 @@ impl Bar {
         }
     }
 
-    /// Open on a key typed over a document with nothing to type into, the graph: the key goes on
-    /// to the query's text, which takes it as typed there, a composed letter too, as a search
-    /// entry's key capture forwards it (the entry itself would drop it).
+    /// Open on a key typed over a document with nothing to type into, the graph: the key starts
+    /// a query of its own, the last one not searched again on the way, and goes on to the query's
+    /// text, which takes it as typed there, a composed letter too, as a search entry's key capture
+    /// forwards it (the entry itself would drop it).
     pub fn open_typed(self: &Rc<Self>, keys: &gtk::EventControllerKey) {
+        self.query.set_text("");
         self.open(Mode::Find);
         if let Some(text) = self.query.delegate() {
             keys.forward(&text);
@@ -589,10 +599,16 @@ impl Bar {
 
     /// The readout, said in the caller's own words: the PDF reader and the preview both count
     /// their own matches and say "3 of 12", which the bar has no way to work out for them. A
-    /// query that does not compile marks the box, as in a buffer.
+    /// query that does not compile, or the graph's that cannot be read, marks the box, as in a
+    /// buffer.
     pub fn set_matches_text(&self, text: &str) {
         self.matches.set_text(text);
-        self.set_invalid(text == "Invalid pattern");
+        self.set_invalid(text == "Invalid pattern" || text == "Invalid query");
+    }
+
+    /// Why the query cannot be read, said in the readout's tooltip, or none.
+    pub fn set_matches_tooltip(&self, why: Option<&str>) {
+        self.matches.set_tooltip_text(why);
     }
 
     /// Mark the query box as not compiling.
@@ -821,8 +837,8 @@ impl Bar {
         }
     }
 
-    /// What the query box says. Only `ACCENT_BENCH_REVEAL` reads it.
-    #[cfg(feature = "bench")]
+    /// What the query box says, which a step over the graph reads before the box has said it
+    /// changed.
     pub fn query_text(&self) -> String {
         self.query.text().to_string()
     }

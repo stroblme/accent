@@ -525,7 +525,7 @@ impl App {
 
     /// A pane's find bar addressing the rendered preview, which is what it does over a preview
     /// tab and while presenting a note.
-    pub fn preview_find(&self, pane: &Pane, op: find::PreviewOp) {
+    pub fn preview_find(self: &Rc<Self>, pane: &Pane, op: find::PreviewOp) {
         // A PDF gets first refusal: it is what the user is looking at, and it counts its own
         // matches rather than letting the bar count them.
         if let Some(pdf) = self.pdf_of(pane) {
@@ -562,20 +562,44 @@ impl App {
             }
             return;
         }
-        // The graph finds its nodes' names, a step putting the keyboard on the node found, and
-        // takes the keyboard back as the bar closes, on the node found.
+        // The graph reads the Search pane's query and hides what it does not answer, a step
+        // putting the keyboard on the node found, and takes the keyboard back as the bar closes,
+        // on the node found.
         if let Some(graph) = self.graph_of(pane) {
+            // An Enter within the box's search delay steps through what was typed, not the
+            // query before it.
+            let step = |forward| {
+                if pane.find.is_open() {
+                    self.graph_find(&graph, &pane.find.query_text());
+                }
+                self.graph_step(&graph, forward);
+            };
             match op {
-                find::PreviewOp::Find(text, options) => graph.find(&text, options),
-                find::PreviewOp::Next => graph.step_match(true),
-                find::PreviewOp::Previous => graph.step_match(false),
+                // A query typed over is empty for a moment as it is replaced, which the box says
+                // at once: the graph is shown whole only if it is still empty once that is done.
+                find::PreviewOp::Find(text, _) if text.is_empty() => {
+                    let (app, graph) = (Rc::downgrade(self), Rc::downgrade(&graph));
+                    glib::idle_add_local_once(move || {
+                        let (Some(app), Some(graph)) = (app.upgrade(), graph.upgrade()) else {
+                            return;
+                        };
+                        let pane = app.pane_of(&graph.page);
+                        if pane.is_some_and(|pane| pane.find.query_text().is_empty()) {
+                            app.graph_find(&graph, "");
+                            app.graph_find_readout(&graph);
+                        }
+                    });
+                }
+                find::PreviewOp::Find(text, _) => self.graph_find(&graph, &text),
+                find::PreviewOp::Next => step(true),
+                find::PreviewOp::Previous => step(false),
                 find::PreviewOp::Clear => {
                     graph.find_clear();
                     graph.key_target().grab_focus();
                 }
                 find::PreviewOp::Line { .. } | find::PreviewOp::Replace { .. } => {}
             }
-            pane.find.set_matches_text(&graph.matches_label());
+            self.graph_find_readout(&graph);
             return;
         }
         // A notebook is matched as a buffer is, a cell at a time, and goes to cells.

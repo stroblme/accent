@@ -4,10 +4,12 @@
 //! The vault answers which files and links to show (`Vault::graph_around`) on a worker, and the
 //! tab diffs each answer against what it shows ([`model`]), so a node that stays keeps its place
 //! and the force layout ([`worker`]) only makes room for what is new. A click grows the graph by
-//! the file clicked: it is one of the roots the vault is asked around from then on.
+//! the file clicked: it is one of the roots the vault is asked around from then on. The find
+//! bar's query hides every node it does not answer ([`find`]).
 //! One graph a window, keyed [`KEY`]: like a preview tab it is no file.
 
 mod camera;
+mod find;
 mod model;
 mod raster;
 mod view;
@@ -17,7 +19,6 @@ use super::*;
 use accent_core::config::GraphView as Saved;
 use accent_core::graph::layout::Spread;
 use accent_core::graph::{NodeKind, Part, Shown};
-use accent_core::search::{self, Options};
 use view::GraphView;
 
 /// The graph tab's key, which names no file: what the session keeps it by.
@@ -39,15 +40,6 @@ const SPREAD: (f64, f64, f64) = (0.5, 3.0, 0.25);
 
 pub(crate) fn is_key(key: &str) -> bool {
     key == KEY
-}
-
-/// The find bar's query over the nodes' names: the keys of the nodes it hits, by name.
-#[derive(Default)]
-struct Find {
-    query: String,
-    invalid: bool,
-    hits: Vec<String>,
-    current: Option<usize>,
 }
 
 /// The graph's menu: Show Whole Vault; what is shown, Show Orphans while the whole vault is,
@@ -269,8 +261,13 @@ pub struct GraphTab {
     started: Cell<bool>,
     /// The question asked again after the vault changed ([`REFRESH`]).
     refresh: widgets::Debounce,
-    /// The find bar's query over the nodes' names, and the nodes it hits.
-    finding: RefCell<Find>,
+    /// The find bar's query and the nodes it found ([`find`]), and a count of the questions it
+    /// asked, so only the newest answer lands.
+    finding: RefCell<find::Find>,
+    found: Cell<u64>,
+    /// The last of those questions answered, for the drill.
+    #[cfg(feature = "bench")]
+    find_answered: Cell<u64>,
     /// The last question whose answer landed.
     answered: Cell<u64>,
     /// How long the answers took to land on the main loop, the diff and its apply, for the
@@ -331,83 +328,6 @@ impl GraphTab {
     /// Whether it shows the whole vault, under which Show Orphans applies.
     pub fn all(&self) -> bool {
         self.all.get()
-    }
-
-    /// Search the nodes' names for `text` under `options`, as the Search pane matches, and put
-    /// the keyboard on the first hit from the node it is on, by name and round past the last.
-    pub fn find(&self, text: &str, options: Options) {
-        let compiled = (!text.is_empty()).then(|| search::pattern(text, options));
-        let mut hits: Vec<(String, String)> = match &compiled {
-            Some(Ok(re)) => (self.view.graph().nodes.iter())
-                .map(|n| (model::label(n).to_string(), n.key.clone()))
-                .filter(|(label, _)| re.is_match(label))
-                .collect(),
-            _ => Vec::new(),
-        };
-        hits.sort();
-        *self.finding.borrow_mut() = Find {
-            query: text.to_string(),
-            invalid: matches!(compiled, Some(Err(_))),
-            hits: hits.into_iter().map(|(_, key)| key).collect(),
-            current: None,
-        };
-        self.step_match(true);
-    }
-
-    /// The next hit or the one before, round past either end; with none shown yet, the first on
-    /// or after the node the keyboard is on.
-    pub fn step_match(&self, forward: bool) {
-        let next = {
-            let find = self.finding.borrow();
-            let total = find.hits.len();
-            match (total, find.current) {
-                (0, _) => None,
-                (_, None) => {
-                    let graph = self.view.graph();
-                    let name = |key: &str| {
-                        let node = graph.index_of(key).map(|i| &graph.nodes[i]);
-                        node.map(|n| (model::label(n).to_string(), key.to_string()))
-                    };
-                    let here = self.view.current().and_then(|key| name(&key));
-                    let after = (here.as_ref()).map_or(0, |here| {
-                        find.hits
-                            .partition_point(|key| name(key).as_ref() < Some(here))
-                    });
-                    Some(match forward {
-                        true => after % total,
-                        false => (after + total - 1) % total,
-                    })
-                }
-                (_, Some(at)) if forward => Some((at + 1) % total),
-                (_, Some(at)) => Some((at + total - 1) % total),
-            }
-        };
-        let Some(at) = next else {
-            return;
-        };
-        let key = {
-            let mut find = self.finding.borrow_mut();
-            find.current = Some(at);
-            find.hits[at].clone()
-        };
-        self.view.set_current(&key, true);
-    }
-
-    /// Forget the query, the bar being put away; the keyboard stays on the node it found.
-    pub fn find_clear(&self) {
-        *self.finding.borrow_mut() = Find::default();
-    }
-
-    /// "3 of 12", or what to say when there is nothing to show.
-    pub fn matches_label(&self) -> String {
-        let find = self.finding.borrow();
-        match (find.hits.len(), find.current) {
-            _ if find.invalid => "Invalid pattern".to_string(),
-            _ if find.query.is_empty() => String::new(),
-            (0, _) => "No results".to_string(),
-            (total, None) => format!("{total} matches"),
-            (total, Some(at)) => format!("{} of {total}", at + 1),
-        }
     }
 
     /// Show the empty page: no file to start from, and not the whole vault.
@@ -500,10 +420,14 @@ impl GraphTab {
         self.view.shown_keys()
     }
 
-    /// Show only the nodes keyed in `keys`, as the find bar's query does, or every node.
-    pub fn filter(&self, keys: Option<&[&str]>) {
-        let keys = keys.map(|keys| keys.iter().map(|k| k.to_string()).collect());
-        self.view.set_filter(keys);
+    /// Whether the find bar's last question to the vault was answered.
+    pub fn find_landed(&self) -> bool {
+        self.find_answered.get() == self.found.get()
+    }
+
+    /// Put the keyboard on `key`'s node, brought to the middle.
+    pub fn put_keyboard(&self, key: &str) {
+        self.view.set_current(key, true);
     }
 
     /// Where `key`'s node is, in the layout's units.
@@ -687,7 +611,10 @@ impl App {
             asked: Cell::new(0),
             started: Cell::new(false),
             refresh: widgets::Debounce::new(REFRESH),
-            finding: RefCell::new(Find::default()),
+            finding: RefCell::default(),
+            found: Cell::new(0),
+            #[cfg(feature = "bench")]
+            find_answered: Cell::new(0),
             answered: Cell::new(0),
             #[cfg(feature = "bench")]
             landing_ms: Cell::new(0.0),
@@ -982,6 +909,7 @@ impl App {
         graph.view.apply(&changes, next);
         loading::show(&graph.holder);
         graph.describe();
+        self.refind_graph(graph);
         if matches!(self.active_doc(), Some(Doc::Graph(_))) {
             self.sync_status();
         }
@@ -1062,13 +990,14 @@ impl App {
     /// Open `rel` beside `graph`, as the preview of the most recently used other pane, so a walk
     /// down the graph leaves one tab there; in a window of one pane, in a pane split off to the
     /// graph's right. Open in another pane already, it is brought to the front there, and open
-    /// behind the graph, it moves over. A single press leaves the keyboard on the graph, as a
-    /// row of the Files tree does; `keep`, a double click, keeps the tab and gives it the
-    /// keyboard.
+    /// behind the graph, it moves over. A single press leaves the keyboard where it was, on the
+    /// graph as on a row of the Files tree or in the find bar a step was made in; `keep`, a
+    /// double click, keeps the tab and gives it the keyboard.
     pub(crate) fn open_from_graph(self: &Rc<Self>, graph: &GraphTab, rel: &str, keep: bool) {
         let Some(home) = self.pane_of(&graph.page) else {
             return;
         };
+        let had = self.focused().map(|w| w.downgrade());
         let other = (self.window_order().iter())
             .filter_map(|page| self.pane_of(page))
             .find(|pane| !Rc::ptr_eq(pane, &home));
@@ -1121,9 +1050,15 @@ impl App {
                 // After any focus a split queued, which an idle of its own hands over.
                 let view = graph.view.downgrade();
                 glib::idle_add_local_once(move || {
-                    if let Some(view) = view.upgrade() {
-                        view.grab_focus();
-                    }
+                    let had = had.and_then(|w| w.upgrade()).filter(|w| w.is_mapped());
+                    match had {
+                        // The find bar's query stays as it was, not selected whole.
+                        Some(had) => match had.downcast_ref::<gtk::Text>() {
+                            Some(text) => text.grab_focus_without_selecting(),
+                            None => had.grab_focus(),
+                        },
+                        None => view.upgrade().is_some_and(|view| view.grab_focus()),
+                    };
                 });
             }
         }

@@ -78,6 +78,15 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
             false,
             move || app.pdf_of(&pane).is_some()
         )),
+        ranked: Box::new(glib::clone!(
+            #[weak]
+            app,
+            #[weak]
+            pane,
+            #[upgrade_or]
+            false,
+            move || app.graph_of(&pane).is_some()
+        )),
         mark: Box::new(glib::clone!(
             #[weak]
             app,

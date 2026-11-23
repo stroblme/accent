@@ -18,11 +18,15 @@ use crate::graph::GraphTab;
 /// vault without its orphans and then with them (`all`, `orphans`), and prints Reset Graph's roots
 /// (`reset`). Behind another tab of its pane it has `e.md` link its root and prints how many
 /// questions went while it was hidden and once it was shown again, and the node that added
-/// (`hidden`). It hides `c.md` as the find bar's query would and prints the nodes shown and whether
-/// `c.md` kept its place (`filter`), then every node shown again (`unfiltered`).
-/// It types `c.md` over the canvas with real keys (XTEST), the first of which opens the
-/// pane's find bar, and prints what the bar's query holds, the node the keyboard went to and the
-/// bar's readout (`find`), and where the keyboard is once the bar is closed (`find closed`); it
+/// (`hidden`). It types `bee` over the canvas with real keys (XTEST), the first of which opens the
+/// pane's find bar, and prints what the bar's query holds, the nodes it leaves shown, the readout,
+/// whether `c.md`, hidden, kept its place and the zoom (`find`); presses Enter in the bar and
+/// prints the node the keyboard went to and where the keyboard is (`find step`), and once the bar
+/// is closed where the keyboard is, the nodes shown and the zoom (`find closed`). It types `c` and
+/// Enter at once and prints the node the keyboard went to (`find enter`), shows Reset Graph under
+/// the query and prints its roots, the nodes shown and the readout (`find reset`), and prints the
+/// nodes a query nothing answers shows and what the readout says of one that cannot be read
+/// (`find none`); it
 /// presses the four arrows and prints whether the keyboard moved (`arrows`), then Enter on `a.md`
 /// and prints whether it opened (`enter`).
 /// Then it leaves the keyboard on `a.md`, the graph alone in its pane, saves the session and quits.
@@ -213,49 +217,104 @@ async fn check(app: &Rc<App>, rel: &str) {
         "bench graph hidden queries={hidden} shown_again={} nodes+={added:?}",
         graph.questions() - asked - hidden
     );
-    // Filtered, a node hidden keeps its place while the rest settle round one another, and
-    // every node is back once the filter goes.
+    // Typed with real keys over the canvas, 30 ms apart: the first key opens the bar and lands in
+    // its query, and the next comes while the bar is still sliding in. The query hides `c.md`,
+    // which keeps its place, and the view fits the rest.
     until("graph", "settled", 10_000, || graph.laid_out()).await;
     let place = graph.place_of("c.md");
-    graph.filter(Some(&["bee.md", "e.md"]));
-    until("graph", "filtered", 10_000, || graph.laid_out()).await;
-    println!(
-        "bench graph filter shown={:?} kept={}",
-        graph.shown(),
-        place.is_some() && graph.place_of("c.md") == place
-    );
-    graph.filter(None);
-    until("graph", "unfiltered", 10_000, || graph.laid_out()).await;
-    println!("bench graph unfiltered shown={:?}", graph.shown());
-    // Typed with real keys over the canvas, 30 ms apart: the first key opens the bar and lands in
-    // its query, and the next comes while the bar is still sliding in.
     let canvas = graph.key_target();
     canvas.grab_focus();
     let at = gtk::graphene::Point::new(canvas.width() as f32 / 2.0, 8.0);
     let at = canvas.compute_point(&app.window, &at).unwrap_or(at);
+    let keys = format!("move {:.0} {:.0}; focus; type bee", at.x(), at.y());
+    super::git::xtest(&keys).await;
+    until("graph", "find", 10_000, || {
+        pane.find.readout().0 == "2 matches" && graph.laid_out()
+    })
+    .await;
+    println!(
+        "bench graph find typed={:?} shown={:?} readout={:?} kept={} zoom={}",
+        pane.find.query_box().text(),
+        graph.shown(),
+        pane.find.readout().0,
+        place.is_some() && graph.place_of("c.md") == place,
+        graph.zoom_label()
+    );
+    // Enter takes the best match, the keyboard staying in the bar.
+    super::git::xtest("key Return").await;
+    until("graph", "step", 10_000, || {
+        graph.current().as_deref() == Some("bee.md")
+    })
+    .await;
+    println!(
+        "bench graph find step current={} readout={:?} keyboard={} zoom={}",
+        graph.current().unwrap_or_default(),
+        pane.find.readout().0,
+        keyboard(app, &graph),
+        graph.zoom_label()
+    );
+    // Closed, every node is back and the view from before the query.
+    pane.find.close();
+    until("graph", "find closed", 10_000, || graph.laid_out()).await;
+    println!(
+        "bench graph find closed keyboard={} current={} shown={:?} zoom={}",
+        keyboard(app, &graph),
+        graph.current().unwrap_or_default(),
+        graph.shown(),
+        graph.zoom_label()
+    );
+    // Enter pressed right after a query is typed, before the entry says it changed, takes the
+    // best match of what was typed.
+    canvas.grab_focus();
     let keys = format!(
-        "move {:.0} {:.0}; focus; type c; key period; type md",
+        "move {:.0} {:.0}; focus; type c; key Return",
         at.x(),
         at.y()
     );
     super::git::xtest(&keys).await;
-    until("graph", "find", 10_000, || {
+    until("graph", "typed enter", 10_000, || {
         graph.current().as_deref() == Some("c.md")
     })
     .await;
     println!(
-        "bench graph find typed={:?} current={} readout={:?}",
+        "bench graph find enter typed={:?} current={}",
         pane.find.query_box().text(),
-        graph.current().unwrap_or_default(),
-        pane.find.readout().0
-    );
-    pane.find.close();
-    glib::timeout_future(Duration::from_millis(200)).await;
-    println!(
-        "bench graph find closed keyboard={} current={}",
-        keyboard(app, &graph),
         graph.current().unwrap_or_default()
     );
+    // Reset Graph under the query lays the graph out afresh round the file in front, hiding what
+    // the query does not answer once the layout has settled round every node, and the query is
+    // asked again of the new nodes.
+    menu(app, &graph, "win.graph-reset").await;
+    until("graph", "reset under a query", 30_000, || {
+        graph.find_landed() && graph.laid_out()
+    })
+    .await;
+    println!(
+        "bench graph find reset roots={:?} shown={:?} readout={:?}",
+        graph.roots(),
+        graph.shown(),
+        pane.find.readout().0
+    );
+    // A query nothing answers empties the canvas, and one that cannot be read says so, marked,
+    // leaving the graph as the last one left it.
+    pane.find.query_box().set_text("cx");
+    until("graph", "no results", 10_000, || {
+        pane.find.readout().0 == "No results" && graph.laid_out()
+    })
+    .await;
+    let empty = graph.shown();
+    pane.find.query_box().set_text("cx modified:x");
+    until("graph", "invalid query", 10_000, || {
+        pane.find.readout().0 == "Invalid query"
+    })
+    .await;
+    println!(
+        "bench graph find none shown={empty:?} invalid={:?} kept={}",
+        pane.find.readout(),
+        graph.shown() == empty
+    );
+    pane.find.close();
+    until("graph", "closed again", 10_000, || graph.laid_out()).await;
     let from = graph.current();
     let mut moved = false;
     for key in [
@@ -272,8 +331,7 @@ async fn check(app: &Rc<App>, rel: &str) {
     // graph to the other pane and leaves the graph alone in its own: restored, it waits there for
     // the files to be back before it starts round the one in front.
     for key in ["e.md", "a.md"] {
-        graph.find(key, accent_core::search::Options::default());
-        graph.find_clear();
+        graph.put_keyboard(key);
         graph.press_key(gdk::Key::Return);
         let shown = || {
             (app.panes.borrow().iter())
@@ -366,9 +424,13 @@ async fn split(app: &Rc<App>, graph: &GraphTab) {
     );
 }
 
-/// Where the keyboard is: on the graph, elsewhere, or nowhere.
+/// Where the keyboard is: in the graph's pane's find bar, on the graph, elsewhere, or nowhere.
 fn keyboard(app: &App, graph: &GraphTab) -> &'static str {
+    let bar = app
+        .pane_of(&graph.page)
+        .map(|pane| pane.find.widget().clone());
     match app.focused() {
+        Some(focus) if bar.is_some_and(|bar| focus.is_ancestor(&bar)) => "bar",
         Some(focus) if focus.is_ancestor(&graph.page.child()) => "graph",
         Some(_) => "elsewhere",
         None => "none",
@@ -489,7 +551,8 @@ fn digest(part: &accent_core::graph::Part) -> String {
 /// `GDK_SCALE=2` for a 2× display, which every line names as `scale`.
 ///
 /// First it prints what the vault's three answers cost on their worker and a digest of each, to
-/// tell two builds' answers apart (`vault`), and [`concurrent`]. Each case prints its nodes before
+/// tell two builds' answers apart, and what the find bar's query of the best note's name costs
+/// over the whole vault and how many files it found (`vault`), and [`concurrent`]. Each case prints its nodes before
 /// (`was`) and after, links, the first paint from the command (the first window frame presented
 /// after a picture of what it shows went into a snapshot, `first_paint_ms`, and that snapshot,
 /// `first_snapshot_ms`) and the part of it until the answer landed (`query_ms`), the settle, the
@@ -556,6 +619,9 @@ async fn time(app: &Rc<App>) {
     let roots = vec![best.clone()];
     let grown_roots: Vec<String> = roots.iter().cloned().chain(grow_by.clone()).collect();
     let shown = accent_core::graph::Shown::default();
+    // The find bar's query over the whole vault's graph: the best note's name.
+    let word = accent_core::path::basename(&best);
+    let word = word.split('.').next().unwrap_or(word).to_string();
     let timed = work::off_thread("graph", move || {
         let timed = |f: &dyn Fn() -> String| {
             let mut ms = Vec::new();
@@ -579,6 +645,10 @@ async fn time(app: &Rc<App>) {
             Ok(part) => digest(&part),
             Err(e) => format!("error:{e}"),
         });
+        let find = timed(&|| match vault.search_files(&word, None) {
+            Ok(files) => files.len().to_string(),
+            Err(e) => format!("error:{e}"),
+        });
         // And with tags and images shown, once.
         let every = accent_core::graph::Shown {
             tags: true,
@@ -589,20 +659,22 @@ async fn time(app: &Rc<App>) {
             Ok(part) => digest(&part),
             Err(e) => format!("error:{e}"),
         };
-        ([around, grown, all], tagged)
+        ([around, grown, all, find], tagged)
     })
     .await;
-    if let Some(([around, grown, all], tagged)) = timed {
+    if let Some(([around, grown, all, find], tagged)) = timed {
         println!(
-            "bench graph vault scale={} around_ms={} grown_ms={} all_ms={} around={} grown={} \
-             all={} grown_tagged={tagged}",
+            "bench graph vault scale={} around_ms={} grown_ms={} all_ms={} find_ms={} around={} \
+             grown={} all={} grown_tagged={tagged} found={}",
             app.window.scale_factor(),
             around.0,
             grown.0,
             all.0,
+            find.0,
             around.1,
             grown.1,
-            all.1
+            all.1,
+            find.1
         );
     }
     concurrent(app, &best).await;

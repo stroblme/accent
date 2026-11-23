@@ -1114,6 +1114,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - Over a shell the bar goes and the chord opens nothing: vte keeps its own scrollback.
 - F5 keeps the presented pane where it is, so its bar stays its own over the rendered note.
 - **A query is searched as it is typed** and its first match shown, everywhere alike: in a buffer the first from the caret, over a PDF the first on or after the page being read, wrapping round (or the page of the match shown while it is still on screen, so typing on does not move on from it), over a notebook the first from the selected cell's caret, through the cells in order, over a diagram the first label on or after the page shown, in the rendered preview the first from the selection or the top of the view.
+  Over a graph none is shown, the query filtering the graph instead (Graph).
   A long PDF's pages are searched in the background, so its count grows ("1 of 3", then "1 of 57").
   A page edit searches the PDF again without moving the reader, and the next step goes from the page being read.
 - Enter steps to the next match and Shift+Enter to the previous, in every bar.
@@ -1126,7 +1127,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - Over the rendered preview the page's text is searched as a buffer is, a table's cells each alone and counted where the table stands; the matches within a screen of the view are painted and painted again as it scrolls, the current one is the selection, in its cell for a cell's, and a step scrolls an unseen match a third of the way down.
   An edit beside it keeps the match selected.
 - Over a diagram the bar searches its labels, each on the one line Search reads it as, by the Search pane's matcher: a hit is the cell, counted through the pages in document order, and a step selects it and brings it to the middle of the view, or on a presented page, which selects nothing, shows its page.
-- Over a graph the bar searches the nodes' names by the Search pane's matcher, and a step makes the match the node the keyboard is on and brings it to the middle.
+- Over a graph the bar reads the Search pane's query and hides what it does not answer (Graph), so its toggles are hidden there, and a query it cannot read says "Invalid query" with the reason in the readout's tooltip.
+  The first Enter takes the best match and each one after it the next, as the Search pane ranks them, making it the node the keyboard is on and keeping it in the middle while the layout settles, while the keyboard stays in the bar.
 - Over a notebook the bar searches its cells' sources, not their outputs, as Search does: a step selects the match's cell and scrolls the match into view, the keyboard staying in the bar.
   Replace takes one match, one Undo step, and Replace All every match in every cell as one step through the notebook's model (user decision 2026-10-20).
   Go to Line is Go to Cell there ("of 14 cells").
@@ -1773,6 +1775,11 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A picture of the settled graph at another zoom crossfades in over the scaled one, as a newly lit node's does, which softens the edges a larger step leaves empty for a moment.
 - It follows the vault 300 ms after the last change, a note saved here or by another program and a file added, renamed or deleted, each node keeping its place, a renamed one too.
   Behind another tab it waits, and catches up once it is shown again.
+- **The find bar filters the graph** by the Search pane's query, words and phrases in the files' text and qualifiers alike, and a query of words alone also finds a node by its name, a tag's and a ghost's too (user decisions 2026-11-23).
+  The vault answers it once a query, on its host for a remote vault, the local graph searching its own files and the whole vault's graph all of them.
+  Every node the query does not answer is hidden with its links, the file in front too, and the layout settles the rest round one another while the view fits them, so a query nothing answers leaves the canvas empty.
+  A hidden node keeps its place, so once the query is cleared or the bar closed the graph comes back round it, and the view from before the query is put back.
+  A node the graph gains while the bar holds a query, by a click or a change in the vault, stays hidden until the query has answered for it.
 - Its menu, a right-click anywhere on the canvas or the button in its top right corner, holds Show Whole Vault, Show Unresolved Links, Show Tags, Show Images and Show Orphans as checks, then Reset Graph, each a palette command too (Keyboard, Graph).
   The button is a disc as opaque as the ring's (PDF), and its popover holds Spread above Reset Graph (user decision 2026-11-22).
   What it shows and its spread are kept in the vault's session, and a restored graph comes back around the file in front once the session's tabs are back.
@@ -2425,8 +2432,8 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 ### Graph
 
 - The graph's own Show Whole Vault, Show Unresolved Links, Show Tags, Show Images, Show Orphans and Reset Graph (unbound), beside Show Graph `Ctrl+Shift+M` (Views).
-- Typing over the graph opens its pane's find bar on what is typed, which searches the nodes' names as a diagram's bar searches its labels, and the match shown is the node the keyboard is on, brought to the middle.
-  Enter steps there as in every bar, and Escape closes the bar with the keyboard on that node.
+- Typing over the graph opens its pane's find bar on what is typed, which hides every node its query does not answer (Graph).
+  Enter steps through what it found as in every bar, and Escape closes the bar with the keyboard on the node found and the graph whole again.
 - On the canvas the arrows move the keyboard to the nearest linked node that way, or else the nearest node that way, and Enter opens its file beside the graph as a click does.
 
 ### History

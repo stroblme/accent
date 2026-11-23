@@ -551,8 +551,13 @@ impl App {
     /// Retarget Find to the pane's document; hide it over shells because VTE owns their scrollback.
     fn retarget_find(&self, pane: &Pane) {
         pane.find.retarget(self.tab_of(pane), self.finder_of(pane));
-        if self.notebook_of(pane).is_some() || self.rendered_in(pane).is_some() {
+        let graph = self.graph_of(pane);
+        if self.notebook_of(pane).is_some() || self.rendered_in(pane).is_some() || graph.is_some() {
             pane.find.research();
+        }
+        // A query its pane's bar was put away on while another tab was in front leaves it whole.
+        if let Some(graph) = graph.filter(|_| !pane.find.is_open()) {
+            graph.find_clear();
         }
         if self.shows_shell(pane) {
             pane.find.close();

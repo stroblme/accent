@@ -948,7 +948,7 @@ drill_graph() {
 	echo 'import util' >"$vault/main.py"
 	echo 'x = 1' >"$vault/util.py"
 	cp "$repo/docs/guide/social-preview.png" "$vault/pic.png"
-	launch 90 ACCENT_BENCH_GRAPH=check:a.md >"$dir/graph"
+	launch 120 ACCENT_BENCH_GRAPH=check:a.md >"$dir/graph"
 	launch 60 ACCENT_BENCH_GRAPH=restored >>"$dir/graph"
 	expect graph
 }
