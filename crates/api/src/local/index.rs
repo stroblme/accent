@@ -249,6 +249,12 @@ impl Local {
         Ok(self.unignored(part, &[], !shown.orphans))
     }
 
+    /// Read on the graph's own connection, so the Graph tab's find bar neither cancels the Search
+    /// pane's query nor is cancelled by it.
+    pub fn search_files(&self, query: &str, within: Option<Vec<String>>) -> Result<Vec<String>> {
+        Ok(self.grapher().search_files(query, within.as_deref())?)
+    }
+
     /// `part` without the ghosts of notes the folders git ignores hold, which
     /// [`missing_notes`](Self::missing_notes) leaves out too, but the ones `keys` name. With
     /// `joined` the files that leaves with no edge go too, as core left out the orphans.
@@ -540,6 +546,33 @@ mod tests {
             poll_until(|| found("quux") == 1, BUDGET),
             "the edit missed the index"
         );
+    }
+
+    /// The Graph tab's query runs on the graph's own connection, which holds the SQL functions a
+    /// tag, a path and a word found mid-word call, and a host answers it as the wire carries it,
+    /// kept to the graph's files or not.
+    #[test]
+    fn search_files_answers_on_the_graph_connection_and_over_the_wire() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("Reading")).unwrap();
+        std::fs::write(root.path().join("Reading/paper.md"), "ferris #reading\n").unwrap();
+        std::fs::write(root.path().join("plain.md"), "ferris and [[paper]]\n").unwrap();
+        let f = Fixture::open_dir(root, VaultConfig::default());
+        let found = |query: &str| f.vault.search_files(query, None).unwrap();
+        assert_eq!(found("#reading"), ["Reading/paper.md"]);
+        assert_eq!(found("path:read"), ["Reading/paper.md"]);
+        assert_eq!(found("erris kind:note").len(), 2);
+
+        let crate::vault::Backend::Local(local) = &f.vault.backend else {
+            unreachable!("the fixture is a local vault")
+        };
+        let wire = |within: serde_json::Value| -> Vec<String> {
+            let p = serde_json::json!(["ferris", within]);
+            let answer = crate::vault::dispatch(local, "search_files", &p);
+            serde_json::from_value(answer.unwrap().unwrap()).unwrap()
+        };
+        assert_eq!(wire(serde_json::Value::Null).len(), 2);
+        assert_eq!(wire(serde_json::json!(["plain.md"])), ["plain.md"]);
     }
 
     /// Of three queries asked while the first still holds the search connection, the newest runs

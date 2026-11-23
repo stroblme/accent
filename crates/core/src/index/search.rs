@@ -133,6 +133,42 @@ impl Index {
         self.per_match(hits.take(limit).collect(), &needles, limit)
     }
 
+    /// The files `query` answers, best first as [`search`](Self::search) ranks them, with no row
+    /// read for them and no cap: what the Graph tab's find bar keeps of the graph. With `within`,
+    /// only those of these files, in the same order. A query of qualifiers alone lists their files
+    /// newest first, and one whose words start none falls back to the mid-word index, as `search`
+    /// does. What git ignores is left out, a note never.
+    pub fn search_files(&self, query: &str, within: Option<&[String]>) -> Result<Vec<String>> {
+        let q = query::parse(query, &chrono::Local::now())?;
+        let rows = match q.text.is_empty() {
+            true if q.filters.is_empty() => return Ok(Vec::new()),
+            true => self.listed(&q, EVERY, false, &[])?,
+            false => {
+                let ranked = self.ranked_files(&q)?;
+                if !ranked.is_empty() {
+                    return Ok(only(ranked, within));
+                }
+                self.infix(&q, &needles(&q.text), EVERY, false, &[])?
+            }
+        };
+        Ok(only(rows.into_iter().map(|h| h.rel_path).collect(), within))
+    }
+
+    /// [`ranked`](Self::ranked)'s files alone, every one of them, no body read.
+    fn ranked_files(&self, q: &Query) -> Result<Vec<String>> {
+        let (filter, values) = filter::sql(&q.filters, &[], "g", 4);
+        let mut st = self.conn.prepare_cached(&ranked_files_sql(&filter))?;
+        let title: Vec<&str> = q.text.iter().map(|t| t.text.as_str()).collect();
+        let mut args = vec![
+            Value::Text(fts_query(&q.text)),
+            Value::Text(title.join(" ")),
+            Value::Integer(FileKind::Markdown.as_i64()),
+        ];
+        args.extend(values);
+        let rows = st.query_map(params_from_iter(args), |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// The files the prefix index ranks for `q`, best first, at most `limit` of them: one hit
     /// each, before [`per_match`](Self::per_match) makes rows of them.
     fn ranked(
@@ -462,6 +498,28 @@ fn ranked_sql(filter: &str) -> String {
          FROM r JOIN files f ON f.id = r.id JOIN notes n ON n.file_id = r.id
          ORDER BY r.exact DESC, r.score"
     )
+}
+
+/// [`Index::ranked_files`]'s query: [`ranked_sql`]'s ranking without its rows, `filter` on `g`
+/// from `?4` on.
+fn ranked_files_sql(filter: &str) -> String {
+    format!(
+        "SELECT g.rel_path FROM notes_fts JOIN files g ON g.id = notes_fts.rowid
+         WHERE notes_fts MATCH ?1 AND (g.git_ignored = 0 OR g.kind = ?3){filter}
+         ORDER BY lower(ifnull(g.title, '')) = lower(?2) DESC, bm25(notes_fts, 1.0, 10.0)"
+    )
+}
+
+/// No cap on how many files a query lists: SQLite reads a `LIMIT` of `i64::MAX` as none.
+const EVERY: usize = i64::MAX as usize;
+
+/// `files` but those `within` leaves out, in their order.
+fn only(mut files: Vec<String>, within: Option<&[String]>) -> Vec<String> {
+    if let Some(within) = within {
+        let within: std::collections::HashSet<&str> = within.iter().map(String::as_str).collect();
+        files.retain(|f| within.contains(f.as_str()));
+    }
+    files
 }
 
 /// [`Index::infix`]'s statement, the qualifiers' conditions `filter` on `g` from `?6` on.
@@ -1633,6 +1691,48 @@ mod tests {
         assert!(ix.search("# -", 10, false).unwrap().is_empty());
     }
 
+    /// The files a query answers, ranked as the Search pane ranks them, each once: an exact title
+    /// first, then `bm25`, the mid-word index where no word starts one, and qualifiers alone
+    /// newest first. `within` keeps the files it names in that order.
+    #[test]
+    fn search_files_lists_each_file_once_as_search_ranks_them() {
+        let (vault, db) = ranking_vault();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+        let found =
+            |query: &str, within: Option<&[String]>| ix.search_files(query, within).unwrap();
+        assert_eq!(
+            found("Quantum Coherence Ledger", None),
+            ["target.md", "spam.md"]
+        );
+        let both = ["spam.md".to_string(), "target.md".to_string()];
+        assert_eq!(
+            found("quantum", Some(&both)),
+            files(&ix.search("quantum", 10, false).unwrap())
+        );
+        assert_eq!(found("coherence ledger", Some(&both[..1])), ["spam.md"]);
+        assert_eq!(found("oggle", None), ["target.md"]);
+        assert!(found("", None).is_empty() && found("zqxjv", None).is_empty());
+
+        let (vault, db) = qualified_vault();
+        let older = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        let file = fs::File::options()
+            .write(true)
+            .open(vault.path().join("plain.md"))
+            .unwrap();
+        file.set_modified(older).unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+        let notes = ix.search_files("kind:note", None).unwrap();
+        assert_eq!(notes.len(), 3);
+        assert_eq!(notes.last().map(String::as_str), Some("plain.md"));
+        assert_eq!(ix.search_files("ferris #reading", None).unwrap().len(), 2);
+        assert!(matches!(
+            ix.search_files("modified:x", None),
+            Err(crate::Error::Invalid(_))
+        ));
+    }
+
     /// The trigram path's qualifiers narrow as the ranked path's do, and they are tested before a
     /// candidate's body is read: the files row is looked up first, its body read after.
     #[test]
@@ -1670,5 +1770,27 @@ mod tests {
             .unwrap();
         let first = |op: &str| ops.iter().position(|o| o == op).expect(op);
         assert!(first("SeekRowid") < first("VColumn"), "{ops:?}");
+    }
+
+    /// `ACCENT_GRAPH_VAULT=/tmp/<scratch> cargo test --release -p accent-core -- --ignored
+    /// search_files_cost --nocapture`: what the Graph tab's find bar asks of a generated vault
+    /// over the whole graph, timed, and the size of the JSON a remote vault sends back for it.
+    #[test]
+    #[ignore = "needs ACCENT_GRAPH_VAULT, a generated vault (never the real one)"]
+    fn search_files_cost() {
+        let vault = std::env::var_os("ACCENT_GRAPH_VAULT").expect("ACCENT_GRAPH_VAULT");
+        let db = tempfile::tempdir().unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(std::path::Path::new(&vault), |_| {}).unwrap();
+        for query in ["a", "the", "quantum circuit noise", "uantu", "kind:note"] {
+            let started = std::time::Instant::now();
+            let files = ix.search_files(query, None).unwrap();
+            let took = started.elapsed();
+            let json = serde_json::to_vec(&files).unwrap().len();
+            println!(
+                "search_files {query:?}: {} files in {took:?}, {json} bytes of JSON",
+                files.len()
+            );
+        }
     }
 }

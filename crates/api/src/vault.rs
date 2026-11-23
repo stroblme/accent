@@ -525,6 +525,9 @@ methods! {
     graph_around(keys: ref [String], shown: val Shown) -> Part;
     /// The vault's whole graph (`Index::graph_all`).
     graph_all(shown: val Shown) -> Part;
+    /// The files a ranked query answers, best first, kept to those `within` names where it names
+    /// any, so the host sends back no more than the graph holds (`Index::search_files`).
+    search_files(query: ref str, within: val Option<Vec<String>>) -> Vec<String>;
     /// `(note, target, byte offset)` for every link nothing in the vault answers to.
     unresolved_links() -> Vec<(String, String, i64)>;
     /// The headings holding the most of `words`, best first.
