@@ -49,7 +49,10 @@ pub(crate) use follow::url_under;
 pub(crate) use indent::adopt as adopt_indent;
 #[cfg(feature = "bench")]
 pub(crate) use indent::on_key as indent_key;
-pub(crate) use indent::{reindent, stop_before, width as indent_width};
+pub(crate) use indent::{
+    Unit as IndentUnit, detect as detect_indent, reindent, set_unit as set_indent_unit,
+    stop_before, width as indent_width,
+};
 pub(crate) use keys::attach as attach_keys;
 #[cfg(feature = "bench")]
 pub(crate) use keys::press;

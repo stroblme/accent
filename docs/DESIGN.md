@@ -784,7 +784,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A file in which more lines open with a tab than with a space indents with tabs, and any other by the step of two to eight spaces that a line most often goes deeper by than the one above it.
   Tab, Shift+Tab, Backspace in an indent, Return and a wrapped row all step by that unit, so a file indented by two moves two columns at a time under an Indent Width of four.
   The Indent Width is the unit of a file with no indented line yet, until it is next opened, and the width a tab is shown at, while a makefile always indents with tabs.
-  A notebook's cell reads its own lines, and a read-only column beside the editor takes the editor's unit.
+  A notebook's code cells take the unit their lines show together, read as it opens, and a read-only column beside the editor takes the editor's unit.
 - **Indentation follows the code as it is typed**, one rule in every language and no server (user decision 2026-10-19): Return after a line whose code ends in `{`, `(`, `[` or `:` indents one level deeper, by the file's unit, and between such an opener and its closer puts the closer on a line of its own at the outer level; a closer typed on a blank line goes back out to the level of the block it closes.
   A comment after the opener does not hide it and one inside a string is not one, as the language's highlighting tells them apart; a file with no language only copies the line's indent, as every other Return does.
   Each is one undo step.

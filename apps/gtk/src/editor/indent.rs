@@ -241,8 +241,8 @@ fn columns(indent: &str, tab_width: usize) -> usize {
 }
 
 /// One level of a file's indent, as its lines show it.
-#[derive(Debug, PartialEq)]
-enum Unit {
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Unit {
     Tab,
     Spaces(u32),
 }
@@ -251,7 +251,7 @@ enum Unit {
 /// 10 000 lines: a tab where more lines open with a tab than with a space, else the step of two to
 /// eight spaces by which a line most often goes deeper than the one above it, the narrower on a
 /// tie. None for text with no line indented yet.
-fn detect(text: &str) -> Option<Unit> {
+pub(crate) fn detect(text: &str) -> Option<Unit> {
     let (mut tabs, mut spaced) = (0, 0);
     let mut steps = [0; 9];
     // The spaces the last line with text opened with, none past one indented with a tab.
@@ -283,10 +283,8 @@ fn detect(text: &str) -> Option<Unit> {
         .map(|step| Unit::Spaces(step as u32))
 }
 
-/// Give a code view the indent unit its `text` shows, which Tab, Shift+Tab, Backspace in an
-/// indent, Return and a wrapped row's hang all step by: GtkSourceView's indent width, or its tab
-/// width (the Indent Width preference) for a file with none yet or one indented with tabs. A
-/// makefile indents with tabs whatever its lines show, a leading tab being its syntax.
+/// Give a code view the indent unit its `text` shows ([`set_unit`]). A makefile indents with tabs
+/// whatever its lines show, a leading tab being its syntax.
 pub(crate) fn adopt(
     view: &sourceview5::View,
     text: &str,
@@ -296,6 +294,13 @@ pub(crate) fn adopt(
         true => Some(Unit::Tab),
         false => detect(text),
     };
+    set_unit(view, unit);
+}
+
+/// Give a code view `unit`, which Tab, Shift+Tab, Backspace in an indent, Return and a wrapped
+/// row's hang all step by: GtkSourceView's indent width, or its tab width (the Indent Width
+/// preference) for no unit yet or a tab.
+pub(crate) fn set_unit(view: &sourceview5::View, unit: Option<Unit>) {
     view.set_insert_spaces_instead_of_tabs(unit != Some(Unit::Tab));
     view.set_indent_width(match unit {
         Some(Unit::Spaces(width)) => width as i32,

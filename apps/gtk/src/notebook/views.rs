@@ -181,6 +181,9 @@ impl NotebookTab {
         // A viewer's cells take no keyboard: its column reads with the reading keys.
         editor.view.set_focusable(!self.viewer);
         editor.view.set_tab_width(self.indent.get());
+        if view.kind == Kind::Code {
+            crate::editor::set_indent_unit(&editor.view, self.unit);
+        }
         crate::editor::refont(&editor.view);
         // A key that takes the caret far within the cell leaves a place to come back to; a click
         // is the notebook's to judge, which knows the cell the caret left (`press`).

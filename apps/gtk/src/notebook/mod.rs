@@ -104,6 +104,8 @@ pub struct NotebookTab {
     spellcheck: Cell<bool>,
     /// How many columns a tab takes in the cells: the Indent Width a text tab follows.
     indent: Cell<u32>,
+    /// The code cells' indent unit, read over them all as it opens, as a code file's is.
+    unit: Option<crate::editor::IndentUnit>,
     /// The selection whose other occurrences are painted in every cell.
     occurrence: RefCell<Option<String>>,
     selected: Cell<Option<CellId>>,
@@ -264,6 +266,11 @@ fn build(
     let page = page(&host);
 
     let language = crate::editor::language_for(&format!("cell{}", notebook.extension()), "");
+    let code: Vec<&str> = (notebook.cells().iter())
+        .filter(|c| c.kind() == Kind::Code)
+        .map(|c| c.source())
+        .collect();
+    let unit = crate::editor::detect_indent(&code.join("\n"));
     let tab = Rc::new(NotebookTab {
         key: RefCell::new(key.to_string()),
         path: RefCell::new(path.to_path_buf()),
@@ -293,6 +300,7 @@ fn build(
         gutter: Cell::new(0),
         spellcheck: Cell::new(false),
         indent: Cell::new(4),
+        unit,
         occurrence: RefCell::default(),
         selected: Cell::new(None),
         history: RefCell::default(),
