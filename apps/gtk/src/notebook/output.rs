@@ -1247,9 +1247,17 @@ mod figure {
             let (own, zoom) = (self.own.get(), self.zoom.borrow().get());
             match orientation {
                 gtk::Orientation::Horizontal => (0, shown_size(own, zoom, i32::MAX).0, -1, -1),
+                // With no width, as short as at its narrowest and as tall as at its widest: a box
+                // of the cell's takes the shortest a row can be from this, and the picture at full
+                // size made a narrow cell's shortest taller than it is tall (GtkBoxLayout).
+                _ if for_size < 0 => (
+                    shown_size(own, zoom, 0).1,
+                    shown_size(own, zoom, i32::MAX).1,
+                    -1,
+                    -1,
+                ),
                 _ => {
-                    let width = if for_size < 0 { i32::MAX } else { for_size };
-                    let h = shown_size(own, zoom, width).1;
+                    let h = shown_size(own, zoom, for_size).1;
                     (h, h, -1, -1)
                 }
             }
