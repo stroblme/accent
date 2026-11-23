@@ -1,6 +1,6 @@
 //! `ACCENT_BENCH_PREVIEW=tasks`: a click on a task's box in a note's preview, through XTEST.
 
-use super::git::xtest;
+use super::git::{xtest, xtest_now};
 use super::*;
 
 const NOTE: &str = "tasks-drill.md";
@@ -64,8 +64,15 @@ pub(super) async fn run(app: &Rc<App>) {
         let before = tab.text();
         let top = (rendered.preview().as_ref()).map_or(0.0, |p| p.scroll_y());
         xtest(&format!("move {}", screen(at))).await;
-        let cursor = (rendered.preview().as_ref()).and_then(|p| p.cursor());
+        // Each step read once it has landed, however long a loaded machine takes to get there.
+        let pointer = || (rendered.preview().as_ref()).and_then(|p| p.cursor());
+        until("tasks", "the hand over the box", 5_000, || {
+            pointer().as_deref() == Some("pointer")
+        })
+        .await;
+        let cursor = pointer();
         xtest("down; up").await;
+        until("tasks", "the box ticked", 5_000, || tab.text() != before).await;
         let after = tab.text();
         let moved = (rendered.preview().as_ref()).map_or(0.0, |p| p.scroll_y()) - top;
         println!(
@@ -76,14 +83,17 @@ pub(super) async fn run(app: &Rc<App>) {
         // Undo over the page, which has kept the keyboard, steps the note's history; on the first
         // box Redo too, and Undo again.
         xtest("key ctrl+z").await;
+        until("tasks", "the undo", 5_000, || tab.text() == before).await;
         println!(
             "bench tasks undo line={line} restored={}",
             tab.text() == before
         );
         if i == 0 {
             xtest("key ctrl+shift+z").await;
+            until("tasks", "the redo", 5_000, || tab.text() == after).await;
             let redone = tab.text() == after;
             xtest("key ctrl+z").await;
+            until("tasks", "the undo", 5_000, || tab.text() == before).await;
             println!(
                 "bench tasks redo line={line} redone={redone} restored={}",
                 tab.text() == before
@@ -150,9 +160,26 @@ pub(super) async fn run(app: &Rc<App>) {
     let alone = app
         .pane_of(&rendered.page)
         .is_some_and(|pane| pane.has(&org.page));
-    let org_boxes = (rendered.preview().as_ref()).map_or_else(Vec::new, |p| p.boxes());
-    for (line, at) in org_boxes {
-        xtest(&format!("move {}; down; up", screen(at))).await;
+    let org_boxes = || (rendered.preview().as_ref()).map_or_else(Vec::new, |p| p.boxes());
+    let pointer = || (rendered.preview().as_ref()).and_then(|p| p.cursor());
+    for i in 0..org_boxes().len() {
+        let before = org.text();
+        // Aimed at the box where it is laid out now until the hand shows over it: a page that
+        // has just come in front lays its boxes out a while after its render is in.
+        let mut line = 0;
+        for _ in 0..50 {
+            let Some((at_line, at)) = org_boxes().get(i).copied() else {
+                break;
+            };
+            line = at_line;
+            xtest_now(&format!("move {}", screen(at))).await;
+            glib::timeout_future(Duration::from_millis(100)).await;
+            if pointer().as_deref() == Some("pointer") {
+                break;
+            }
+        }
+        xtest("down; up").await;
+        until("tasks", "the org box", 5_000, || org.text() != before).await;
         let text = org.text();
         println!(
             "bench tasks org alone={alone} line={line} {:?}",

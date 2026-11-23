@@ -389,13 +389,19 @@ fn bench_outline_hover(app: &Rc<App>) {
             }
             glib::timeout_future(Duration::from_millis(800)).await;
             hover_thumbnail(&app, rel).await;
+            // The row under the pointer, its number faded in over a backing of its tint, however
+            // long a loaded machine takes to get there.
+            let lit = |title: &str| {
+                row_facts(&app, title, None).is_some_and(|f| f.hovered && f.drawn && f.matched)
+            };
             for title in [short, LONG] {
                 let before = row_facts(&app, title, None).map(|f| f.width);
-                xtest(&format!(
+                xtest_now(&format!(
                     "move {}",
                     row_aim(&app, title).unwrap_or_default()
                 ))
                 .await;
+                until("outline hover", title, 5_000, || lit(title)).await;
                 let after = row_facts(&app, title, Some(&format!("{rel}-{}", title.len())));
                 let Some(f) = after else {
                     println!("bench outline hover {rel} row={title:?} missing");
@@ -416,11 +422,16 @@ fn bench_outline_hover(app: &Rc<App>) {
             }
             // Off the row from on it, a frame later: the number goes with the row's tint.
             let on = row_aim(&app, short).unwrap_or_default();
-            xtest(&format!("move {on}")).await;
+            xtest_now(&format!("move {on}")).await;
+            until("outline hover", "on", 5_000, || lit(short)).await;
             xtest_now("move 5 5").await;
             glib::timeout_future(Duration::from_millis(60)).await;
             let left = row_facts(&app, short, Some(&format!("{rel}-left"))).map(|f| f.matched);
-            glib::timeout_future(Duration::from_millis(600)).await;
+            until("outline hover", "away", 5_000, || {
+                row_facts(&app, short, None).is_some_and(|f| !f.drawn)
+                    && strip_number(&app).is_none_or(|s| s.number.is_none())
+            })
+            .await;
             let thumb = strip_number(&app).map(|s| s.number);
             let f = row_facts(&app, short, None);
             println!(

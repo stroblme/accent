@@ -76,7 +76,7 @@ async fn bench_fixes(app: &Rc<App>, rel: &str) {
     println!("bench quickfix moved {titles:?}");
     tab.buffer.undo();
     crate::lang::flush(tab.clone()).await;
-    diagnosed("quickfix", &tab.lang.doc).await;
+    erred(&tab).await;
     // The file-creating fix last a second time, with the file there.
     for (n, pick) in [0u32, 1, 2, 3, 4, 2].into_iter().enumerate() {
         if n == 5 {
@@ -128,7 +128,7 @@ async fn bench_fixes(app: &Rc<App>, rel: &str) {
             println!("bench quickfix undone={pick} text={:?}", tab.text());
         }
         crate::lang::flush(tab.clone()).await;
-        diagnosed("quickfix", &tab.lang.doc).await;
+        erred(&tab).await;
     }
     let before = tab.text();
     app.source_action();
@@ -158,7 +158,7 @@ async fn bench_fixes(app: &Rc<App>, rel: &str) {
         tab.text()
     );
     crate::lang::flush(tab.clone()).await;
-    diagnosed("quickfix", &tab.lang.doc).await;
+    erred(&tab).await;
     let context = tab.view.extra_menu().map(|m| fileops::labels(&m));
     println!("bench quickfix context_menu {context:?}");
 
@@ -246,7 +246,13 @@ async fn bench_cell_fixes(app: &Rc<App>, rel: &str) {
             );
         }
         cell.clone().flush().await;
-        diagnosed("quickfix", &cell.document()).await;
+        // The cell's error back, as [`erred`] waits for the file's.
+        let document = cell.document();
+        until("quickfix", "the cell's error", 10_000, || {
+            let cells = tab.bench_diagnostics();
+            document.diagnosed() && cells.get(1).is_some_and(|c| !c.0.is_empty())
+        })
+        .await;
     }
 }
 
@@ -295,6 +301,21 @@ async fn bench_note_fix(app: &Rc<App>) {
         .activate_action("fix.apply", Some(&0u32.to_variant()));
     menu.popdown();
     super::style::bench_new_file(app, "create_note").await;
+}
+
+/// Until the server has published about the text as it is and its error is on `oops` at the start
+/// of the file, where the menu is asked for: a publish about an edit just undone can come in after
+/// the undo was sent, as fresh, without the error or with it where that edit had moved it, and a
+/// menu asked for then has no fixes in it, its second row the refactoring that swaps.
+async fn erred(tab: &Rc<Tab>) {
+    let on_oops = |d: &accent_api::Diagnostic| {
+        let (from, to) = (d.range.start, d.range.end);
+        from.line == 0 && from.character <= 9 && 9 <= to.character
+    };
+    until("quickfix", "the error", 10_000, || {
+        tab.lang.doc.diagnosed() && tab.diagnostics().iter().any(on_oops)
+    })
+    .await;
 }
 
 /// The Quick Fix menu once it is up on `tab`'s view.

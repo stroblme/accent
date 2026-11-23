@@ -56,8 +56,9 @@ fn corners(w: i32, h: i32) -> String {
         .map(|id| {
             let x = if id.ends_with("left") { 0 } else { w - 200 };
             let y = if id.starts_with("top") { 0 } else { h - 100 };
+            let link = address(id);
             format!(
-                r#"<UserObject label="" link="https://example.org/{id}/an-address-long-enough-to-cross-the-side-of-the-pane" id="{id}"><mxCell style="rounded=0;" parent="1" vertex="1"><mxGeometry x="{x}" y="{y}" width="200" height="100" as="geometry"/></mxCell></UserObject>"#
+                r#"<UserObject label="" link="{link}" id="{id}"><mxCell style="rounded=0;" parent="1" vertex="1"><mxGeometry x="{x}" y="{y}" width="200" height="100" as="geometry"/></mxCell></UserObject>"#
             )
         })
         .collect();
@@ -66,6 +67,37 @@ fn corners(w: i32, h: i32) -> String {
         r#"<mxfile host="accent"><diagram name="Corners" id="corners"><mxGraphModel page="0"><root><mxCell id="0"/><mxCell id="1" parent="0"/>{shapes}<UserObject label="" link="data:page/id,tall" id="middle"><mxCell style="rounded=0;" parent="1" vertex="1"><mxGeometry x="{mx}" y="{my}" width="200" height="100" as="geometry"/></mxCell></UserObject></root></mxGraphModel></diagram>
   <diagram name="Tall" id="tall"><mxGraphModel page="0"><root><mxCell id="0"/><mxCell id="1" parent="0"/><mxCell id="t" style="rounded=0;" parent="1" vertex="1"><mxGeometry x="0" y="0" width="100" height="2000" as="geometry"/></mxCell></root></mxGraphModel></diagram></mxfile>"#
     )
+}
+
+/// The address the shape in corner `id` of [`corners`] links to.
+fn address(id: &str) -> String {
+    format!("https://example.org/{id}/an-address-long-enough-to-cross-the-side-of-the-pane")
+}
+
+/// The link popover over `app`'s window that says `text`, once it is laid out where it goes,
+/// however long a loaded machine takes: put up where it opens, it is placed again on the next
+/// frame on its side and slid along (`link_popover`), so a frame has to pass after it first
+/// shows, one asked for at each look until then. `what` names the wait in a timeout.
+async fn popover_saying(app: &Rc<App>, what: &str, text: &str) -> Option<gtk::Popover> {
+    let says = |w: &gtk::Widget| {
+        w.downcast_ref::<gtk::Label>()
+            .is_some_and(|l| l.label() == text)
+    };
+    let shown = std::cell::OnceCell::new();
+    until("nav", what, 5_000, || {
+        let popover = find_widget(app.window.upcast_ref(), &|w| {
+            w.is::<gtk::Popover>() && w.is_visible() && find_widget(w, &says).is_some()
+        })?;
+        let frame = popover.frame_clock()?.frame_counter();
+        let laid_out = popover.native()?.surface()?.width() > 1;
+        if laid_out && frame >= *shown.get_or_init(|| frame) + 2 {
+            return Some(popover);
+        }
+        popover.queue_draw();
+        None
+    })
+    .await
+    .and_downcast()
 }
 
 /// Where `popover`'s surface is in the pane it is parented to, and that pane.
@@ -195,17 +227,10 @@ fn links(app: &Rc<App>, rel: &str) {
         };
         let at = |id: &str| above(id, 0.0).unwrap_or_default();
         let (go, web) = (at("go"), at("web"));
-        super::git::xtest(&format!(
-            "move {go}; focus; keydown ctrl; move {web}; sleep 0.3"
-        ))
-        .await;
-        let popover = || {
-            find_widget(app.window.upcast_ref(), &|w| {
-                w.is::<gtk::Popover>() && w.is_visible()
-            })
-        };
-        let preview = popover()
-            .and_then(|popover| find_widget(&popover, &|w| w.is::<gtk::Label>()))
+        super::git::xtest_now(&format!("move {go}; focus; keydown ctrl; move {web}")).await;
+        let preview = popover_saying(&app, "the web link's preview", "https://example.org/")
+            .await
+            .and_then(|popover| find_widget(popover.upcast_ref(), &|w| w.is::<gtk::Label>()))
             .and_downcast::<gtk::Label>()
             .map(|label| label.label().to_string());
         println!("bench nav link preview={preview:?}");
@@ -221,10 +246,12 @@ fn links(app: &Rc<App>, rel: &str) {
         // Ctrl over the shape and let go, then over to the middle of its popover, a surface of its
         // own: where its parent's puts it, its shadow and the content in it.
         let near = above("go", 1.0).unwrap_or_default();
-        super::git::xtest(&format!("keydown ctrl; move {near}; sleep 0.3; keyup ctrl")).await;
-        let over = popover().and_then(|popover| {
+        super::git::xtest_now(&format!("keydown ctrl; move {near}")).await;
+        // Up, saying the page it leads to.
+        let shown = popover_saying(&app, "the page link's popover", "Two").await;
+        let over = shown.as_ref().and_then(|popover| {
             let content = popover.first_child()?;
-            let bounds = content.compute_bounds(&popover)?;
+            let bounds = content.compute_bounds(popover)?;
             let native = popover.native()?;
             let (sx, sy) = native.surface_transform();
             let surface = native.surface()?;
@@ -236,7 +263,19 @@ fn links(app: &Rc<App>, rel: &str) {
             ))
         });
         let over = over.unwrap_or_default();
-        super::git::xtest(&format!("move {over}; sleep 0.2; down; up")).await;
+        // Ctrl let go and the pointer straight over to it, as a hand goes: a motion over the page
+        // without Ctrl gives the popover its 400 ms (`LEAVE_MS`) for the pointer to reach it. The
+        // click once the pointer is on its button.
+        super::git::xtest_now(&format!("keyup ctrl; move {over}")).await;
+        let button = (shown.as_ref())
+            .and_then(|popover| find_widget(popover.upcast_ref(), &|w| w.is::<gtk::Button>()));
+        let on = || {
+            button
+                .as_ref()
+                .is_some_and(|b| b.state_flags().contains(gtk::StateFlags::PRELIGHT))
+        };
+        until("nav", "the pointer on the page link's popover", 5_000, on).await;
+        super::git::xtest("down; up").await;
         say("popover");
         let back = at("back");
         super::git::xtest(&format!("move {back}; down; up")).await;
@@ -266,9 +305,8 @@ fn links(app: &Rc<App>, rel: &str) {
             let x = if left { r.x + 3.0 } else { r.x + r.w - 3.0 };
             let y = if top { r.y + 3.0 } else { r.y + r.h - 3.0 };
             let at = on_screen(&app, &canvas, x, y).unwrap_or_default();
-            // Longer than the popover waits for a pointer that left the link (`LEAVE_MS`).
-            super::git::xtest(&format!("keydown ctrl; move {at}; sleep 0.6")).await;
-            let shown = popover().and_downcast::<gtk::Popover>();
+            super::git::xtest_now(&format!("keydown ctrl; move {at}")).await;
+            let shown = popover_saying(&app, &format!("corner {id}"), &address(id)).await;
             let Some((shown, (r, pane))) = shown.and_then(|p| placed(&p).map(|at| (p, at))) else {
                 println!("bench nav link corner {id} none");
                 continue;
@@ -292,8 +330,8 @@ fn links(app: &Rc<App>, rel: &str) {
         let middle = fitted.frame_of("middle").map(|r| fitted.to_widget(&r));
         let at = middle.and_then(|r| on_screen(&app, &canvas, r.x + r.w / 2.0, r.y + r.h / 2.0));
         let at = at.unwrap_or_default();
-        super::git::xtest(&format!("keydown ctrl; move {at}; sleep 0.6")).await;
-        let shown = popover().and_downcast::<gtk::Popover>();
+        super::git::xtest_now(&format!("keydown ctrl; move {at}")).await;
+        let shown = popover_saying(&app, "the tall page's popover", "Tall").await;
         match shown.and_then(|p| placed(&p).map(|at| (p, at))) {
             Some((shown, (r, pane))) => {
                 let picture = find_widget(shown.upcast_ref(), &|w| w.is::<gtk::Picture>())
