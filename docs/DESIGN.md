@@ -1755,7 +1755,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A file open in another pane already comes to the front there, and one open behind the graph moves over to it.
   The keyboard stays on the graph as it stays in the Files tree, and a double-click keeps the tab and gives it the keyboard, as a double-click on a tree row does.
   A click on a tag adds the files carrying it.
-  Reset Graph takes it back to the whole vault as Show Graph opens it, and Show Graph over a file a local graph does not hold starts it again around that file, while the whole vault's graph is only brought to the front (user decision 2026-11-24).
+  Reset Graph takes it back to the whole vault as Show Graph opens it, and Show Graph over a file a local graph does not hold starts it again around that file, while the whole vault's graph is only brought to the front.
 - A link to a note that is not written yet is a ghost, a ring with its name dimmed, and a click on it offers New File with the path typed in, as following the link does (user decision 2026-11-21).
   Tags, images and orphans stay out until Show Tags, Show Images or Show Orphans puts them in, an orphan being a file linked neither way and offered under Show Whole Vault alone.
   A code file's links are the files it imports, and an import that names no file in the vault is left out.
