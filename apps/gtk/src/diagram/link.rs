@@ -252,6 +252,15 @@ impl DiagramTab {
         let (_, height, _, _) = popover.measure(gtk::Orientation::Vertical, width);
         popover.set_position(side(at.1, height));
         slide(&popover, host.width(), at.0);
+        // Laid out with the popover in it on the next frame, the window asks GDK for a motion
+        // where the pointer is, which comes with the next events flushed. Under X11 that motion
+        // is the window's even with the pointer over the popover by then, and GTK hands the
+        // pointer to the page under it, the popover's enter and click with it (ISSUES.md).
+        // Flushed once that frame is done, it lands on the page the pointer is still on.
+        popover.add_tick_callback(|_, clock| {
+            clock.request_phase(gdk::FrameClockPhase::FLUSH_EVENTS);
+            glib::ControlFlow::Break
+        });
         Some(popover)
     }
 }

@@ -126,11 +126,11 @@ fn inside(r: &gdk::Rectangle, pane: &gtk::Widget) -> bool {
 /// to the last page through Go to Diagram Page…, printing the readout, the page and the selection.
 /// `links:<rel>` writes two pages whose shapes link to each other and to the web, and with real
 /// input shows a link with Ctrl held, selects a linked shape by Ctrl+click while editing, follows
-/// a link by a click on its popover and one by a click on a presented page, a plain click while
-/// editing selecting. Then, with the Outline pane up, it holds Ctrl over a link near each corner
-/// of the pane and over one to a page taller than the pane, printing where the pointer and the
-/// popover are in the pane, which side of the link it is on and whether it is inside the pane,
-/// and the tall page's thumbnail's size.
+/// a link by a click on its popover, shown again after the last one went, and one by a click on a
+/// presented page, a plain click while editing selecting. Then, with the Outline pane up, it holds
+/// Ctrl over a link near each corner of the pane and over one to a page taller than the pane,
+/// printing where the pointer and the popover are in the pane, which side of the link it is on
+/// and whether it is inside the pane, and the tall page's thumbnail's size.
 pub(super) fn bench_diagram_nav(app: &Rc<App>, arg: &str) {
     match arg.split_once(':') {
         Some(("spring", rel)) => spring(app, rel),
@@ -243,6 +243,17 @@ fn links(app: &Rc<App>, rel: &str) {
             );
         };
         say("ctrl-click");
+        // Off the link without Ctrl until its popover goes, so the one Ctrl brings back below is
+        // a fresh one, as a hand that wandered off and came back meets it.
+        let off = above("go", -120.0).unwrap_or_default();
+        super::git::xtest_now(&format!("move {off}")).await;
+        let gone = || {
+            find_widget(app.window.upcast_ref(), &|w| {
+                w.is::<gtk::Popover>() && w.is_visible()
+            })
+            .is_none()
+        };
+        until("nav", "the page link's popover gone", 5_000, gone).await;
         // Ctrl over the shape and let go, then over to the middle of its popover, a surface of its
         // own: where its parent's puts it, its shadow and the content in it.
         let near = above("go", 1.0).unwrap_or_default();
