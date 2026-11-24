@@ -31,7 +31,7 @@
   <screenshots>
     <screenshot type="default">
       <image>https://raw.githubusercontent.com/stroblme/accent/e3d37e85e538a9453e290c09683194a415534fb2/data/screenshots/files.png</image>
-      <caption>A note with an inline suggestion beside the vault's files</caption>
+      <caption>A note with an inline suggestion between the vault's files and the graph of its links</caption>
     </screenshot>
     <screenshot>
       <image>https://raw.githubusercontent.com/stroblme/accent/e3d37e85e538a9453e290c09683194a415534fb2/data/screenshots/git.png</image>

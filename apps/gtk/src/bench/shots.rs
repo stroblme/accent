@@ -96,7 +96,8 @@ async fn prepare(app: &Rc<App>) {
     );
 }
 
-/// Scene 1: the Files tree and a note with ghost text.
+/// Scene 1: the Files tree, a note with ghost text and, in the right third, the graph of the
+/// files it links to or from, the note lit.
 async fn scene_files(app: &Rc<App>, shot: &Shot) {
     let Some(tree) = app.tree.get() else {
         return println!("bench shot no_tree");
@@ -114,6 +115,21 @@ async fn scene_files(app: &Rc<App>, shot: &Shot) {
     }
     let note = "Submissions/grant-2026/Benchmark Backend.md";
     open_all(app, &[note]).await;
+    // Show Graph opens on the whole vault, the note lit as the file in front, and the graph goes
+    // to the note's right, a third of the documents' width. Show Whole Vault unchecked there
+    // leaves the note and the files it links to or from, which read at that width.
+    let _ = WidgetExt::activate_action(&app.window, "win.graph", None);
+    let Some(graph) = app.graphs().into_iter().next() else {
+        return println!("bench shot no_graph");
+    };
+    app.split_page(&pane_of(app, note), Side::Right, &graph.page);
+    glib::timeout_future(Duration::from_millis(300)).await;
+    divide(&pane_of(app, note), 2.0 / 3.0);
+    let Some(right) = app.pane_of(&graph.page) else {
+        return println!("bench shot no_graph_pane");
+    };
+    focus(app, &right).await;
+    let _ = WidgetExt::activate_action(&app.window, "win.graph-all", None);
     // The open note's row lit and on screen, as Reveal in Sidebar leaves it: the tree's selection
     // follows the tab but never scrolls to it.
     until("row", 10_000, || {
@@ -162,6 +178,13 @@ async fn scene_files(app: &Rc<App>, shot: &Shot) {
         }
         until("ghost", 10_000, || {
             tab.ghost_view().and_then(|v| v.ghost()).is_some()
+        })
+        .await;
+        // The graph round the note, its layout settled, the note's node on the canvas and the
+        // last picture asked, in this half's colours, shown.
+        until("graph", 120_000, || {
+            let (asked, shown) = graph.serials();
+            !graph.all() && graph.laid_out() && graph.front_shown() && asked == shown
         })
         .await;
         app.show_chrome();

@@ -42,7 +42,7 @@ See the [device support](#device-support) for compatibility.
 
 ## Screenshots
 
-![A note with an inline suggestion beside the vault's files](docs/screenshot-1.png)
+![A note with an inline suggestion between the vault's files and the graph of its links](docs/screenshot-1.png)
 
 ![The Git pane beside a file's changes since it was staged](docs/screenshot-2.png)
 
