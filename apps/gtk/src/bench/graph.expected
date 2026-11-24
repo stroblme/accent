@@ -8,6 +8,7 @@ bench graph click c.md opened=c.md pane=2 preview=true keyboard=graph tabs=1 inf
 bench graph grow c.md roots=["a.md", "b.md", "c.md"] nodes=["a.md", "b.md", "c.md", "e.md", "f.md", "gone.md?"] front=c.md
 bench graph click b.md opened=b.md pane=2 preview=true keyboard=graph tabs=1 info=b.md
 bench graph grow b.md roots=["a.md", "b.md", "c.md"] nodes=["a.md", "b.md", "c.md", "e.md", "f.md", "gone.md?"] front=b.md
+bench graph again b.md was=a.md front=b.md info=b.md
 bench graph update c.md nodes+=["d.md"] kept=true
 bench graph rename b.md bee.md index_kept=true roots=["a.md", "bee.md", "c.md"] nodes+=["b.md?", "bee.md"]
 bench graph tags nodes+=["#topic"]

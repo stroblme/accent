@@ -11,7 +11,8 @@ use crate::graph::GraphTab;
 /// which splits the window, and narrows the canvas from under it ([`split`]), then presses two
 /// nodes in turn, each opening beside the graph as the other pane's preview, and prints where each
 /// opened, where the keyboard is and the file Info speaks for (`click`), and the roots and nodes
-/// the graph grew to (`grow`).
+/// the graph grew to (`grow`). With `rel` used since, a press on `b.md`, in front of the other pane
+/// already, prints the file in front before and after and the file Info speaks for (`again`).
 /// It writes a link to `d.md` into `c.md` and prints the node that adds and whether every node kept
 /// its index (`update`), then renames `b.md` and prints whether its node kept its index and the
 /// ghost the link to its old name leaves (`rename`). Through the menu's commands it shows tags and
@@ -131,6 +132,22 @@ async fn check(app: &Rc<App>, rel: &str) {
             graph.front().unwrap_or_default()
         );
     }
+    // `a.md`, behind the graph in its pane, used since `b.md` came to the front of the other
+    // pane: a press on `b.md`'s node makes it the file in front again, which picks nothing.
+    let home = app.pane_of(&graph.page);
+    let behind = app.tab_for(rel).map(|tab| tab.page.clone());
+    if let (Some(home), Some(behind)) = (home, behind) {
+        home.tabs.set_selected_page(&behind);
+        home.tabs.set_selected_page(&graph.page);
+    }
+    let was = graph.front().unwrap_or_default();
+    graph.press("b.md", false);
+    glib::timeout_future(Duration::from_millis(200)).await;
+    println!(
+        "bench graph again b.md was={was} front={} info={}",
+        graph.front().unwrap_or_default(),
+        spoken_for(app).0
+    );
     let root = app.root();
     let before: Vec<(String, Option<usize>)> = (graph.nodes().into_iter())
         .map(|key| (key.clone(), graph.index_of(&key)))

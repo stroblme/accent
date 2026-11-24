@@ -1055,7 +1055,14 @@ impl App {
         match (open, other) {
             (Some(page), _) if self.pane_of(&page).is_some_and(|p| !Rc::ptr_eq(&p, &home)) => {
                 if let Some(pane) = self.pane_of(&page) {
+                    let already = pane.tabs.selected_page().as_ref() == Some(&page);
                     pane.tabs.set_selected_page(&page);
+                    // In front there already, picking it notifies nothing, so it is made the
+                    // file in front here, as a pick makes it, and the side panes follow it.
+                    if already {
+                        pane.touch(&page);
+                        self.sync_active();
+                    }
                 }
             }
             // Pinned where it is, it is shown there.
