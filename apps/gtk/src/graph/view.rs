@@ -1537,6 +1537,21 @@ impl GraphView {
         }
     }
 
+    /// The pointer off every node.
+    pub fn bench_unhover(&self) {
+        self.hover(None);
+    }
+
+    /// Node `k`, wrapping round, made the file in front.
+    pub fn bench_front(&self, k: usize) {
+        let key = {
+            let graph = self.graph();
+            let n = graph.nodes.len().max(1);
+            graph.nodes.get(k % n).map(|node| node.key.clone())
+        };
+        self.set_front(key);
+    }
+
     /// The serial of the last view asked of the worker, and of the picture shown.
     pub fn serials(&self) -> (u64, u64) {
         let imp = self.imp();

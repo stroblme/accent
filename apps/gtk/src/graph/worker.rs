@@ -4,7 +4,9 @@
 //! and hands each state to the drawing thread, the newest replacing one not drawn yet. The
 //! drawing thread draws the links and nodes ([`raster`]) for the newest places and the newest
 //! view the canvas asked for, once the canvas has taken the last frame, and leaves the places
-//! and that picture in a slot. A change shows at once, its new nodes where they were placed,
+//! and that picture in a slot. A picture of the places, links and camera the last one was drawn
+//! for, which lights, rings or accents other nodes, draws over the last one's links
+//! ([`raster::Links`]) rather than every link again. A change shows at once, its new nodes where they were placed,
 //! before the layout has taken a step, and a layout started from nothing shows its nodes before
 //! its links (user decision 2026-11-21). So a long draw neither slows the layout down nor holds
 //! the main loop, and a slow frame drops places rather than falling behind. With animations off
@@ -373,10 +375,33 @@ fn unmask(force: &mut Force, pending: &mut Option<Vec<bool>>) -> bool {
     }
 }
 
+/// What the last picture's links were drawn for: its places and links, the camera, the canvas
+/// and whether they were left out. A picture of the same draws over their coverage.
+struct Drawn {
+    at: Arc<Vec<[f32; 2]>>,
+    shape: Arc<Shape>,
+    camera: Camera,
+    size: [f64; 2],
+    scale: f64,
+    bare: bool,
+}
+
+impl Drawn {
+    fn same(&self, other: &Drawn) -> bool {
+        Arc::ptr_eq(&self.at, &other.at)
+            && Arc::ptr_eq(&self.shape, &other.shape)
+            && (self.camera, self.size, self.scale, self.bare)
+                == (other.camera, other.size, other.scale, other.bare)
+    }
+}
+
 /// The drawing thread, until the layout's thread has ended.
 fn draw(shared: &Shared) {
     // The camera last drawn at, which a fitting view keeps while a drag holds a node.
     let mut fitted = Camera::default();
+    // The last picture's links, and what they were drawn for.
+    let mut links = raster::Links::default();
+    let mut drawn = None::<Drawn>;
     loop {
         let (places, view, bare) = {
             let mut draw = lock(&shared.draw);
@@ -423,7 +448,18 @@ fn draw(shared: &Shared) {
                 links: if bare { &[] } else { &places.shape.links },
                 shown: &places.shape.shown,
             };
-            picture(&scene, &view, camera, serial)
+            let now = Drawn {
+                at: places.at.clone(),
+                shape: places.shape.clone(),
+                camera,
+                size: view.size,
+                scale: view.scale,
+                bare,
+            };
+            let still = drawn.as_ref().is_some_and(|d| d.same(&now));
+            drawn = Some(now);
+            let px = raster::draw(&scene, &view, camera, &mut links, [still, places.settled]);
+            picture(px, &view, camera, serial)
         });
         #[cfg(feature = "bench")]
         let picture = picture.map(|p| Picture {
@@ -443,9 +479,8 @@ fn draw(shared: &Shared) {
     }
 }
 
-/// `scene` drawn as `view` asks at `camera`; none on a canvas of no pixels.
-fn picture(scene: &Scene, view: &View, camera: Camera, serial: u64) -> Option<Picture> {
-    let px = raster::draw(scene, view, camera);
+/// `px`, drawn as `view` asks at `camera`, as a picture; none on a canvas of no pixels.
+fn picture(px: raster::Pixels, view: &View, camera: Camera, serial: u64) -> Option<Picture> {
     (px.width > 0 && px.height > 0).then(|| Picture {
         texture: gdk::MemoryTexture::new(
             px.width as i32,

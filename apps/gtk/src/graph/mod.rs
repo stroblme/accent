@@ -497,6 +497,21 @@ impl GraphTab {
         self.view.serials()
     }
 
+    /// The pointer off every node.
+    pub fn bench_unhover(&self) {
+        self.view.bench_unhover();
+    }
+
+    /// Node `k`, wrapping round, made the file in front.
+    pub fn bench_front(&self, k: usize) {
+        self.view.bench_front(k);
+    }
+
+    /// The file in front put back.
+    pub fn bench_set_front(&self, front: Option<String>) {
+        self.view.set_front(front);
+    }
+
     /// How long each frame drawn since the last call took, in ms.
     pub fn take_paints(&self) -> Vec<f64> {
         self.view.take_paints()

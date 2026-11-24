@@ -569,7 +569,7 @@ fn digest(part: &accent_core::graph::Part) -> String {
 /// by the neighbour that adds the most (as a click grows it, without the file's open), the whole
 /// vault, then its tags shown and hidden again (300 tag nodes and their edges added, then removed),
 /// then the local graph and the whole vault again with animations off, [`input`] while the local
-/// graph and the whole vault build, and [`hover`] over each once settled. Run it again with
+/// graph and the whole vault build, and [`reactions`] over each once settled. Run it again with
 /// `GDK_SCALE=2` for a 2× display, which every line names as `scale`.
 ///
 /// First it prints what the vault's three answers cost on their worker and a digest of each, to
@@ -593,10 +593,13 @@ fn digest(part: &accent_core::graph::Part) -> String {
 /// opened note's highlighting (NOTEPAD, PERF). Grown (926, 3457) it shows in 72 ms. The whole
 /// vault (7711, 48889) shows in 283 ms, its answer landing on the main loop in 1.3 ms with a worst
 /// gap of 29 ms, and its tags (8017, 81193) shown or hidden again land in 4 ms. With animations
-/// off round the note it shows in 45 ms, and the whole vault in 226 ms. The pointer over a node
-/// of the settled graph has its picture on screen in 36 ms round the note and in 133 ms for the
-/// whole vault. At 2× (`GDK_SCALE=2`, three runs) a draw takes three times as long (51 ms round
-/// the note, 278 for the whole vault) and a window frame up to 75–98 ms. RSS stays at 270–310 MB.
+/// off round the note it shows in 45 ms, and the whole vault in 226 ms. At 2× (`GDK_SCALE=2`,
+/// three runs) a draw takes three times as long (51 ms round the note, 278 for the whole vault)
+/// and a window frame up to 75–98 ms. RSS stays at 270–310 MB. Since a still layout's pictures
+/// share their links (2026-11-24, one run each, load 2–3), the pointer over a node of the settled
+/// graph has its picture on screen in 27 ms round the note and in 37 ms for the whole vault
+/// (35 and 129 before), drawn in 8 and 15 ms, and at 2× in 35 and 43 ms (43 and 255 before). The
+/// keyboard's ring and another file in front show in 23–33 ms at 1×, in 32–46 ms at 2×.
 /// Drawn with cairo under Xvfb, so a frame costs more than a GL renderer's.
 async fn time(app: &Rc<App>) {
     let Some(vault) = app.vault().cloned() else {
@@ -744,10 +747,10 @@ async fn time(app: &Rc<App>) {
         command(app, "win.graph-reset")
     })
     .await;
-    hover(app, "local").await;
+    reactions(app, "local").await;
     let still = budget(Some(500.0), None, 50.0, Frames::AtMost(2));
     measure(app, "all_still", still, || command(app, "win.graph-all")).await;
-    hover(app, "all").await;
+    reactions(app, "all").await;
 }
 
 /// `concurrent`: what the Search pane, the file tree and the backlinks of `best` wait while the
@@ -867,11 +870,20 @@ async fn input(app: &Rc<App>, phase: &str, act: impl FnOnce()) {
     );
 }
 
-/// `hover`: the pointer over one node of the settled graph after another, 20 in all, each once
-/// the last one's picture was on screen. Prints how long until the worker's picture of each was
-/// (`drawn_ms`), and the main loop's worst gap meanwhile; a node the pointer finds lit already
-/// asks for no picture and is left out.
-async fn hover(app: &Rc<App>, case: &str) {
+/// `react`: `act(k)` on the settled graph, `count` times, each once the last one's picture was on
+/// screen: `hover` the pointer over one node after another, `keys` an arrow moving the keyboard's
+/// ring with no node under the pointer, so the file in front, the best-linked note, is lit, and
+/// `front` another node made the file in front. Prints how long until the worker's picture of
+/// each was on screen (`drawn_ms`), how long the worker took to draw them (`draw_ms`), and the
+/// main loop's worst gap meanwhile; an act that asks for no new picture, a node the pointer finds
+/// lit already say, is left out.
+async fn react(
+    app: &Rc<App>,
+    case: &str,
+    what: &str,
+    count: usize,
+    act: impl Fn(&GraphTab, usize),
+) {
     let Some(graph) = app.graphs().into_iter().next() else {
         return;
     };
@@ -887,12 +899,13 @@ async fn hover(app: &Rc<App>, case: &str) {
                 .push((Instant::now(), graph.serials().1))
         }
     });
+    graph.take_draws();
     let beat = super::native::Beat::start();
     let mut drawn = Vec::new();
-    for k in 0..20 {
+    for k in 0..count {
         let before = graph.serials().0;
         let t = Instant::now();
-        graph.bench_input(3 * k + 2);
+        act(&graph, k);
         // The view is asked of the worker as the next frame is drawn.
         let mut asked = None;
         while asked.is_none() && t.elapsed() < Duration::from_millis(500) {
@@ -902,7 +915,7 @@ async fn hover(app: &Rc<App>, case: &str) {
         let Some(asked) = asked else {
             continue;
         };
-        let shown = until("graph", "hover drawn", 5_000, || {
+        let shown = until("graph", "picture drawn", 5_000, || {
             (frames.borrow().iter())
                 .find(|f| f.0 > t && f.1 >= asked)
                 .map(|f| f.0)
@@ -915,12 +928,45 @@ async fn hover(app: &Rc<App>, case: &str) {
     let (worst, _) = beat.stop();
     clock.disconnect(hook);
     println!(
-        "bench graph hover {case} scale={} hovers={} drawn_ms={} worst_ms={worst:.0} nodes={}",
+        "bench graph {what} {case} scale={} inputs={} drawn_ms={} draw_ms={} worst_ms={worst:.0} \
+         nodes={}",
         app.window.scale_factor(),
         drawn.len(),
         spread(drawn.clone()),
+        spread(graph.take_draws()),
         graph.node_count()
     );
+}
+
+/// [`react`]'s three cases over the settled graph: the pointer, the keyboard's ring, and the file
+/// in front, put back after.
+async fn reactions(app: &Rc<App>, case: &str) {
+    react(app, case, "hover", 20, |graph, k| {
+        graph.bench_input(3 * k + 2)
+    })
+    .await;
+    let Some(graph) = app.graphs().into_iter().next() else {
+        return;
+    };
+    // The pointer gone, the file in front is lit once the hovered node's linger is over.
+    graph.bench_unhover();
+    glib::timeout_future(Duration::from_millis(400)).await;
+    let arrows = [
+        gdk::Key::Right,
+        gdk::Key::Down,
+        gdk::Key::Left,
+        gdk::Key::Up,
+    ];
+    react(app, case, "keys", 12, |graph, k| {
+        graph.press_key(arrows[k % 4])
+    })
+    .await;
+    let front = graph.front();
+    react(app, case, "front", 6, |graph, k| {
+        graph.bench_front(7 * k + 1)
+    })
+    .await;
+    graph.bench_set_front(front);
 }
 
 fn command(app: &App, action: &str) {
