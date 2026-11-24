@@ -1746,15 +1746,16 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 
 - **The graph is a tab of its own** (user decision 2026-11-21), one a window, titled Graph and led by `links-graph-symbolic`, on a canvas of ours drawn with GSK rather than the diagram's.
   Show Graph opens it right of the tab in front, in that pane, as Toggle Preview opens a preview, and from the graph it goes back to the file in front.
-- **It starts local**, with the file in front and every file that file links to or is linked from, one node a file (user decision 2026-11-21).
+- **It opens on the whole vault**, one node a file, fitted to the canvas and with the file in front in the accent, whatever the last graph showed (user decision 2026-11-24).
+  Unchecking Show Whole Vault makes the graph local, the file in front at that moment and every file that file links to or is linked from (user decision 2026-11-21).
   The file in front is the active pane's tab, or with the graph in front the most recently used tab of the window that is a vault file, a preview tab's note and a terminal editor's file among them.
-  Without one it says so on a status page whose one button is Show Whole Vault.
-- **A click on a node opens its file beside the graph and adds that file's neighbours**, so the graph grows as it is read (user decision 2026-11-21).
+  Without one the whole vault still shows, and a local graph says so on a status page whose one button is Show Whole Vault.
+- **A click on a node opens its file beside the graph, and in a local graph adds that file's neighbours**, so the graph grows as it is read (user decision 2026-11-21).
   The file opens as the preview of the most recently used other pane, so clicking down the graph leaves one tab there, and in a window of one pane it splits a pane off to the graph's right.
   A file open in another pane already comes to the front there, and one open behind the graph moves over to it.
   The keyboard stays on the graph as it stays in the Files tree, and a double-click keeps the tab and gives it the keyboard, as a double-click on a tree row does.
   A click on a tag adds the files carrying it.
-  Reset Graph takes it back to the file in front, and Show Graph over a file the graph does not hold starts it again around that file.
+  Reset Graph takes it back to the whole vault as Show Graph opens it, and Show Graph over a file a local graph does not hold starts it again around that file, while the whole vault's graph is only brought to the front (user decision 2026-11-24).
 - A link to a note that is not written yet is a ghost, a ring with its name dimmed, and a click on it offers New File with the path typed in, as following the link does (user decision 2026-11-21).
   Tags, images and orphans stay out until Show Tags, Show Images or Show Orphans puts them in, an orphan being a file linked neither way and offered under Show Whole Vault alone.
   A code file's links are the files it imports, and an import that names no file in the vault is left out.
@@ -1793,6 +1794,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - Its menu, a right-click anywhere on the canvas or the button in its top right corner, holds Show Whole Vault, Show Unresolved Links, Show Tags, Show Images, Show Orphans and Show Arrows as checks, then Reset Graph, each a palette command too (Keyboard, Graph).
   The button is a disc as opaque as the ring's (PDF), and its popover holds Spread above Reset Graph (user decision 2026-11-22).
   What it shows, its spread and its arrows are kept in the vault's session with the files a click grew it around, and a restored graph comes back around those once the session's tabs are back, or around the file in front if it was around none (user decision 2026-11-23).
+  Only a restored graph comes back local, as a graph that Show Graph opens takes all but Show Whole Vault from the session.
 - Like a shell or a comparison it is no file, so it stays in its window and is no recent file.
   While it is in front Info and Outline speak for the file in front as if its tab were, and an Outline row brings that tab to the front to show its place (user decision 2026-11-23).
 - The status bar names it Graph and counts it, "42 files · 57 links".

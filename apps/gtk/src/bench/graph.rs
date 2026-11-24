@@ -4,12 +4,13 @@
 use super::*;
 use crate::graph::GraphTab;
 
-/// `ACCENT_BENCH_GRAPH=check:<rel>` opens `rel`, then Show Graph, and prints the nodes, a ghost's
-/// key ending in `?`, and the links once laid out (`open`), and with the graph in front of `rel`
-/// in its one pane the files Info and Outline speak for (`side`) and the tab an Outline row brings
-/// to the front (`side jump`). It clicks `b.md` with the pointer,
-/// which splits the window, and narrows the canvas from under it ([`split`]), then presses two
-/// nodes in turn, each opening beside the graph as the other pane's preview, and prints where each
+/// `ACCENT_BENCH_GRAPH=check:<rel>` opens `rel`, then Show Graph, and prints whether it shows the
+/// whole vault, the zoom, the nodes, a ghost's key ending in `?`, and the links once laid out
+/// (`open`), and with Show Whole Vault unchecked the nodes and links round `rel` (`local`), and
+/// with the graph in front of `rel` in its one pane the files Info and Outline speak for (`side`)
+/// and the tab an Outline row brings to the front (`side jump`). It clicks `b.md` with the
+/// pointer, which splits the window, and narrows the canvas from under it ([`split`]), then
+/// presses two nodes in turn,each opening beside the graph as the other pane's preview, and prints where each
 /// opened, where the keyboard is and the file Info speaks for (`click`), and the roots and nodes
 /// the graph grew to (`grow`). With `rel` used since, a press on `b.md`, in front of the other pane
 /// already, prints the file in front before and after and the file Info speaks for (`again`).
@@ -20,9 +21,10 @@ use crate::graph::GraphTab;
 /// and prints how many questions went to the vault and whether the graph ended as it began
 /// (`toggles`), then Show Arrows, printing its check, the questions it asked and whether its
 /// picture holds more than the one before (`show_arrows`); a press on the ghost prints the name New File offers (`ghost`); it shows the whole
-/// vault without its orphans and then with them (`all`, `orphans`), and prints Reset Graph's roots
-/// (`reset`). Behind another tab of its pane it has `e.md` link its root and prints how many
-/// questions went while it was hidden and once it was shown again, and the node that added
+/// vault without its orphans and then with them (`all`, `orphans`), and prints what Reset Graph
+/// shows (`reset`) and the roots once Show Whole Vault is unchecked again (`unchecked`). Behind
+/// another tab of its pane it has `e.md` link its root and prints how many questions went while
+/// it was hidden and once it was shown again, and the node that added
 /// (`hidden`). It types `bee` over the canvas with real keys (XTEST), the first of which opens the
 /// pane's find bar, and prints what the bar's query holds, the nodes it leaves shown, the readout,
 /// whether `c.md`, hidden, kept its place and the zoom (`find`); presses Enter in the bar and
@@ -30,7 +32,8 @@ use crate::graph::GraphTab;
 /// Found Files and prints the file opened beside the graph too (`find opens`), and once the bar
 /// is closed where the keyboard is, the nodes shown and the zoom (`find closed`). It types `c` and
 /// Enter at once and prints the node the keyboard went to (`find enter`), shows Reset Graph under
-/// the query and prints its roots, the nodes shown and the readout (`find reset`), and prints the
+/// the query, then unchecks Show Whole Vault, and prints the roots, the nodes shown and the readout
+/// after each (`find reset`, `find unchecked`), and prints the
 /// nodes a query nothing answers shows and what the readout says of one that cannot be read
 /// (`find none`); it
 /// presses the four arrows and prints whether the keyboard moved (`arrows`), then Enter on `a.md`
@@ -41,8 +44,9 @@ use crate::graph::GraphTab;
 /// the front of its pane the files Info and Outline speak for (`side`); opens `lone.md`, which it does not hold, and with
 /// animations off shows the graph again, printing what it started again around and whether it
 /// showed no places between where the nodes were placed and the settled layout (`still`); then
-/// closes it and prints whether the layout's threads ended with it (`closed`). `drill_graph` writes
-/// the notes into a scratch vault. `time` is described at [`time`].
+/// closes it and prints whether the layout's threads ended with it (`closed`), and shows it again,
+/// printing whether it opened on the whole vault, the file in front and the zoom (`reopened`).
+/// `drill_graph` writes the notes into a scratch vault. `time` is described at [`time`].
 pub(super) fn bench_graph(app: &Rc<App>, arg: &str) {
     let app = app.clone();
     let arg = arg.to_string();
@@ -71,8 +75,19 @@ async fn check(app: &Rc<App>, rel: &str) {
         return;
     };
     println!(
-        "bench graph open front={} nodes={:?} links={}",
+        "bench graph open front={} all={} zoom={} nodes={:?} links={}",
         graph.front().unwrap_or_default(),
+        graph.all(),
+        graph.zoom_label(),
+        graph.nodes(),
+        graph.links()
+    );
+    // Show Whole Vault unchecked: the graph round `a.md`, which the clicks below grow.
+    menu(app, &graph, "win.graph-all").await;
+    until("graph", "local", 30_000, || graph.laid_out()).await;
+    println!(
+        "bench graph local all={} nodes={:?} links={}",
+        graph.all(),
         graph.nodes(),
         graph.links()
     );
@@ -242,7 +257,14 @@ async fn check(app: &Rc<App>, rel: &str) {
     println!("bench graph orphans nodes+={added:?}");
     menu(app, &graph, "win.graph-reset").await;
     println!(
-        "bench graph reset all={} roots={:?} nodes={:?}",
+        "bench graph reset all={} nodes={:?}",
+        graph.saved().all,
+        graph.nodes()
+    );
+    // Unchecked, the graph is round the file in front now, not the roots it had grown to.
+    menu(app, &graph, "win.graph-all").await;
+    println!(
+        "bench graph unchecked all={} roots={:?} nodes={:?}",
         graph.saved().all,
         graph.roots(),
         graph.nodes()
@@ -362,20 +384,23 @@ async fn check(app: &Rc<App>, rel: &str) {
         pane.find.query_box().text(),
         graph.current().unwrap_or_default()
     );
-    // Reset Graph under the query lays the graph out afresh round the file in front, hiding what
-    // the query does not answer once the layout has settled round every node, and the query is
-    // asked again of the new nodes.
-    menu(app, &graph, "win.graph-reset").await;
-    until("graph", "reset under a query", 30_000, || {
-        graph.find_landed() && graph.laid_out()
-    })
-    .await;
-    println!(
-        "bench graph find reset roots={:?} shown={:?} readout={:?}",
-        graph.roots(),
-        graph.shown(),
-        pane.find.readout().0
-    );
+    // Reset Graph under the query lays the whole vault out afresh, hiding what the query does
+    // not answer once the layout has settled round every node, and the query is asked again of
+    // the new nodes; unchecked again, so round the file in front.
+    for (action, what) in [("win.graph-reset", "reset"), ("win.graph-all", "unchecked")] {
+        menu(app, &graph, action).await;
+        until("graph", "fresh under a query", 30_000, || {
+            graph.find_landed() && graph.laid_out()
+        })
+        .await;
+        println!(
+            "bench graph find {what} all={} roots={:?} shown={:?} readout={:?}",
+            graph.all(),
+            graph.roots(),
+            graph.shown(),
+            pane.find.readout().0
+        );
+    }
     // A query nothing answers empties the canvas, and one that cannot be read says so, marked,
     // leaving the graph as the last one left it.
     pane.find.query_box().set_text("cx");
@@ -589,6 +614,17 @@ async fn restored(app: &Rc<App>) {
     .await
     .is_some();
     println!("bench graph closed worker_ended={ended}");
+    // Shown again, it opens on the whole vault, though the session kept it local.
+    let _ = WidgetExt::activate_action(&app.window, "win.graph", None);
+    let Some(graph) = laid_out(app).await else {
+        return;
+    };
+    println!(
+        "bench graph reopened all={} front={} zoom={}",
+        graph.all(),
+        graph.front().unwrap_or_default(),
+        graph.zoom_label()
+    );
 }
 
 /// The window's graph once it shows a laid-out answer.
@@ -643,9 +679,11 @@ fn digest(part: &accent_core::graph::Part) -> String {
     format!("{:016x}", hasher.finish())
 }
 
-/// `ACCENT_BENCH_GRAPH=time`, on the generated vault: the graph round its best-linked note, grown
-/// by the neighbour that adds the most (as a click grows it, without the file's open), the whole
-/// vault, then its tags shown and hidden again (300 tag nodes and their edges added, then removed),
+/// `ACCENT_BENCH_GRAPH=time`, on the generated vault: Show Graph over its best-linked note, which
+/// opens on the whole vault (`open`), then Show Whole Vault unchecked, the graph round the note
+/// (`local`, the tab open already), grown by the neighbour that adds the most (as a click grows
+/// it, without the file's open), the whole vault again, then its tags shown and hidden again (300
+/// tag nodes and their edges added, then removed),
 /// then the local graph and the whole vault again with animations off, [`input`] while the local
 /// graph and the whole vault build, and [`reactions`] over each once settled. Run it again with
 /// `GDK_SCALE=2` for a 2× display, which every line names as `scale`.
@@ -677,7 +715,10 @@ fn digest(part: &accent_core::graph::Part) -> String {
 /// share their links (2026-11-24, one run each, load 2–3), the pointer over a node of the settled
 /// graph has its picture on screen in 27 ms round the note and in 37 ms for the whole vault
 /// (35 and 129 before), drawn in 8 and 15 ms, and at 2× in 35 and 43 ms (43 and 255 before). The
-/// keyboard's ring and another file in front show in 23–33 ms at 1×, in 32–46 ms at 2×.
+/// keyboard's ring and another file in front show in 23–33 ms at 1×, in 32–46 ms at 2×. Since
+/// Show Graph opens on the whole vault (2026-11-24, three runs each, load 2–3), it shows the vault
+/// 260 ms after the command (query 167), where it showed the note's graph in 84 ms (query 25)
+/// before, and unchecking Show Whole Vault shows the note's graph in 62 ms.
 /// Drawn with cairo under Xvfb, so a frame costs more than a GL renderer's.
 async fn time(app: &Rc<App>) {
     let Some(vault) = app.vault().cloned() else {
@@ -792,26 +833,28 @@ async fn time(app: &Rc<App>) {
         worst_ms,
         frames,
     };
-    let local = budget(Some(100.0), Some(4.0), 16.0, Frames::AtLeast(30));
-    measure(app, "local", local, || {
+    let all = || budget(Some(500.0), Some(16.0), 50.0, Frames::Any);
+    measure(app, "open", all(), || {
         let _ = WidgetExt::activate_action(&app.window, "win.graph", None);
     })
     .await;
     let Some(graph) = app.graphs().into_iter().next() else {
         return;
     };
+    let local = budget(Some(100.0), Some(4.0), 16.0, Frames::AtLeast(30));
+    measure(app, "local", local, || command(app, "win.graph-all")).await;
     let grow = budget(None, Some(4.0), 16.0, Frames::AtLeast(15));
     if let Some(next) = grow_by {
         measure(app, "grow", grow, || app.bench_grow(&graph, &next)).await;
     }
-    input(app, "settling", || command(app, "win.graph-reset")).await;
-    let all = || budget(Some(500.0), Some(16.0), 50.0, Frames::Any);
-    measure(app, "all", all(), || command(app, "win.graph-all")).await;
-    input(app, "vault", || {
+    // Round the note afresh: Reset Graph's whole vault, unchecked before it lands.
+    input(app, "settling", || {
         command(app, "win.graph-reset");
         command(app, "win.graph-all");
     })
     .await;
+    measure(app, "all", all(), || command(app, "win.graph-all")).await;
+    input(app, "vault", || command(app, "win.graph-reset")).await;
     measure(app, "all_tags", all(), || command(app, "win.graph-tags")).await;
     measure(app, "all_untagged", all(), || {
         command(app, "win.graph-tags")
@@ -821,10 +864,7 @@ async fn time(app: &Rc<App>) {
         settings.set_gtk_enable_animations(false);
     }
     let still = budget(Some(100.0), None, 16.0, Frames::AtMost(2));
-    measure(app, "local_still", still, || {
-        command(app, "win.graph-reset")
-    })
-    .await;
+    measure(app, "local_still", still, || command(app, "win.graph-all")).await;
     reactions(app, "local").await;
     let still = budget(Some(500.0), None, 50.0, Frames::AtMost(2));
     measure(app, "all_still", still, || command(app, "win.graph-all")).await;
@@ -1097,9 +1137,9 @@ async fn measure(app: &Rc<App>, case: &str, budget: Budget, act: impl FnOnce()) 
                     if let Some(t) = start.take() {
                         let mut frames = frames.borrow_mut();
                         frames.push(ms_since(t));
-                        if case == "all" && frames.len() <= 3 {
+                        if matches!(case.as_str(), "open" | "all") && frames.len() <= 3 {
                             println!(
-                                "bench graph all frame={} frame_ms={:.0}",
+                                "bench graph {case} frame={} frame_ms={:.0}",
                                 frames.len(),
                                 ms_since(t)
                             );

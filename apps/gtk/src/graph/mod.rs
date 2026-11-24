@@ -1,11 +1,12 @@
-//! The Graph tab (DESIGN.md, Graph): the file in front and the files it links to or is linked
-//! from, on a canvas of our own ([`view`]), a click opening a file beside the graph.
+//! The Graph tab (DESIGN.md, Graph): the whole vault, or with Show Whole Vault unchecked the file
+//! in front and the files it links to or is linked from, on a canvas of our own ([`view`]), a
+//! click opening a file beside the graph.
 //!
-//! The vault answers which files and links to show (`Vault::graph_around`) on a worker, and the
-//! tab diffs each answer against what it shows ([`model`]), so a node that stays keeps its place
-//! and the force layout ([`worker`]) only makes room for what is new. A click grows the graph by
-//! the file clicked: it is one of the roots the vault is asked around from then on. The find
-//! bar's query hides every node it does not answer ([`find`]).
+//! The vault answers which files and links to show (`Vault::graph_all`, `Vault::graph_around`) on
+//! a worker, and the tab diffs each answer against what it shows ([`model`]), so a node that stays
+//! keeps its place and the force layout ([`worker`]) only makes room for what is new. A click grows
+//! a local graph by the file clicked: it is one of the roots the vault is asked around from then
+//! on. The find bar's query hides every node it does not answer ([`find`]).
 //! One graph a window, keyed [`KEY`]: like a preview tab it is no file.
 
 mod camera;
@@ -552,7 +553,8 @@ impl GraphTab {
 impl App {
     /// Show Graph (`Ctrl+Shift+M`): from the graph back to the file in front, as Toggle Preview
     /// goes back to its note; else to the graph, opened right of the tab in front if there is
-    /// none, and started again around the file in front where it does not hold that.
+    /// none, and a local one started again around the file in front where it does not hold that.
+    /// The whole vault's is only shown: one it does not hold is an orphan, or a kind it hides.
     pub(crate) fn show_graph(self: &Rc<Self>) {
         if self.vault().is_none() {
             return self.needs_vault("show the graph");
@@ -569,8 +571,8 @@ impl App {
         let graph = match self.graphs().into_iter().next() {
             Some(graph) => {
                 let front = self.graph_front().map(|(_, key)| key);
-                if let Some(front) = front.filter(|key| graph.started.get() && !graph.holds(key)) {
-                    graph.all.set(false);
+                let local = graph.started.get() && !graph.all.get();
+                if let Some(front) = front.filter(|key| local && !graph.holds(key)) {
                     graph.view.graph_mut().roots = vec![front];
                     self.query_graph(&graph, Ask::Fresh);
                     self.save_session_soon();
@@ -586,7 +588,8 @@ impl App {
     }
 
     /// Open the graph's tab right of the tab in front, in its pane, as Toggle Preview opens a
-    /// preview; a restored one goes where the session put it. It is seeded once on screen.
+    /// preview; a restored one goes where the session put it. It is seeded once on screen, with
+    /// the whole vault, a restored one with what the session kept (user decision 2026-11-24).
     pub(crate) fn open_graph(self: &Rc<Self>, how: Opened) -> Rc<GraphTab> {
         let view = GraphView::new();
         // What the vault's session keeps of the graph, taken before anything saves it again.
@@ -640,7 +643,7 @@ impl App {
             page,
             holder,
             view,
-            all: Cell::new(saved.all),
+            all: Cell::new(how != Opened::Restored || saved.all),
             shown: Cell::new(saved.shown),
             spread,
             asking: RefCell::default(),
@@ -772,9 +775,9 @@ impl App {
         self.query_graph(graph, Ask::Fresh);
     }
 
-    /// The graph's menu commands, over the graph in front: Reset Graph back to the file in
-    /// front, the whole vault's, the toggles of what is shown, and Show Arrows, which asks the
-    /// vault nothing.
+    /// The graph's menu commands, over the graph in front: Reset Graph back to the whole vault,
+    /// as Show Graph opens it, Show Whole Vault, unchecked around the file in front, the toggles
+    /// of what is shown, and Show Arrows, which asks the vault nothing.
     pub(crate) fn graph_action(self: &Rc<Self>, name: &str) {
         let Some(graph) = self.active_doc().and_then(|doc| doc.graph().cloned()) else {
             return;
@@ -788,13 +791,18 @@ impl App {
         let mut shown = graph.shown.get();
         let ask = match name {
             "graph-reset" => {
-                graph.all.set(false);
-                let front = self.graph_front().map(|(_, key)| key);
-                graph.view.graph_mut().roots = front.into_iter().collect();
+                graph.all.set(true);
                 Ask::Fresh
             }
             "graph-all" => {
-                graph.all.set(!graph.all.get());
+                let all = !graph.all.get();
+                graph.all.set(all);
+                // The whole vault's graph grows no roots as the file in front changes, so those
+                // it kept are stale by now.
+                if !all {
+                    let front = self.graph_front().map(|(_, key)| key);
+                    graph.view.graph_mut().roots = front.into_iter().collect();
+                }
                 Ask::Fresh
             }
             "graph-unresolved" => {

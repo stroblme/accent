@@ -1,4 +1,5 @@
-bench graph open front=a.md nodes=["a.md", "b.md", "c.md", "e.md", "gone.md?"] links=5
+bench graph open front=a.md all=true zoom=Fit nodes=["a.md", "b.md", "c.md", "e.md", "f.md", "gone.md?", "main.py", "util.py"] links=7
+bench graph local all=false nodes=["a.md", "b.md", "c.md", "e.md", "gone.md?"] links=5
 bench graph side one_pane info=a.md outline=a.md
 bench graph side jump active=a.md
 bench graph split b.md front=b.md shown=true panes=2
@@ -18,14 +19,16 @@ bench graph show_arrows checked=Some(true) queries=0 heads=true
 bench graph ghost gone.md dialog=Some("gone.md")
 bench graph all orphans=false nodes=["#topic", "a.md", "b.md?", "bee.md", "c.md", "d.md", "e.md", "f.md", "gone.md?", "main.py", "pic.png", "util.py"]
 bench graph orphans nodes+=["lone.md"]
-bench graph reset all=false roots=["bee.md"] nodes=["bee.md", "c.md"]
+bench graph reset all=true nodes=["#topic", "a.md", "b.md?", "bee.md", "c.md", "d.md", "e.md", "f.md", "gone.md?", "lone.md", "main.py", "pic.png", "util.py"]
+bench graph unchecked all=false roots=["bee.md"] nodes=["bee.md", "c.md"]
 bench graph hidden queries=0 shown_again=1 nodes+=["e.md"]
 bench graph find typed="bee" shown=["bee.md", "e.md"] readout="2 matches" kept=true zoom=Fit
 bench graph find step current=bee.md readout="1 of 2" keyboard=bar zoom=100 %
 bench graph find opens current=e.md readout="2 of 2" opened=e.md keyboard=bar
 bench graph find closed keyboard=graph current=e.md shown=["bee.md", "c.md", "e.md"] zoom=Fit
 bench graph find enter typed="c" current=c.md
-bench graph find reset roots=["e.md"] shown=["a.md", "bee.md"] readout="2 matches"
+bench graph find reset all=true roots=["bee.md"] shown=["#topic", "a.md", "bee.md", "c.md", "pic.png"] readout="1 of 5"
+bench graph find unchecked all=false roots=["e.md"] shown=["a.md", "bee.md"] readout="2 matches"
 bench graph find none shown=[] invalid=("Invalid query", true) kept=true
 bench graph arrows moved=true
 bench graph enter a.md moved=true alone=true
@@ -34,3 +37,4 @@ bench graph saved all=false unresolved=true tags=true images=true orphans=true a
 bench graph side panes info=a.md outline=a.md
 bench graph still roots=["lone.md"] nodes=["lone.md"] settled_at_once=true
 bench graph closed worker_ended=true
+bench graph reopened all=true front=lone.md zoom=Fit

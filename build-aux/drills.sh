@@ -933,11 +933,12 @@ drill_dangling() {
 		'bench dangling goto ["alias shortcut.md real/pre.md"]'
 }
 
-# The Graph tab round a note: the notes it links to and is linked from, a ghost for one not
-# written yet, a press opening a note beside the graph as the other pane's preview with the
-# keyboard left on the graph and growing the graph by its links, Info and Outline speaking for the
-# note in front, the tab back with the session, its roots too, and started again round a note it
-# does not hold, settled in one frame with animations off.
+# The Graph tab opened on the whole vault, then unchecked round a note: the notes it links to and
+# is linked from, a ghost for one not written yet, a press opening a note beside the graph as the
+# other pane's preview with the keyboard left on the graph and growing the graph by its links,
+# Info and Outline speaking for the note in front, the tab back with the session, its roots too,
+# started again round a note it does not hold, settled in one frame with animations off, and
+# opened on the whole vault again once closed.
 drill_graph() {
 	printf '# Alpha\n[[b]] [[c]] [[gone]] #topic ![[pic.png]]\n' >"$vault/a.md"
 	echo '[[c]]' >"$vault/b.md"

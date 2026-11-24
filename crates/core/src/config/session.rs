@@ -124,7 +124,8 @@ impl Default for CodePane {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GraphView {
-    /// The whole vault, rather than the file in front and its neighbours.
+    /// The whole vault, rather than the file in front and its neighbours. Only a restored graph
+    /// takes it back: Show Graph opens one on the whole vault.
     pub all: bool,
     pub shown: crate::graph::Shown,
     pub spread: crate::graph::layout::Spread,
