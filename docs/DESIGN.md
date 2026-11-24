@@ -1760,7 +1760,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A code file's links are the files it imports, and an import that names no file in the vault is left out.
 - **A node takes its kind's colour** from the hues a table's columns take (Colour), and the file in front takes the accent itself with a ring round it (user decision 2026-11-21).
   A note is drawn in the foreground, code, a PDF, a diagram, a notebook and an image each in one of the five hues after the accent, and a text file or a tag in the foreground at 60 %.
-  Links are hairlines in the foreground at a fifth of its strength, without arrows.
+  Links are hairlines in the foreground at a fifth of its strength.
+  Show Arrows, off at first, ends each link in a small head at the disc of the file it links to, pointing away from the file that links, sized with the zoom as the discs are, and a tag's link has none (user decision 2026-11-23).
 - The pointer over a node lights it, its links and its neighbours, and dims the rest to 35 % (user decision 2026-11-22).
   The change crossfades over 150 ms, the names with the discs, and the lit node stays lit for 150 ms after the pointer leaves it, so moving from node to node goes straight from one neighbourhood to the next.
   With animations off nothing crossfades, and the lit node still stays lit for those 150 ms.
@@ -1789,10 +1790,11 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Every node the query does not answer is hidden with its links, the file in front too, and the layout settles the rest round one another while the view fits them, so a query nothing answers leaves the canvas empty.
   A hidden node keeps its place, so once the query is cleared or the bar closed the graph comes back round it, and the view from before the query is put back.
   A node the graph gains while the bar holds a query, by a click or a change in the vault, stays hidden until the query has answered for it.
-- Its menu, a right-click anywhere on the canvas or the button in its top right corner, holds Show Whole Vault, Show Unresolved Links, Show Tags, Show Images and Show Orphans as checks, then Reset Graph, each a palette command too (Keyboard, Graph).
+- Its menu, a right-click anywhere on the canvas or the button in its top right corner, holds Show Whole Vault, Show Unresolved Links, Show Tags, Show Images, Show Orphans and Show Arrows as checks, then Reset Graph, each a palette command too (Keyboard, Graph).
   The button is a disc as opaque as the ring's (PDF), and its popover holds Spread above Reset Graph (user decision 2026-11-22).
-  What it shows and its spread are kept in the vault's session, and a restored graph comes back around the file in front once the session's tabs are back.
-- Like a shell or a comparison it is no file, so it has no backlinks, stays in its window and is no recent file.
+  What it shows, its spread and its arrows are kept in the vault's session with the files a click grew it around, and a restored graph comes back around those once the session's tabs are back, or around the file in front if it was around none (user decision 2026-11-23).
+- Like a shell or a comparison it is no file, so it stays in its window and is no recent file.
+  While it is in front Info and Outline speak for the file in front as if its tab were, and an Outline row brings that tab to the front to show its place (user decision 2026-11-23).
 - The status bar names it Graph and counts it, "42 files · 57 links".
 
 ### Comparison
@@ -2440,7 +2442,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 
 ### Graph
 
-- The graph's own Show Whole Vault, Show Unresolved Links, Show Tags, Show Images, Show Orphans and Reset Graph (unbound), beside Show Graph `Ctrl+Shift+M` (Views).
+- The graph's own Show Whole Vault, Show Unresolved Links, Show Tags, Show Images, Show Orphans, Show Arrows and Reset Graph (unbound), beside Show Graph `Ctrl+Shift+M` (Views).
 - Typing over the graph opens its pane's find bar on what is typed, which hides every node its query does not answer (Graph).
   Enter steps through what it found as in every bar, and Escape closes the bar with the keyboard on the node found and the graph whole again.
 - On the canvas the arrows move the keyboard to the nearest linked node that way, or else the nearest node that way, and Enter opens its file beside the graph as a click does.

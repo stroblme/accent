@@ -678,6 +678,8 @@ fn session_roundtrips_as_json() {
         graph: GraphView {
             all: true,
             spread: crate::graph::layout::Spread(2.5),
+            arrows: true,
+            roots: vec!["a.md".to_string(), "#rust".to_string()],
             ..GraphView::default()
         },
     };

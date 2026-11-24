@@ -952,6 +952,23 @@ impl Sidebar {
         self.panes.as_ref().and_then(|panes| (panes.tags_picked)())
     }
 
+    /// The file the Info pane speaks for, empty for none, and the one whose outline the Outline
+    /// pane lists, if it lists one.
+    #[cfg(feature = "bench")]
+    pub fn spoken_for(&self) -> (String, Option<String>) {
+        let outline = self.outline_list.borrow().as_ref().map(|l| l.key.clone());
+        (self.info.shown_for(), outline)
+    }
+
+    /// Activate the Outline pane's row `row`, as a click does.
+    #[cfg(feature = "bench")]
+    pub fn activate_outline(&self, row: u32) {
+        let jump = self.outline_list.borrow().as_ref().map(|list| list.jump());
+        if let Some(jump) = jump {
+            jump(row);
+        }
+    }
+
     /// What the Info pane shows, and the Details rows, as `ACCENT_BENCH_INFO` prints them.
     #[cfg(feature = "bench")]
     pub fn info_state(&self) -> (String, Vec<String>) {

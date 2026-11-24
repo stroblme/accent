@@ -5,16 +5,20 @@ use super::*;
 use crate::graph::GraphTab;
 
 /// `ACCENT_BENCH_GRAPH=check:<rel>` opens `rel`, then Show Graph, and prints the nodes, a ghost's
-/// key ending in `?`, and the links once laid out (`open`). It clicks `b.md` with the pointer,
+/// key ending in `?`, and the links once laid out (`open`), and with the graph in front of `rel`
+/// in its one pane the files Info and Outline speak for (`side`) and the tab an Outline row brings
+/// to the front (`side jump`). It clicks `b.md` with the pointer,
 /// which splits the window, and narrows the canvas from under it ([`split`]), then presses two
 /// nodes in turn, each opening beside the graph as the other pane's preview, and prints where each
-/// opened and where the keyboard is (`click`), and the roots and nodes the graph grew to (`grow`).
+/// opened, where the keyboard is and the file Info speaks for (`click`), and the roots and nodes
+/// the graph grew to (`grow`).
 /// It writes a link to `d.md` into `c.md` and prints the node that adds and whether every node kept
 /// its index (`update`), then renames `b.md` and prints whether its node kept its index and the
 /// ghost the link to its old name leaves (`rename`). Through the menu's commands it shows tags and
 /// images and prints the nodes each adds (`tags`, `images`), then toggles tags four times in a row
 /// and prints how many questions went to the vault and whether the graph ended as it began
-/// (`toggles`); a press on the ghost prints the name New File offers (`ghost`); it shows the whole
+/// (`toggles`), then Show Arrows, printing its check, the questions it asked and whether its
+/// picture holds more than the one before (`show_arrows`); a press on the ghost prints the name New File offers (`ghost`); it shows the whole
 /// vault without its orphans and then with them (`all`, `orphans`), and prints Reset Graph's roots
 /// (`reset`). Behind another tab of its pane it has `e.md` link its root and prints how many
 /// questions went while it was hidden and once it was shown again, and the node that added
@@ -31,8 +35,9 @@ use crate::graph::GraphTab;
 /// presses the four arrows and prints whether the keyboard moved (`arrows`), then Enter on `a.md`
 /// and prints whether it opened (`enter`).
 /// Then it leaves the keyboard on `a.md`, the graph alone in its pane, saves the session and quits.
-/// `restored` prints whether the graph came back with the session, the file it is around
-/// (`session`) and what its menu shows (`saved`); opens `lone.md`, which it does not hold, and with
+/// `restored` prints whether the graph came back with the session, the file it is around and the
+/// roots it grew to (`session`) and what its menu shows (`saved`), and with the graph brought to
+/// the front of its pane the files Info and Outline speak for (`side`); opens `lone.md`, which it does not hold, and with
 /// animations off shows the graph again, printing what it started again around and whether it
 /// showed no places between where the nodes were placed and the settled layout (`still`); then
 /// closes it and prints whether the layout's threads ended with it (`closed`). `drill_graph` writes
@@ -70,6 +75,26 @@ async fn check(app: &Rc<App>, rel: &str) {
         graph.nodes(),
         graph.links()
     );
+    // The graph in front of `a.md` in its one pane: Info and Outline speak for `a.md`.
+    until("graph", "outline", 10_000, || {
+        spoken_for(app).1.is_some_and(|key| key == rel)
+    })
+    .await;
+    let (info, outline) = spoken_for(app);
+    println!(
+        "bench graph side one_pane info={info} outline={}",
+        outline.unwrap_or_default()
+    );
+    // Its heading's row brings `a.md` to the front of the pane to show the heading, and the graph
+    // comes back after.
+    if let Some(sidebar) = app.sidebar.get() {
+        sidebar.activate_outline(0);
+    }
+    println!(
+        "bench graph side jump active={}",
+        app.active_key().unwrap_or_default()
+    );
+    app.reveal_page(&graph.page);
     split(app, &graph).await;
     for key in ["c.md", "b.md"] {
         graph.press(key, false);
@@ -94,8 +119,9 @@ async fn check(app: &Rc<App>, rel: &str) {
         let tabs = pane.map_or(0, |pane| pane.tabs.n_pages());
         println!(
             "bench graph click {key} opened={} pane={n} preview={preview} keyboard={keyboard} \
-             tabs={tabs}",
-            opened.unwrap_or_default()
+             tabs={tabs} info={}",
+            opened.unwrap_or_default(),
+            spoken_for(app).0
         );
         until("graph", "grown", 10_000, || graph.landed()).await;
         println!(
@@ -157,6 +183,22 @@ async fn check(app: &Rc<App>, rel: &str) {
         "bench graph toggles queries={} same={}",
         graph.questions() - asked,
         graph.nodes() == before
+    );
+    // Show Arrows asks the vault nothing, and its picture has the heads.
+    let (inked, asked, serial) = (graph.inked(), graph.questions(), graph.serials().0);
+    command(app, "win.graph-arrows");
+    until("graph", "arrows drawn", 10_000, || {
+        let (asked, shown) = graph.serials();
+        asked > serial && shown == asked
+    })
+    .await;
+    let checked = (app.window.lookup_action("graph-arrows"))
+        .and_then(|action| action.state())
+        .and_then(|state| state.get::<bool>());
+    println!(
+        "bench graph show_arrows checked={checked:?} queries={} heads={}",
+        graph.questions() - asked,
+        graph.inked() > inked
     );
     graph.press("gone.md", false);
     let dialog = until("graph", "new file", 10_000, || app.window.visible_dialog()).await;
@@ -446,6 +488,11 @@ async fn split(app: &Rc<App>, graph: &GraphTab) {
     );
 }
 
+/// The file the Info pane speaks for and the one the Outline pane lists.
+fn spoken_for(app: &App) -> (String, Option<String>) {
+    (app.sidebar.get()).map_or((String::new(), None), |sidebar| sidebar.spoken_for())
+}
+
 /// Where the keyboard is: in the graph's pane's find bar, on the graph, elsewhere, or nowhere.
 fn keyboard(app: &App, graph: &GraphTab) -> &'static str {
     let bar = app
@@ -470,17 +517,31 @@ async fn restored(app: &Rc<App>) {
         return;
     };
     println!(
-        "bench graph session restored=true front={}",
-        graph.front().unwrap_or_default()
+        "bench graph session restored=true front={} roots={:?}",
+        graph.front().unwrap_or_default(),
+        graph.roots()
     );
     let saved = graph.saved();
     println!(
-        "bench graph saved all={} unresolved={} tags={} images={} orphans={}",
+        "bench graph saved all={} unresolved={} tags={} images={} orphans={} arrows={}",
         saved.all,
         saved.shown.unresolved,
         saved.shown.tags,
         saved.shown.images,
-        saved.shown.orphans
+        saved.shown.orphans,
+        saved.arrows
+    );
+    // The graph brought to the front of its own pane, `a.md` in front of the other: Info and
+    // Outline speak for `a.md` still.
+    app.reveal_page(&graph.page);
+    until("graph", "graph in front", 10_000, || {
+        matches!(app.active_doc(), Some(Doc::Graph(_)))
+    })
+    .await;
+    let (info, outline) = spoken_for(app);
+    println!(
+        "bench graph side panes info={info} outline={}",
+        outline.unwrap_or_default()
     );
     if let Some(settings) = gtk::Settings::default() {
         settings.set_gtk_enable_animations(false);

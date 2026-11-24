@@ -72,7 +72,7 @@ impl App {
             });
         }
         let Some(key) = self
-            .active_doc()
+            .side_doc()
             .filter(|doc| {
                 matches!(
                     doc,

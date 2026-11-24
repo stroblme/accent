@@ -43,8 +43,8 @@ pub(crate) fn is_key(key: &str) -> bool {
 }
 
 /// The graph's menu: Show Whole Vault; what is shown, Show Orphans while the whole vault is,
-/// its action being off otherwise; Reset Graph. A toggle is drawn as a check, its action carrying
-/// its state.
+/// its action being off otherwise, and Show Arrows; Reset Graph. A toggle is drawn as a check, its
+/// action carrying its state.
 fn graph_menu() -> gio::Menu {
     let section = |actions: &[&str]| {
         let section = gio::Menu::new();
@@ -66,6 +66,7 @@ fn graph_menu() -> gio::Menu {
             "win.graph-tags",
             "win.graph-images",
             "win.graph-orphans",
+            "win.graph-arrows",
         ]),
     );
     menu.append_section(None, &section(&["win.graph-reset"]));
@@ -257,8 +258,10 @@ pub struct GraphTab {
     asking: RefCell<Asking>,
     /// Counts the questions asked, so only the last one's answer lands.
     asked: Cell<u64>,
-    /// Whether it has been seeded, which waits until it is first on screen.
+    /// Whether it has been seeded, which waits until it is first on screen, and until then the
+    /// files a restored graph was around.
     started: Cell<bool>,
+    kept: RefCell<Vec<String>>,
     /// The question asked again after the vault changed ([`REFRESH`]).
     refresh: widgets::Debounce,
     /// The find bar's query and the nodes it found ([`find`]), and a count of the questions it
@@ -316,12 +319,17 @@ impl GraphTab {
         self.view.graph().facts()
     }
 
-    /// What the session keeps of it: what its menu shows and its spread.
+    /// What the session keeps of it: what its menu shows, its spread and its roots.
     pub fn saved(&self) -> Saved {
         Saved {
             all: self.all.get(),
             shown: self.shown.get(),
             spread: Spread(self.spread.value() as f32),
+            arrows: self.view.arrows(),
+            roots: match self.started.get() {
+                true => self.view.graph().roots.clone(),
+                false => self.kept.borrow().clone(),
+            },
         }
     }
 
@@ -497,6 +505,11 @@ impl GraphTab {
         self.view.serials()
     }
 
+    /// How many pixels of the picture shown anything covers.
+    pub fn inked(&self) -> usize {
+        self.view.inked()
+    }
+
     /// The pointer off every node.
     pub fn bench_unhover(&self) {
         self.view.bench_unhover();
@@ -560,6 +573,7 @@ impl App {
                     graph.all.set(false);
                     graph.view.graph_mut().roots = vec![front];
                     self.query_graph(&graph, Ask::Fresh);
+                    self.save_session_soon();
                 }
                 graph
             }
@@ -580,6 +594,13 @@ impl App {
         let (lower, upper, step) = SPREAD;
         let spread = gtk::Adjustment::new(saved.spread.0.into(), lower, upper, step, step, 0.0);
         view.set_spread(Spread(spread.value() as f32));
+        view.set_arrows(saved.arrows);
+        // A restored graph comes back around the files it was around, one opened afresh around
+        // the file in front.
+        let kept = match how {
+            Opened::Restored => saved.roots,
+            _ => Vec::new(),
+        };
         // In a box its menus hang from: a popover on the canvas itself would be allocated by a
         // widget with no layout manager (DESIGN.md, States).
         let host = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -625,6 +646,7 @@ impl App {
             asking: RefCell::default(),
             asked: Cell::new(0),
             started: Cell::new(false),
+            kept: RefCell::new(kept),
             refresh: widgets::Debounce::new(REFRESH),
             finding: RefCell::default(),
             found: Cell::new(0),
@@ -715,9 +737,9 @@ impl App {
         graph
     }
 
-    /// The graph came on screen for the first time: seeded with the file in front, once a
-    /// restore under way has put the session's tabs back, that file among them. Again, it asks
-    /// what changed in the vault while it was hidden.
+    /// The graph came on screen for the first time: seeded with the files a restored graph was
+    /// around, else with the file in front, once a restore under way has put the session's tabs
+    /// back, that file among them. Again, it asks what changed in the vault while it was hidden.
     fn start_graph(self: &Rc<Self>, graph: &Rc<GraphTab>) {
         if graph.started.get() {
             let stale = std::mem::take(&mut graph.asking.borrow_mut().stale);
@@ -741,17 +763,28 @@ impl App {
         graph.started.set(true);
         let front = self.graph_front().map(|(_, key)| key);
         graph.view.set_front(front.clone());
-        graph.view.graph_mut().roots = front.into_iter().collect();
+        let kept = graph.kept.take();
+        graph.view.graph_mut().roots = match kept.is_empty() {
+            true => front.into_iter().collect(),
+            false => kept,
+        };
         self.sync_graph_actions();
         self.query_graph(graph, Ask::Fresh);
     }
 
     /// The graph's menu commands, over the graph in front: Reset Graph back to the file in
-    /// front, the whole vault's, and the toggles of what is shown.
+    /// front, the whole vault's, the toggles of what is shown, and Show Arrows, which asks the
+    /// vault nothing.
     pub(crate) fn graph_action(self: &Rc<Self>, name: &str) {
         let Some(graph) = self.active_doc().and_then(|doc| doc.graph().cloned()) else {
             return;
         };
+        if name == "graph-arrows" {
+            graph.view.set_arrows(!graph.view.arrows());
+            self.sync_graph_actions();
+            self.save_session_soon();
+            return;
+        }
         let mut shown = graph.shown.get();
         let ask = match name {
             "graph-reset" => {
@@ -803,6 +836,7 @@ impl App {
             ("graph-tags", shown.tags),
             ("graph-images", shown.images),
             ("graph-orphans", shown.orphans),
+            ("graph-arrows", saved.arrows),
         ] {
             let action = self.window.lookup_action(name);
             if let Some(action) = action.and_downcast::<gio::SimpleAction>() {
@@ -999,6 +1033,7 @@ impl App {
         if grew {
             graph.describe();
             self.query_graph(graph, Ask::Grow(key.to_string()));
+            self.save_session_soon();
         }
     }
 
@@ -1117,14 +1152,18 @@ impl App {
     }
 
     /// The vault changed: a file renamed keeps its node under its new name, a root deleted is no
-    /// root, and each graph asks again [`REFRESH`] after the last change, a ghost whose note was
-    /// written turning into it in place.
+    /// root, the session keeping the roots so changed, and each graph asks again [`REFRESH`] after
+    /// the last change, a ghost whose note was written turning into it in place.
     pub(crate) fn graphs_follow(self: &Rc<Self>, event: &Event) {
         for graph in self.graphs().iter().filter(|g| g.started.get()) {
+            let roots = graph.view.graph().roots.clone();
             match event {
                 Event::FileRenamed { from, to } => graph.view.rename(from, to),
                 Event::FileRemoved(rel) => graph.view.graph_mut().forget(rel),
                 _ => {}
+            }
+            if graph.view.graph().roots != roots {
+                self.save_session_soon();
             }
             self.refresh_graph_soon(graph);
         }

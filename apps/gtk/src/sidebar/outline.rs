@@ -329,6 +329,12 @@ impl List {
 
     /// Show `rows`, splicing in only the run that differs from what is shown, each numbered by
     /// `number_of` while the pointer is on it.
+    /// What activating a row does, as the list's `activate` handler clones it out.
+    #[cfg(feature = "bench")]
+    pub(super) fn jump(&self) -> Rc<dyn Fn(u32)> {
+        self.jump.borrow().clone()
+    }
+
     pub(super) fn fill<T: Copy + 'static>(
         &self,
         rows: &[(Line, T)],

@@ -935,10 +935,11 @@ drill_dangling() {
 
 # The Graph tab round a note: the notes it links to and is linked from, a ghost for one not
 # written yet, a press opening a note beside the graph as the other pane's preview with the
-# keyboard left on the graph and growing the graph by its links, the tab back with the session,
-# and started again round a note it does not hold, settled in one frame with animations off.
+# keyboard left on the graph and growing the graph by its links, Info and Outline speaking for the
+# note in front, the tab back with the session, its roots too, and started again round a note it
+# does not hold, settled in one frame with animations off.
 drill_graph() {
-	printf '[[b]] [[c]] [[gone]] #topic ![[pic.png]]\n' >"$vault/a.md"
+	printf '# Alpha\n[[b]] [[c]] [[gone]] #topic ![[pic.png]]\n' >"$vault/a.md"
 	echo '[[c]]' >"$vault/b.md"
 	echo '[[f]]' >"$vault/c.md"
 	echo 'alone' >"$vault/d.md"

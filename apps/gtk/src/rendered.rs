@@ -348,9 +348,32 @@ impl App {
 
     /// The document the side panes speak for: the one in front, a preview tab's note for a
     /// preview tab (user decision 2026-10-28), so Info, Outline and References read the same over
-    /// either.
+    /// either, and the file in front for the graph, which is no file (user decision 2026-11-23).
     pub(crate) fn side_doc(&self) -> Option<Doc> {
-        self.active_doc().and_then(note_for)
+        match self.active_doc()? {
+            Doc::Graph(_) => (self.graph_front())
+                .and_then(|(page, _)| self.doc_for_page(&page))
+                .and_then(note_for),
+            doc => note_for(doc),
+        }
+    }
+
+    /// An Outline row's `jump`, the tab the side panes speak for brought to the front first while
+    /// the graph is in front, so the jump is seen as with that tab in front.
+    pub(crate) fn side_jump<T: 'static>(
+        self: &Rc<Self>,
+        jump: impl Fn(T) + 'static,
+    ) -> impl Fn(T) + 'static {
+        let app = Rc::downgrade(self);
+        move |at| {
+            if let Some(app) = app.upgrade()
+                && matches!(app.active_doc(), Some(Doc::Graph(_)))
+                && let Some((page, _)) = app.graph_front()
+            {
+                app.reveal_page(&page);
+            }
+            jump(at)
+        }
     }
 
     /// Whether the side panes speak for `tab`: it is in front, or its preview is.

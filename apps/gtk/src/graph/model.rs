@@ -17,8 +17,10 @@ pub struct Graph {
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
     /// The pairs the layout pulls together, each once whichever way and however many kinds of
-    /// edge join them.
+    /// edge join them, and which ends of each an arrow's head points at: 1 its first node, 2 its
+    /// second, each a node a link, an embed or an import names, a tag's edge pointing at none.
     pub links: Vec<(usize, usize)>,
+    pub heads: Vec<u8>,
     /// Each node's neighbours, by links either way, each once.
     pub adjacency: Vec<Vec<usize>>,
     /// The keys the graph grew from: the file in front and every node clicked since.
@@ -277,11 +279,19 @@ impl Graph {
         self.index = (self.nodes.iter().enumerate())
             .map(|(i, n)| (n.key.clone(), i))
             .collect();
-        let mut seen = HashSet::new();
-        self.links = (self.edges.iter())
-            .map(|e| (e.from.min(e.to) as usize, e.from.max(e.to) as usize))
-            .filter(|pair| seen.insert(*pair))
-            .collect();
+        let mut seen = HashMap::new();
+        (self.links, self.heads) = (Vec::new(), Vec::new());
+        for e in &self.edges {
+            let pair = (e.from.min(e.to) as usize, e.from.max(e.to) as usize);
+            let i = *seen.entry(pair).or_insert_with(|| {
+                self.links.push(pair);
+                self.heads.push(0);
+                self.links.len() - 1
+            });
+            if e.kind != EdgeKind::Tag && e.from != e.to {
+                self.heads[i] |= if e.to as usize == pair.0 { 1 } else { 2 };
+            }
+        }
         self.adjacency = vec![Vec::new(); self.nodes.len()];
         for &(a, b) in &self.links {
             self.adjacency[a].push(b);
@@ -459,12 +469,16 @@ mod tests {
         assert_eq!(graph.roots, ["bee.md"]);
     }
 
-    /// A link and an embed between the same two files pull them together once.
+    /// A link and an embed between the same two files pull them together once, with a head at
+    /// either end, and a tag's edge with none.
     #[test]
     fn the_layout_gets_each_pair_once() {
-        let mut both = part(&["a.md", "b.md"], &[(0, 1), (1, 0)]);
+        let mut both = part(&["a.md", "b.md", "c.md"], &[(0, 1), (1, 0), (0, 2), (2, 1)]);
         both.edges[1].kind = EdgeKind::Embed;
-        assert_eq!(shown(&both).links, [(0, 1)]);
+        both.edges[2].kind = EdgeKind::Tag;
+        let graph = shown(&both);
+        assert_eq!(graph.links, [(0, 1), (0, 2), (1, 2)]);
+        assert_eq!(graph.heads, [3, 0, 1]);
     }
 
     /// Without a query every node is shown, and with one only those it keeps.

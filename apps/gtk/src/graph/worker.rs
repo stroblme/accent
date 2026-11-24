@@ -35,14 +35,16 @@ const STEP: Duration = Duration::from_micros(16_667);
 pub enum Cmd {
     /// A change of what the canvas shows, generation `generation`: the nodes `removed` taken out
     /// in this order as `Vec::swap_remove` does, then those `added` appended, each beside the
-    /// node it names, then every link, by the indices after the change, each node's paint and
-    /// whether it is shown, which a node the find bar's query hides is not. With `animate` the
-    /// layout moves on its clock, else it settles at once.
+    /// node it names, then every link, by the indices after the change, with the ends its arrow's
+    /// heads point at (`Graph::heads`), each node's paint and whether it is shown, which a node
+    /// the find bar's query hides is not. With `animate` the layout moves on its clock, else it
+    /// settles at once.
     Change {
         generation: u64,
         removed: Vec<usize>,
         added: Vec<Option<usize>>,
         links: Vec<(usize, usize)>,
+        heads: Vec<u8>,
         paints: Vec<Paint>,
         shown: Vec<bool>,
         animate: bool,
@@ -138,10 +140,11 @@ struct Places {
     moved: bool,
 }
 
-/// What a generation's places are drawn with: its links, its nodes' paints, their neighbours,
-/// and which of them are shown.
+/// What a generation's places are drawn with: its links and their arrows' heads, its nodes'
+/// paints, their neighbours, and which of them are shown.
 struct Shape {
     links: Vec<(usize, usize)>,
+    heads: Vec<u8>,
     paints: Vec<Paint>,
     near: Vec<Vec<usize>>,
     shown: Vec<bool>,
@@ -212,6 +215,7 @@ fn lay_out(rx: &Receiver<Cmd>, shared: &Shared, spread: Spread) {
     force.set_spread(spread);
     let mut shape = Arc::new(Shape {
         links: Vec::new(),
+        heads: Vec::new(),
         paints: Vec::new(),
         near: Vec::new(),
         shown: Vec::new(),
@@ -274,6 +278,7 @@ fn lay_out(rx: &Receiver<Cmd>, shared: &Shared, spread: Spread) {
                     removed,
                     added,
                     links,
+                    heads,
                     paints,
                     shown,
                     animate: a,
@@ -301,6 +306,7 @@ fn lay_out(rx: &Receiver<Cmd>, shared: &Shared, spread: Spread) {
                     }
                     shape = Arc::new(Shape {
                         links,
+                        heads,
                         paints,
                         near,
                         shown,
@@ -375,23 +381,25 @@ fn unmask(force: &mut Force, pending: &mut Option<Vec<bool>>) -> bool {
     }
 }
 
-/// What the last picture's links were drawn for: its places and links, the camera, the canvas
-/// and whether they were left out. A picture of the same draws over their coverage.
+/// What the last picture's links were drawn for: its places and links, the camera, the canvas,
+/// whether they had arrows and whether they were left out. A picture of the same draws over
+/// their coverage.
 struct Drawn {
     at: Arc<Vec<[f32; 2]>>,
     shape: Arc<Shape>,
     camera: Camera,
     size: [f64; 2],
     scale: f64,
+    arrows: bool,
     bare: bool,
 }
 
 impl Drawn {
     fn same(&self, other: &Drawn) -> bool {
+        let plain = |d: &Drawn| (d.camera, d.size, d.scale, d.arrows, d.bare);
         Arc::ptr_eq(&self.at, &other.at)
             && Arc::ptr_eq(&self.shape, &other.shape)
-            && (self.camera, self.size, self.scale, self.bare)
-                == (other.camera, other.size, other.scale, other.bare)
+            && plain(self) == plain(other)
     }
 }
 
@@ -446,6 +454,7 @@ fn draw(shared: &Shared) {
                 paints: &places.shape.paints,
                 near: &places.shape.near,
                 links: if bare { &[] } else { &places.shape.links },
+                heads: &places.shape.heads,
                 shown: &places.shape.shown,
             };
             let now = Drawn {
@@ -454,6 +463,7 @@ fn draw(shared: &Shared) {
                 camera,
                 size: view.size,
                 scale: view.scale,
+                arrows: view.arrows,
                 bare,
             };
             let still = drawn.as_ref().is_some_and(|d| d.same(&now));
@@ -524,6 +534,7 @@ mod tests {
             removed: Vec::new(),
             added: vec![None; added],
             links: vec![(0, 1)],
+            heads: vec![2],
             paints: vec![Paint::Ink; nodes],
             shown: vec![true; nodes],
             animate,
@@ -538,6 +549,7 @@ mod tests {
             lit: None,
             front: Some(0),
             current: None,
+            arrows: false,
             colours: raster::Colours {
                 ink: [0.0, 0.0, 0.0, 1.0],
                 lanes: [[1.0; 4]; 5],
@@ -601,6 +613,7 @@ mod tests {
             removed: Vec::new(),
             added: vec![None; added],
             links: vec![(0, 1), (1, 2)],
+            heads: vec![2, 2],
             paints: vec![Paint::Ink; 3],
             shown: shown.to_vec(),
             animate: false,

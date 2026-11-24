@@ -119,14 +119,19 @@ impl Default for CodePane {
     }
 }
 
-/// What the Graph tab shows and how far apart, as its menu was left (DESIGN.md, Graph).
-#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+/// What the Graph tab shows and how far apart, as its menu was left, and the files it grew
+/// around (DESIGN.md, Graph).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GraphView {
     /// The whole vault, rather than the file in front and its neighbours.
     pub all: bool,
     pub shown: crate::graph::Shown,
     pub spread: crate::graph::layout::Spread,
+    /// Each link drawn with an arrow's head at the file it links to.
+    pub arrows: bool,
+    /// The files the graph is around: the one it started from and each clicked since.
+    pub roots: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

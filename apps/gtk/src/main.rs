@@ -832,11 +832,11 @@ impl App {
             if rows.is_empty() {
                 return sidebar.set_outline_strip(&pdf.thumbnails());
             }
-            let jump = glib::clone!(
+            let jump = self.side_jump(glib::clone!(
                 #[weak]
                 pdf,
                 move |row| pdf.go_to_row(row)
-            );
+            ));
             // A bookmark shows the page it leads to here; a comment's rows are under their page's.
             let pages: Vec<Option<usize>> = outline.iter().map(|entry| entry.page).collect();
             let number = move |row| match row {
@@ -857,11 +857,11 @@ impl App {
                 .enumerate()
                 .map(|(i, name)| (sidebar::Line::new(1, name), i))
                 .collect();
-            let jump = glib::clone!(
+            let jump = self.side_jump(glib::clone!(
                 #[weak]
                 d,
                 move |page| d.goto_page(page)
-            );
+            ));
             let number = |page: usize| Some(page + 1);
             sidebar.set_outline_rows(&doc.key(), &rows, jump, number, Some(&d.thumbnails()));
             return self.follow_outline();
@@ -878,13 +878,13 @@ impl App {
                 let none = sidebar::outline_note("No Headings", body);
                 return sidebar.set_outline(Some(&none));
             }
-            let jump = glib::clone!(
+            let jump = self.side_jump(glib::clone!(
                 #[weak(rename_to = app)]
                 self,
                 #[weak]
                 nb,
                 move |at| app.notebook_outline_jump(&nb, at)
-            );
+            ));
             // A heading's place is a cell and a character in it, which no single number says.
             if sidebar.set_outline_rows(&doc.key(), &rows, jump, |_| None, None) {
                 self.follow_outline();
@@ -930,13 +930,13 @@ impl App {
         let fresh = sidebar.set_outline_rows(
             &doc.key(),
             &rows,
-            glib::clone!(
+            self.side_jump(glib::clone!(
                 #[weak(rename_to = app)]
                 self,
                 #[weak]
                 tab,
                 move |at| app.outline_jump(&rendered::Note::Tab(tab), at)
-            ),
+            )),
             sidebar::line_number,
             None,
         );

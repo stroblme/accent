@@ -155,6 +155,12 @@ impl Info {
         }
     }
 
+    /// The file the pane speaks for, empty for none.
+    #[cfg(feature = "bench")]
+    pub(super) fn shown_for(&self) -> String {
+        self.shown_for.borrow().clone()
+    }
+
     /// The page shown, each section as `Title:open|shut|hidden` and its count, and the dividers
     /// as `position/height`: what `ACCENT_BENCH_INFO` prints.
     #[cfg(feature = "bench")]

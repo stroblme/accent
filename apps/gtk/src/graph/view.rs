@@ -119,8 +119,10 @@ mod imp {
         /// Counts the changes sent to the layout, so only places of what is shown land.
         pub generation: Cell<u64>,
         pub worker: RefCell<Option<Worker>>,
-        /// How far apart the layout spreads the nodes, a new worker's too.
+        /// How far apart the layout spreads the nodes, a new worker's too, and whether each link
+        /// has an arrow's head.
         pub spread: Cell<Spread>,
+        pub arrows: Cell<bool>,
         pub ticking: RefCell<Option<gtk::TickCallbackId>>,
         /// Whether the places shown are the settled layout of what is shown.
         pub settled: Cell<bool>,
@@ -293,11 +295,16 @@ impl GraphView {
             imp.frames.set(0);
             imp.shown_at.set(None);
         }
-        let (links, paints, shown) = {
+        let (links, heads, paints, shown) = {
             let graph = imp.graph.borrow();
             let paints = graph.nodes.iter().map(|n| model::paint_of(n.kind));
             let shown = model::shown(&graph.nodes, imp.filter.borrow().as_ref());
-            (graph.links.clone(), paints.collect(), shown)
+            (
+                graph.links.clone(),
+                graph.heads.clone(),
+                paints.collect(),
+                shown,
+            )
         };
         imp.mask.replace(shown.clone());
         let animate = self.animations();
@@ -309,6 +316,7 @@ impl GraphView {
                 removed,
                 added,
                 links,
+                heads,
                 paints,
                 shown,
                 animate,
@@ -554,6 +562,17 @@ impl GraphView {
             imp.settled.set(false);
             self.run();
         }
+    }
+
+    /// Draw each link with an arrow's head at the node it names, or with none.
+    pub fn set_arrows(&self, arrows: bool) {
+        if self.imp().arrows.replace(arrows) != arrows {
+            self.queue_draw();
+        }
+    }
+
+    pub fn arrows(&self) -> bool {
+        self.imp().arrows.get()
     }
 
     /// Draw the file keyed `key` in the accent, or none, and follow it there.
@@ -1179,6 +1198,7 @@ impl GraphView {
                 },
                 front: index(&imp.front),
                 current: index(&imp.current).filter(|_| self.has_focus()),
+                arrows: imp.arrows.get(),
                 colours: Colours {
                     ink: rgba(self.color()),
                     lanes: std::array::from_fn(|k| rgba(crate::highlight::lane_colour(k + 1))),
@@ -1535,6 +1555,18 @@ impl GraphView {
                 }
             }
         }
+    }
+
+    /// How many pixels of the picture shown anything covers.
+    pub fn inked(&self) -> usize {
+        let picture = self.imp().picture.borrow();
+        let Some(texture) = picture.as_ref().map(|p| &p.texture) else {
+            return 0;
+        };
+        let (width, height) = (texture.width() as usize, texture.height() as usize);
+        let mut data = vec![0; width * height * 4];
+        texture.download(&mut data, width * 4);
+        data.chunks(4).filter(|px| px[3] > 0).count()
     }
 
     /// The pointer off every node.

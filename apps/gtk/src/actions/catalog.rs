@@ -423,6 +423,7 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.graph-tags", "Show Tags", &[]),
     ("win.graph-images", "Show Images", &[]),
     ("win.graph-orphans", "Show Orphans", &[]),
+    ("win.graph-arrows", "Show Arrows", &[]),
     ("win.graph-reset", "Reset Graph", &[]),
     // No chord: `Ctrl+H`, the file managers' own, is Replace here.
     ("win.show-hidden-files", "Show Hidden Files", &[]),

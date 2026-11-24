@@ -24,6 +24,10 @@ pub type Rgba = [f32; 4];
 /// node's links cover a pixel as fully as every link does.
 const CELL: usize = 16;
 
+/// An arrow's head, in the layout's units as a node's radius is: how long, and how far it reaches
+/// either side of its link.
+const HEAD: [f32; 2] = [6.0, 2.5];
+
 /// The theme's colours the graph is drawn in, read on the main thread as each frame is drawn.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Colours {
@@ -57,16 +61,20 @@ pub struct View {
     pub front: Option<usize>,
     /// The node the keyboard is on while the canvas has the keyboard, ringed.
     pub current: Option<usize>,
+    /// Whether each link has an arrow's head at the node it names.
+    pub arrows: bool,
     pub colours: Colours,
 }
 
-/// What is drawn: the nodes' places and paints, their neighbours, and the links between them,
-/// of the nodes shown: one the find bar's query hides is drawn not at all, nor are its links.
+/// What is drawn: the nodes' places and paints, their neighbours, and the links between them
+/// with the ends their arrows' heads point at (`Graph::heads`), of the nodes shown: one the find
+/// bar's query hides is drawn not at all, nor are its links.
 pub struct Scene<'a> {
     pub at: &'a [[f32; 2]],
     pub paints: &'a [Paint],
     pub near: &'a [Vec<usize>],
     pub links: &'a [(usize, usize)],
+    pub heads: &'a [u8],
     pub shown: &'a [bool],
 }
 
@@ -134,6 +142,8 @@ struct Drawing<'a> {
     n: usize,
     screen: Vec<[f32; 2]>,
     radii: Vec<f32>,
+    /// An arrow's head in pixels, with arrows.
+    head: Option<[f32; 2]>,
     light: Option<Light>,
     /// Whether each node is the lit one or its neighbour, every node with none lit.
     near: Vec<bool>,
@@ -173,6 +183,7 @@ impl<'a> Drawing<'a> {
             n,
             screen,
             radii,
+            head: (view.arrows).then(|| HEAD.map(|v| (f64::from(v) * camera.zoom * scale) as f32)),
             light,
             near,
         }
@@ -197,23 +208,35 @@ impl<'a> Drawing<'a> {
     }
 
     /// Link `i`'s pixels given to `plot` with how much it covers each, but for the steps of its
-    /// line `skip` passes over, and the rows it reaches.
+    /// line `skip` passes over, and the rows it reaches: a hairline, and with arrows a head at
+    /// each node it names, its tip at the disc's edge, where the two discs leave it room.
     fn stroke(
         &self,
         i: usize,
         skip: impl Fn([usize; 2], [usize; 2]) -> bool,
-        plot: impl FnMut(usize, u8),
+        mut plot: impl FnMut(usize, u8),
     ) -> Range<usize> {
         let (a, b) = self.scene.links[i];
         let size = [self.width, self.height];
-        line(
-            size,
-            self.screen[a],
-            self.screen[b],
-            self.view.scale as f32,
-            skip,
-            plot,
-        )
+        let hairline = self.view.scale as f32;
+        let ends = [self.screen[a], self.screen[b]];
+        let mut rows = line(size, ends[0], ends[1], hairline, skip, &mut plot);
+        let Some(shape) = self.head else {
+            return rows;
+        };
+        let heads = self.scene.heads.get(i).copied().unwrap_or(0);
+        for (bit, from, to) in [(1, b, a), (2, a, b)] {
+            let (p, q, r) = (self.screen[from], self.screen[to], self.radii[to]);
+            let d = [q[0] - p[0], q[1] - p[1]];
+            let length = d[0].hypot(d[1]);
+            if heads & bit == 0 || length <= r + shape[0] {
+                continue;
+            }
+            let dir = [d[0] / length, d[1] / length];
+            let tip = [q[0] - dir[0] * r, q[1] - dir[1] * r];
+            rows = union(&rows, &head(size, tip, dir, shape, &mut plot));
+        }
+        rows
     }
 
     /// The links over the pixels, the other links in the edges' alpha and the lit node's over
@@ -316,7 +339,7 @@ impl<'a> Drawing<'a> {
                 let cells = &*cells;
                 let cell = |[x, y]: [usize; 2]| cells[(y / CELL) * cols + x / CELL];
                 let skip = |a: [usize; 2], b: [usize; 2]| !cell(a) && !cell(b);
-                let pad = self.view.scale as f32 + 2.0;
+                let pad = self.view.scale as f32 + 2.0 + self.head.map_or(0.0, |h| h[1]);
                 // Pixels of a marked cell are at most a cell from the marked pixels' box.
                 let reach = pad + CELL as f32;
                 for i in self.drawn_links(Some(false)) {
@@ -505,6 +528,57 @@ fn line(
         }
     }
     high..low
+}
+
+/// An arrow's head on a canvas of `size` pixels: a triangle `length` long and `2 · half` across
+/// its base, its tip at `tip` pointing along the unit `dir`, each pixel given to `plot` with how
+/// far its centre is inside every side, antialiased as a disc's edge is. The rows it reaches.
+fn head(
+    size: [usize; 2],
+    tip: [f32; 2],
+    dir: [f32; 2],
+    [length, half]: [f32; 2],
+    mut plot: impl FnMut(usize, u8),
+) -> Range<usize> {
+    let base = [tip[0] - dir[0] * length, tip[1] - dir[1] * length];
+    let side = [-dir[1] * half, dir[0] * half];
+    let corners = [
+        tip,
+        [base[0] + side[0], base[1] + side[1]],
+        [base[0] - side[0], base[1] - side[1]],
+    ];
+    // Each side from a corner, as a unit along it turned so that a point inside is on its left.
+    let [a, b, c] = corners;
+    let turn = ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])).signum();
+    let sides = [(a, b), (b, c), (c, a)].map(|(p, q)| {
+        let d = [q[0] - p[0], q[1] - p[1]];
+        let n = d[0].hypot(d[1]).max(f32::EPSILON) * turn;
+        (p, [d[0] / n, d[1] / n])
+    });
+    let span = |axis: usize| {
+        let values = corners.map(|c| c[axis]);
+        let low = values.iter().copied().fold(f32::MAX, f32::min);
+        let high = values.iter().copied().fold(f32::MIN, f32::max);
+        let from = (low - 1.0).floor().max(0.0) as usize;
+        from..((high + 1.0).ceil().max(0.0) as usize).min(size[axis])
+    };
+    let (xs, ys) = (span(0), span(1));
+    for y in ys.clone() {
+        for x in xs.clone() {
+            let at = [x as f32 + 0.5, y as f32 + 0.5];
+            let inside = (sides.iter())
+                .map(|(p, d)| d[0] * (at[1] - p[1]) - d[1] * (at[0] - p[0]))
+                .fold(f32::MAX, f32::min);
+            let cover = (inside + 0.5).clamp(0.0, 1.0);
+            if cover > 0.0 {
+                plot(y * size[0] + x, (cover * 255.0 + 0.5) as u8);
+            }
+        }
+    }
+    match xs.is_empty() {
+        true => 0..0,
+        false => ys,
+    }
 }
 
 /// Whether the line from `a` to `b`, on a canvas of `size` pixels, may cover a pixel of a cell
@@ -711,8 +785,9 @@ mod tests {
 
     /// A picture drawn over the links kept from the picture before is the one drawn with the
     /// links as the canvas's two paths, the lit node's over the others, whichever node is lit:
-    /// one whose links cross others, none, and a hub linked to half the nodes. A crowded graph on
-    /// a small canvas, so that lit and other links meet as fully at many pixels.
+    /// one whose links cross others, none, and a hub linked to half the nodes, with arrows too,
+    /// which add their heads. A crowded graph on a small canvas, so that lit and other links meet
+    /// as fully at many pixels.
     #[test]
     fn a_still_layout_draws_as_it_would_afresh() {
         let mut seed = 7u32;
@@ -729,6 +804,7 @@ mod tests {
         let pick = |r: f32| (r * n as f32) as usize % n;
         links.extend((0..200).map(|_| (pick(next()), pick(next()))));
         links.retain(|&(a, b)| a != b);
+        let heads: Vec<u8> = (0..links.len()).map(|i| (i % 4) as u8).collect();
         let mut near = vec![Vec::new(); n];
         for &(a, b) in &links {
             near[a].push(b);
@@ -743,15 +819,17 @@ mod tests {
             paints: &paints,
             near: &near,
             links: &links,
+            heads: &heads,
             shown: &shown,
         };
-        let view = |lit: Option<usize>| View {
+        let view = |lit: Option<usize>, arrows| View {
             camera: Camera::default(),
             size: [90.0, 70.0],
             scale: 2.0,
             lit: lit.map(|node| Light { node, dim: 0.35 }),
             front: Some(3),
             current: lit,
+            arrows,
             colours: Colours {
                 ink: [0.1, 0.2, 0.3, 1.0],
                 lanes: [[0.8, 0.1, 0.1, 1.0]; 5],
@@ -778,15 +856,65 @@ mod tests {
             px.data
         };
         // Over links kept from a settled layout, counted, and from a moving one, not.
-        for settled in [true, false] {
+        for (arrows, settled) in [(false, true), (false, false), (true, true), (true, false)] {
             let mut kept = Links::default();
-            draw(&scene, &view(Some(9)), camera, &mut kept, [false, settled]);
+            draw(
+                &scene,
+                &view(Some(9), arrows),
+                camera,
+                &mut kept,
+                [false, settled],
+            );
             // The hub twice, the second time over its own links kept.
             for lit in [Some(17), None, Some(0), Some(0), Some(17)] {
-                let view = view(lit);
+                let view = view(lit, arrows);
                 let still = draw(&scene, &view, camera, &mut kept, [true, settled]).data;
                 assert!(still == as_paths(&view), "lit {lit:?}, settled {settled}");
             }
         }
+    }
+
+    /// A head points at the node its link names, its tip at the disc's edge: covered just short
+    /// of the tip on the link, clear past it, and covered at the base but not beside it. With
+    /// arrows a link between two nodes covers more than without.
+    #[test]
+    fn a_head_points_along_its_link() {
+        let mut cover = [0u8; 40 * 20];
+        let plot = |i: usize, c: u8| cover[i] = cover[i].max(c);
+        head([40, 20], [30.0, 10.5], [1.0, 0.0], [6.0, 3.0], plot);
+        let at = |x: usize, y: usize| cover[y * 40 + x];
+        assert_eq!(at(28, 10), 255);
+        assert_eq!(at(31, 10), 0);
+        assert!(at(24, 10) > 0 && at(24, 5) == 0);
+        let at = [[-40.0, 0.0], [40.0, 0.0]];
+        let (paints, near, shown) = ([Paint::Ink; 2], [vec![1], vec![0]], [true; 2]);
+        let scene = Scene {
+            at: &at,
+            paints: &paints,
+            near: &near,
+            links: &[(0, 1)],
+            heads: &[2],
+            shown: &shown,
+        };
+        let inked = |arrows| {
+            let view = View {
+                camera: Camera::default(),
+                size: [120.0, 40.0],
+                scale: 1.0,
+                lit: None,
+                front: None,
+                current: None,
+                arrows,
+                colours: Colours {
+                    ink: [0.0, 0.0, 0.0, 1.0],
+                    lanes: [[1.0; 4]; 5],
+                    accent: [0.0, 0.0, 1.0, 1.0],
+                },
+            };
+            let camera = Camera::fit(at, view.size);
+            let px = draw(&scene, &view, camera, &mut Links::default(), [false; 2]);
+            px.data.chunks(4).filter(|px| px[3] > 0).count()
+        };
+        assert!(inked(true) > inked(false));
     }
 }

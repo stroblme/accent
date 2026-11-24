@@ -513,13 +513,13 @@ impl App {
             .into_iter()
             .map(|(level, text, at)| (sidebar::Line::new(level, text), at))
             .collect();
-        let jump = glib::clone!(
+        let jump = self.side_jump(glib::clone!(
             #[weak(rename_to = app)]
             self,
             #[weak]
             term,
             move |at| app.outline_jump(&Note::Editor(term), at)
-        );
+        ));
         sidebar.set_outline_rows(&term.key(), &rows, jump, sidebar::line_number, None);
     }
 

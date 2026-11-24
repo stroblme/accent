@@ -511,7 +511,7 @@ impl App {
                 .graphs()
                 .first()
                 .map(|graph| graph.saved())
-                .unwrap_or(stored.graph),
+                .unwrap_or_else(|| stored.graph.clone()),
             // Merged, as the PDFs' places are: a notebook closed earlier keeps its pick.
             kernels: {
                 let mut picks = stored.kernels.clone();
