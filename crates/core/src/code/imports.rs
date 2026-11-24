@@ -444,9 +444,10 @@ fn rust_path(
         .iter()
         .rposition(|s| !s.starts_with(char::is_uppercase));
     let rest = &rest[..modules.map_or(0, |i| i + 1)];
-    // `crate::Item` is the crate's root, which every module of it uses; another crate's root is
-    // what the file depends on.
-    if rest.is_empty() && first == "crate" {
+    // `crate::Item` is the crate's root, which every module of it uses, and so is `super::Item`
+    // or `super::*` where `super` is the root (user decision 2026-11-24): drawn, the root would be
+    // a hub of the graph. Another crate's root is what the file depends on.
+    if rest.is_empty() && krate.is_none() && crate_dir(rel).as_ref() == Some(&base) {
         return None;
     }
     Some((krate, join(&base, &rest.join("/")), rest.len().min(2)))
@@ -725,8 +726,19 @@ use super::Item;
                     Some("accent_core")
                 ),
                 rust_row("src/debug", Some("src"), None, Some("log")),
-                rust_row("crates/api/src", None, None, None),
             ]
+        );
+    }
+
+    #[test]
+    fn super_items_name_the_module_above_but_the_crate_root() {
+        let text = "use super::Item;\nuse super::*;\n";
+        // `super` is the crate root here, which every module uses, as `crate::Item` is.
+        assert_eq!(rust_rows("crates/api/src/local/mod.rs", text), []);
+        assert_eq!(rust_rows("crates/api/src/lib.rs", "use self::Item;\n"), []);
+        assert_eq!(
+            rust_rows("crates/api/src/local/files.rs", text),
+            [rust_row("crates/api/src/local", None, None, None)]
         );
     }
 

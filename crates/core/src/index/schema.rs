@@ -1,7 +1,7 @@
 //! The tables, and the knobs that shape how they are filled.
 
 /// Bump on any schema change: `Index::open_or_rebuild` then deletes the cache and starts a new one.
-pub(super) const SCHEMA_VERSION: i64 = 23;
+pub(super) const SCHEMA_VERSION: i64 = 24;
 
 /// Maximum indexed body size for non-markdown files. Stricter than [`crate::fs::MAX_TEXT`]
 /// because indexing repeatedly consumes database space and FTS query work, whereas opening a
