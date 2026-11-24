@@ -1125,7 +1125,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A long PDF's pages are searched in the background, so its count grows ("1 of 3", then "1 of 57").
   A page edit searches the PDF again without moving the reader, and the next step goes from the page being read.
 - Enter steps to the next match and Shift+Enter to the previous, in every bar.
-- The readout says "3 of 12" in the buffer, a notebook, a PDF, a diagram, a graph and the rendered preview alike.
+- The readout says "3 of 12" in the buffer, a notebook, a PDF, a diagram, a graph and the rendered preview alike, and "12 matches" before a step, or "1 match".
 - Beside the query sit the Search pane's Match Case, Match Whole Word and Regular Expression toggles, the same text buttons in the same `.linked` group, and a buffer, a notebook's cells and the rendered preview are matched by the Search pane's own matcher (`accent_core::search`): the whole text at once, a cell at a time in a notebook, so `^` is the start of the note or the cell and a pattern may run across lines, a whole word ends where `\b` says (`_` is a word character), and under Regular Expression a replacement's `$1` names a group, as Replace All in Files writes it.
   Each bar keeps its own toggles, apart from the Search pane's and the other pane's bar.
 - A query that does not compile marks the box as the Search pane marks its own, and the readout says "Invalid pattern".

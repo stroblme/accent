@@ -446,10 +446,12 @@ fn painted(look: &gtk::TextTag, text: &str, ranges: &[Range<i32>]) -> pango::Att
     list
 }
 
-/// Match `at` (1-based, 0 for none selected) of `total`: "3 of 12", "12 matches", "No results".
+/// Match `at` (1-based, 0 for none selected) of `total`: "3 of 12", "12 matches", "1 match",
+/// "No results".
 fn matches_label(at: u32, total: u32) -> String {
     match (at, total) {
         (_, 0) => "No results".to_string(),
+        (0, 1) => "1 match".to_string(),
         (0, n) => format!("{n} matches"),
         (at, n) => format!("{at} of {n}"),
     }
@@ -466,5 +468,6 @@ mod tests {
         assert_eq!(matches_label(3, 12), "3 of 12");
         // Nothing selected, or a selection that is no match.
         assert_eq!(matches_label(0, 12), "12 matches");
+        assert_eq!(matches_label(0, 1), "1 match");
     }
 }

@@ -100,6 +100,7 @@ impl DiagramTab {
             _ if find.invalid => "Invalid pattern".to_string(),
             _ if find.query.is_empty() => String::new(),
             (0, _) => "No results".to_string(),
+            (1, None) => "1 match".to_string(),
             (total, None) => format!("{total} matches"),
             (total, Some(at)) => format!("{} of {total}", at + 1),
         }

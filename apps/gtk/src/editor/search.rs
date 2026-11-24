@@ -540,6 +540,7 @@ impl Finder {
         match (matches.len(), position) {
             (0, _) => "No results".to_string(),
             (count, Some(i)) => format!("{} of {count}", i + 1),
+            (1, None) => "1 match".to_string(),
             (count, None) => format!("{count} matches"),
         }
     }

@@ -82,6 +82,7 @@ impl GraphTab {
         }
         find.landed.then(|| match (find.hits.len(), find.current) {
             (0, _) => "No results".to_string(),
+            (1, None) => "1 match".to_string(),
             (total, None) => format!("{total} matches"),
             (total, Some(at)) => format!("{} of {total}", at + 1),
         })

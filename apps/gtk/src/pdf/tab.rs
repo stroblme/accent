@@ -1160,6 +1160,7 @@ impl PdfTab {
         let total = self.matches.borrow().len();
         match (total, self.current.get()) {
             (0, _) => "No results".to_string(),
+            (1, None) => "1 match".to_string(),
             (total, None) => format!("{total} matches"),
             (total, Some(at)) => format!("{} of {total}", at + 1),
         }

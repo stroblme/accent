@@ -326,8 +326,11 @@ fn painted(case: &str, bar: &Bar, searched: &sourceview5::View, other: &sourcevi
     let text = buffer.text(&start, &end, true);
     let total = text.matches("foo").count();
     let readout = bar.readout().0;
-    let counted =
-        readout.ends_with(&format!("of {total}")) || readout == format!("{total} matches");
+    let found = match total {
+        1 => "1 match".to_string(),
+        n => format!("{n} matches"),
+    };
+    let counted = readout.ends_with(&format!("of {total}")) || readout == found;
     println!(
         "bench find compare case={case} shown={shown} painted={painted} on_top={on_top} \
          elsewhere={elsewhere} readout={counted}"
