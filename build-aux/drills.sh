@@ -807,8 +807,9 @@ drill_coast() {
 # is the order it was written in, c, a then B, apart by more than a coarse clock's tick.
 # Presentation's laser pointer over a presented diagram, PDF and note, put up and away by a real
 # `L`: a drag's stroke held, fading, brought back by a press and gone, the document under it
-# neither turning its page nor selecting, and `l` typed into the find bar and a code tab there,
-# where the palette's Laser Pointer puts it up (DESIGN.md, Views).
+# neither turning its page nor selecting, the pointer the laser's dot until it goes, and `l` typed
+# into the find bar and a code tab there, where the palette's Laser Pointer puts it up and its dot
+# outlasts a key typed (DESIGN.md, Views).
 drill_laser() {
 	test -e "$pdfium" || { echo "SKIPPED the laser drill: no libpdfium"; return 0; }
 	launch 90 ACCENT_BENCH_CHROME=laser >"$dir/laser"
@@ -827,11 +828,15 @@ drill_laser() {
 		'bench laser diagram clicked page=2 selected=[]' \
 		'bench laser pdf kept=true page=Some("Page 1 of 1")' \
 		'bench laser note kept=true scrollY=0 selected=Some(false)' \
+		'bench laser diagram cursor rest=dot moved=dot off=default' \
+		'bench laser pdf cursor rest=dot moved=dot off=text' \
+		'bench laser note cursor rest=dot moved=dot off=text' \
 		'bench laser find query="l" on=false' \
 		'bench laser find closed on=true' \
 		'bench laser left presenting=false on=false' \
 		'bench laser code text=Some("x = 1l\n") on=false' \
 		'bench laser code palette on=true' \
+		'bench laser code cursor typed=dot moved=dot' \
 		'bench laser button before shown=true on=true active=true' \
 		'bench laser button pressed shown=true on=false active=false' \
 		'bench laser button again shown=true on=true active=true' \

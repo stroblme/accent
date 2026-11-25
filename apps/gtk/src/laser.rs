@@ -2,8 +2,10 @@
 //! up, a press and drag over the presented document draws a translucent red stroke, and the
 //! strokes fade together once the last one has rested a moment. They lie over the presented pane
 //! in its own coordinates, so no document view knows of them and a scroll leaves them where they
-//! were drawn.
+//! were drawn. The pointer meanwhile is the dot a press leaves, which the laser keeps on whatever
+//! lies under it, so no view knows of that either.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -23,12 +25,24 @@ const HOLD: Duration = Duration::from_millis(500);
 /// How long they then take to fade out: Xournal++'s 25 of 255 every 50 ms, evenly.
 const FADE_MS: u32 = 510;
 
-/// The strokes and what draws them: the presses on the document area they lie over.
+/// The strokes and what draws them: the presses on the document area they lie over, and the
+/// moves there that show its dot.
 pub struct Laser {
     painter: Painter,
     drag: gtk::GestureDrag,
+    motion: gtk::EventControllerMotion,
+    /// The widgets showing the dot, so the laser gives each its own cursor back as it goes.
+    covered: RefCell<Vec<Covered>>,
     hold: Debounce,
     fade: adw::TimedAnimation,
+}
+
+/// A widget the laser shows its dot on: the handler that puts the dot back whenever the widget
+/// sets a cursor of its own, and the cursor it last asked for, which it gets back.
+struct Covered {
+    widget: glib::WeakRef<gtk::Widget>,
+    handler: glib::SignalHandlerId,
+    wanted: Rc<RefCell<Option<gdk::Cursor>>>,
 }
 
 impl Laser {
@@ -56,11 +70,23 @@ impl Laser {
         let drag = gtk::GestureDrag::builder()
             .propagation_phase(gtk::PropagationPhase::Capture)
             .build();
+        // A move ahead of the document too, which may set its cursor as it hears it.
+        let motion = gtk::EventControllerMotion::builder()
+            .propagation_phase(gtk::PropagationPhase::Capture)
+            .build();
         let laser = Rc::new(Laser {
             painter,
             drag,
+            motion,
+            covered: RefCell::default(),
             hold: Debounce::new(HOLD),
             fade,
+        });
+        let weak = Rc::downgrade(&laser);
+        laser.motion.connect_motion(move |motion, x, y| {
+            if let (Some(laser), Some(area)) = (weak.upgrade(), motion.widget()) {
+                laser.cover(&area, x, y);
+            }
         });
         let weak = Rc::downgrade(&laser);
         laser.drag.connect_drag_begin(move |gesture, x, y| {
@@ -99,6 +125,12 @@ impl Laser {
         self.take_off();
         area.add_overlay(&self.painter);
         area.add_controller(self.drag.clone());
+        area.add_controller(self.motion.clone());
+        // `L` is a key, so the laser may come up under a pointer that has not moved.
+        let area = area.upcast_ref();
+        if let Some((x, y)) = pointer_over(area) {
+            self.cover(area, x, y);
+        }
     }
 
     /// Put the laser away, its strokes with it.
@@ -107,10 +139,53 @@ impl Laser {
             return;
         };
         area.remove_controller(&self.drag);
+        area.remove_controller(&self.motion);
+        for covered in self.covered.take() {
+            if let Some(widget) = covered.widget.upgrade() {
+                widget.disconnect(covered.handler);
+                widget.set_cursor(covered.wanted.borrow().as_ref());
+            }
+        }
         self.painter.unparent();
         self.hold.cancel();
         self.fade.reset();
         self.painter.imp().strokes.take();
+    }
+
+    /// Show the dot on each widget from the one at `(x, y)` up to `area`, the area too. GTK shows
+    /// the cursor of the deepest widget under the pointer that sets one, and a document sets its
+    /// own as it pleases (a PDF its I-beam on every move, a text view or a shell theirs), so each
+    /// gets the dot back whenever it does, keeping what it asked for until the laser goes.
+    fn cover(&self, area: &gtk::Widget, x: f64, y: f64) {
+        let dot = cursor();
+        let mut at = area.pick(x, y, gtk::PickFlags::DEFAULT);
+        while let Some(widget) = at {
+            if widget.cursor().as_ref() != Some(&dot) {
+                let wanted = Rc::new(RefCell::new(widget.cursor()));
+                widget.set_cursor(Some(&dot));
+                let handler = widget.connect_cursor_notify({
+                    let (wanted, dot) = (wanted.clone(), dot.clone());
+                    move |widget| {
+                        let cursor = widget.cursor();
+                        if cursor.as_ref() != Some(&dot) {
+                            wanted.replace(cursor);
+                            widget.set_cursor(Some(&dot));
+                        }
+                    }
+                });
+                let widget = widget.downgrade();
+                let covered = Covered {
+                    widget,
+                    handler,
+                    wanted,
+                };
+                self.covered.borrow_mut().push(covered);
+            }
+            if &widget == area {
+                break;
+            }
+            at = widget.parent();
+        }
     }
 
     /// A stroke from `(x, y)`, with every stroke still up back at full strength, as a press
@@ -149,6 +224,48 @@ impl Laser {
     }
 }
 
+/// The pointer while the laser is up: the dot a press leaves without moving, as wide and as red,
+/// its hotspot in the middle. Built once per thread, so a widget showing it is told by identity.
+pub fn cursor() -> gdk::Cursor {
+    const SIZE: i32 = WIDTH as i32;
+    thread_local! {
+        static DOT: gdk::Cursor = {
+            let middle = WIDTH / 2.0;
+            let byte = |channel: f32| (channel * 255.0).round() as u8;
+            let pixels: Vec<u8> = (0..SIZE * SIZE)
+                .flat_map(|at| {
+                    let x = (at % SIZE) as f32 + 0.5 - middle;
+                    let y = (at / SIZE) as f32 + 0.5 - middle;
+                    // How much of the pixel the dot covers: a soft pixel at its edge.
+                    let cover = (middle + 0.5 - x.hypot(y)).clamp(0.0, 1.0);
+                    let (r, g, b) = (COLOUR.red(), COLOUR.green(), COLOUR.blue());
+                    [byte(r), byte(g), byte(b), byte(COLOUR.alpha() * cover)]
+                })
+                .collect();
+            let texture = gdk::MemoryTexture::new(
+                SIZE,
+                SIZE,
+                gdk::MemoryFormat::R8g8b8a8,
+                &glib::Bytes::from_owned(pixels),
+                SIZE as usize * 4,
+            );
+            gdk::Cursor::from_texture(&texture, SIZE / 2, SIZE / 2, None)
+        };
+    }
+    DOT.with(Clone::clone)
+}
+
+/// Where the pointer rests over `area`, in its coordinates.
+fn pointer_over(area: &gtk::Widget) -> Option<(f64, f64)> {
+    let native = area.native()?;
+    let pointer = area.display().default_seat()?.pointer()?;
+    let (x, y, _) = native.surface()?.device_position(&pointer)?;
+    let (dx, dy) = native.surface_transform();
+    let at = graphene::Point::new((x - dx) as f32, (y - dy) as f32);
+    let at = native.compute_point(area, &at)?;
+    Some((at.x().into(), at.y().into()))
+}
+
 /// Whether the keyboard at `focus` types an `l` itself, where `L` cannot be the laser's: an
 /// entry (the find bar's, a dialog's), a shell, or a text view still editable, as a presented
 /// source file is.
@@ -183,7 +300,6 @@ impl Painter {
 
 mod imp {
     use super::*;
-    use std::cell::RefCell;
 
     #[derive(Default)]
     pub struct Painter {

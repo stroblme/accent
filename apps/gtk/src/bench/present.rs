@@ -349,10 +349,12 @@ const LINKED: &str = r#"<mxfile host="accent">
 /// and puts the laser pointer up over each with a real `L` (DESIGN.md, Views). A drag across the middle prints the strokes while the
 /// button is down (`<kind> drawing`), just after it is let go (`held`), into the fade (`fading`),
 /// as a press there brings them back (`again`) and once they are gone (`gone`), then whether what
-/// is presented stayed as it was (`kept`) and that `L` takes the pointer away (`off`); the
+/// is presented stayed as it was (`kept`) and that `L` takes the pointer away (`off`), and the
+/// cursor at the pointer as `L` puts it up, after the drag and once it is away (`cursor`); the
 /// diagram's link then turns its page to a plain click (`clicked`). Under F5 an `l` typed into
 /// the find bar is the query's and one typed into the code tab is its text, the palette's Laser
-/// Pointer reaching the pointer there, the status bar's toggle taking it away and putting it up
+/// Pointer reaching the pointer there and keeping its dot through a key typed and a move
+/// (`code cursor`), the status bar's toggle taking it away and putting it up
 /// again with real clicks (`button`), and F5 leaves with it away and the toggle gone. With
 /// `ACCENT_BENCH_SHOTS` set, the window at each moment goes to `laser-<kind>-<moment>.png` there.
 pub(super) fn bench_laser(app: &Rc<App>) {
@@ -408,6 +410,18 @@ pub(super) fn bench_laser(app: &Rc<App>) {
         println!("bench laser code text={text:?} on={}", laser_on(&app));
         let _ = WidgetExt::activate_action(&app.window, "win.laser", None);
         println!("bench laser code palette on={}", laser_on(&app));
+        // A key typed into a text view hides the pointer, and the next move brings GTK's I-beam
+        // back, which the laser keeps its dot over.
+        super::git::xtest("type x").await;
+        let typed = shown_cursor(&app);
+        if let Some((x, y)) = app.pointer() {
+            let (dx, dy) = app.window.surface_transform();
+            super::git::xtest(&format!("move {} {}", x + dx + 8.0, y + dy)).await;
+        }
+        println!(
+            "bench laser code cursor typed={typed} moved={}",
+            shown_cursor(&app)
+        );
         press_toggle(&app).await;
         super::git::xtest("key F5").await;
         println!("bench laser code left on={}", laser_on(&app));
@@ -679,6 +693,7 @@ async fn present(app: &Rc<App>, rel: &str) {
 async fn stroke(app: &Rc<App>, kind: &str) {
     super::git::xtest("key l").await;
     println!("bench laser {kind} on={}", laser_on(app));
+    let rest = shown_cursor(app);
     let before = presented(app);
     let Some(area) = app.pane().area().compute_bounds(&app.window) else {
         println!("bench laser {kind} no area");
@@ -734,11 +749,27 @@ async fn stroke(app: &Rc<App>, kind: &str) {
     moment(app, kind, "gone", Some(plain)).await;
     let after = presented(app);
     println!("bench laser {kind} kept={} {after}", after == before);
+    let moved = shown_cursor(app);
     super::git::xtest("key l").await;
     println!("bench laser {kind} off on={}", laser_on(app));
+    let off = shown_cursor(app);
+    println!("bench laser {kind} cursor rest={rest} moved={moved} off={off}");
     if kind == "diagram" {
         super::git::xtest(&format!("move {x} {y}; down; up")).await;
         println!("bench laser {kind} clicked {}", presented(app));
+    }
+}
+
+/// What GTK shows at the pointer, the cursor of the deepest widget under it that sets one: `dot`
+/// for the laser's, a cursor's name, or `default` where none sets one.
+fn shown_cursor(app: &App) -> String {
+    let under = app.pointer();
+    let under = under.and_then(|(x, y)| app.window.pick(x, y, gtk::PickFlags::DEFAULT));
+    let cursor = std::iter::successors(under, |widget| widget.parent()).find_map(|w| w.cursor());
+    match cursor {
+        Some(cursor) if cursor == crate::laser::cursor() => "dot".into(),
+        Some(cursor) => cursor.name().map_or("unnamed".into(), String::from),
+        None => "default".into(),
     }
 }
 
