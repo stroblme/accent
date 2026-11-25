@@ -195,6 +195,7 @@ impl Held {
     pub fn over(key: &str, page: &adw::TabPage) -> Option<Rc<Held>> {
         let holder = holder_of(page)?;
         holder.set_visible_child_name(LOADING);
+        crate::doc::set_file_icon(page, key);
         Some(Rc::new(Held {
             key: RefCell::new(key.to_string()),
             page: page.clone(),

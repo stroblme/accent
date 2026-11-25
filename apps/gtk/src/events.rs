@@ -13,12 +13,21 @@ impl App {
             remote.moved(from, to);
         }
         let prefix = format!("{from}/");
+        let renamed = |key: &str| match key.strip_prefix(&prefix) {
+            _ if key == from => Some(to.to_string()),
+            Some(rest) => Some(format!("{to}/{rest}")),
+            None => None,
+        };
+        // A file opened anyway stays so under its new name.
+        let whole = std::mem::take(&mut *self.whole.borrow_mut());
+        *self.whole.borrow_mut() = whole
+            .into_iter()
+            .map(|key| renamed(&key).unwrap_or(key))
+            .collect();
         for doc in self.docs() {
             let key = doc.key();
-            let moved = match key.strip_prefix(&prefix) {
-                _ if key == from => to.to_string(),
-                Some(rest) => format!("{to}/{rest}"),
-                None => continue,
+            let Some(moved) = renamed(&key) else {
+                continue;
             };
             // A new extension that makes it another kind of page opens it anew in its place.
             if !open::same_page(&key, &moved) && !matches!(doc, Doc::Loading(_)) {

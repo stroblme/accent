@@ -989,6 +989,10 @@ impl App {
             return;
         };
         self.whole.borrow_mut().insert(key.clone());
+        // A text page here asked for accent's editor, or a terminal editor would have taken it.
+        if matches!(doc::kind_of(&key), Kind::Note | Kind::Text) {
+            self.pending.in_accent(&key);
+        }
         {
             let mut docs = self.docs.borrow_mut();
             docs.retain(|d| d.page() != page);
