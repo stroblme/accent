@@ -2639,6 +2639,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 - `L` puts a laser pointer over whatever is presented and takes it away again, as leaving presentation does, Xournal++'s laser highlighter (user decision 2026-11-18).
   A press and drag draws a translucent red stroke 12 px wide over the pane and never on the document, which meanwhile neither selects, follows a link nor moves its page, though the wheel and the keys still read it.
   The pointer meanwhile is the dot a press leaves, as wide and as red as a stroke, in place of whatever cursor the document would show (user decision 2026-11-25).
+  It goes once the pointer has rested three seconds, as PowerPoint's Automatic pointer does, and comes back with the next move or press, a key being neither.
   The strokes stay half a second after the last one ends before they fade out together, unless a press brings them all back first.
   Where the keyboard types the letter, in a presented shell or source file, the find bar or a dialog, `L` types it and the palette's Laser Pointer or the status bar's toggle puts the pointer up instead.
 - It does not resize the window: fullscreen stays `F11`'s, so the two compose.
@@ -2850,6 +2851,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 | Show in PDF's mark on the line of text | 1.5 s | `pdf/source.rs::MARK` |
 | Reveal in Sidebar's outline holds, then fades | 1 s, then 2 s | `tree/mod.rs::FLASH_HOLD`, `FLASH_FADE_MS` |
 | The laser pointer's strokes hold, then fade | 500 ms, then 510 ms | `laser.rs::HOLD`, `FADE_MS` |
+| The laser pointer's dot once the pointer rests | 3 s | `laser.rs::IDLE` |
 
 ## Material 3 mapping
 

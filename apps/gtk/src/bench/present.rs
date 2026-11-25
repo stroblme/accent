@@ -350,7 +350,8 @@ const LINKED: &str = r#"<mxfile host="accent">
 /// button is down (`<kind> drawing`), just after it is let go (`held`), into the fade (`fading`),
 /// as a press there brings them back (`again`) and once they are gone (`gone`), then whether what
 /// is presented stayed as it was (`kept`) and that `L` takes the pointer away (`off`), and the
-/// cursor at the pointer as `L` puts it up, after the drag and once it is away (`cursor`); the
+/// cursor at the pointer as `L` puts it up, after the drag and once it is away (`cursor`), over
+/// the PDF gone once the pointer rests, through keys too, and back with a move (`idle`); the
 /// diagram's link then turns its page to a plain click (`clicked`). Under F5 an `l` typed into
 /// the find bar is the query's and one typed into the code tab is its text, the palette's Laser
 /// Pointer reaching the pointer there and keeping its dot through a key typed and a move
@@ -750,6 +751,16 @@ async fn stroke(app: &Rc<App>, kind: &str) {
     let after = presented(app);
     println!("bench laser {kind} kept={} {after}", after == before);
     let moved = shown_cursor(app);
+    if kind == "pdf" {
+        // Rested past the idle time the dot goes, keys leave it gone and a move brings it back.
+        glib::timeout_future(crate::laser::IDLE + Duration::from_millis(300)).await;
+        let rested = shown_cursor(app);
+        super::git::xtest("key Right; key space").await;
+        let keyed = shown_cursor(app);
+        super::git::xtest(&format!("move {} {y}", x + 140.0)).await;
+        let moved = shown_cursor(app);
+        println!("bench laser {kind} idle rested={rested} keyed={keyed} moved={moved}");
+    }
     super::git::xtest("key l").await;
     println!("bench laser {kind} off on={}", laser_on(app));
     let off = shown_cursor(app);

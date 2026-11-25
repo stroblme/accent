@@ -3,9 +3,9 @@
 //! strokes fade together once the last one has rested a moment. They lie over the presented pane
 //! in its own coordinates, so no document view knows of them and a scroll leaves them where they
 //! were drawn. The pointer meanwhile is the dot a press leaves, which the laser keeps on whatever
-//! lies under it, so no view knows of that either.
+//! lies under it, so no view knows of that either, and which goes while the pointer rests.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -24,6 +24,9 @@ const WIDTH: f32 = 12.0;
 const HOLD: Duration = Duration::from_millis(500);
 /// How long they then take to fade out: Xournal++'s 25 of 255 every 50 ms, evenly.
 const FADE_MS: u32 = 510;
+/// How long the pointer rests before its dot goes, as PowerPoint's Automatic pointer hides after
+/// three seconds without a move. A key is no move, so paging leaves it gone.
+pub(crate) const IDLE: Duration = Duration::from_secs(3);
 
 /// The strokes and what draws them: the presses on the document area they lie over, and the
 /// moves there that show its dot.
@@ -33,6 +36,9 @@ pub struct Laser {
     motion: gtk::EventControllerMotion,
     /// The widgets showing the dot, so the laser gives each its own cursor back as it goes.
     covered: RefCell<Vec<Covered>>,
+    /// Whether the pointer has rested past [`IDLE`], its dot gone.
+    resting: Rc<Cell<bool>>,
+    idle: Debounce,
     hold: Debounce,
     fade: adw::TimedAnimation,
 }
@@ -79,12 +85,15 @@ impl Laser {
             drag,
             motion,
             covered: RefCell::default(),
+            resting: Rc::default(),
+            idle: Debounce::new(IDLE),
             hold: Debounce::new(HOLD),
             fade,
         });
         let weak = Rc::downgrade(&laser);
         laser.motion.connect_motion(move |motion, x, y| {
             if let (Some(laser), Some(area)) = (weak.upgrade(), motion.widget()) {
+                laser.stir();
                 laser.cover(&area, x, y);
             }
         });
@@ -92,6 +101,7 @@ impl Laser {
         laser.drag.connect_drag_begin(move |gesture, x, y| {
             gesture.set_state(gtk::EventSequenceState::Claimed);
             if let Some(laser) = weak.upgrade() {
+                laser.stir();
                 laser.begin(x, y);
             }
         });
@@ -118,7 +128,7 @@ impl Laser {
 
     /// Draw over `area`, the presented pane's document area, with the presses made there; one up
     /// over another pane's leaves it, its strokes with it.
-    pub fn lay_over(&self, area: &gtk::Overlay) {
+    pub fn lay_over(self: &Rc<Self>, area: &gtk::Overlay) {
         if self.painter.parent().as_ref() == Some(area.upcast_ref()) {
             return;
         }
@@ -126,11 +136,13 @@ impl Laser {
         area.add_overlay(&self.painter);
         area.add_controller(self.drag.clone());
         area.add_controller(self.motion.clone());
-        // `L` is a key, so the laser may come up under a pointer that has not moved.
+        // `L` is a key, so the laser may come up under a pointer that has not moved, its dot
+        // showing where until the pointer has rested.
         let area = area.upcast_ref();
         if let Some((x, y)) = pointer_over(area) {
             self.cover(area, x, y);
         }
+        self.stir();
     }
 
     /// Put the laser away, its strokes with it.
@@ -146,6 +158,8 @@ impl Laser {
                 widget.set_cursor(covered.wanted.borrow().as_ref());
             }
         }
+        self.idle.cancel();
+        self.resting.set(false);
         self.painter.unparent();
         self.hold.cancel();
         self.fade.reset();
@@ -157,19 +171,19 @@ impl Laser {
     /// own as it pleases (a PDF its I-beam on every move, a text view or a shell theirs), so each
     /// gets the dot back whenever it does, keeping what it asked for until the laser goes.
     fn cover(&self, area: &gtk::Widget, x: f64, y: f64) {
-        let dot = cursor();
         let mut at = area.pick(x, y, gtk::PickFlags::DEFAULT);
         while let Some(widget) = at {
-            if widget.cursor().as_ref() != Some(&dot) {
+            let laser = shown(self.resting.get());
+            if widget.cursor().as_ref() != Some(&laser) {
                 let wanted = Rc::new(RefCell::new(widget.cursor()));
-                widget.set_cursor(Some(&dot));
+                widget.set_cursor(Some(&laser));
                 let handler = widget.connect_cursor_notify({
-                    let (wanted, dot) = (wanted.clone(), dot.clone());
+                    let (wanted, resting) = (wanted.clone(), self.resting.clone());
                     move |widget| {
-                        let cursor = widget.cursor();
-                        if cursor.as_ref() != Some(&dot) {
+                        let (cursor, laser) = (widget.cursor(), shown(resting.get()));
+                        if cursor.as_ref() != Some(&laser) {
                             wanted.replace(cursor);
-                            widget.set_cursor(Some(&dot));
+                            widget.set_cursor(Some(&laser));
                         }
                     }
                 });
@@ -185,6 +199,29 @@ impl Laser {
                 break;
             }
             at = widget.parent();
+        }
+    }
+
+    /// The pointer moved or pressed: its dot back if it had gone, and gone again once it rests.
+    fn stir(self: &Rc<Self>) {
+        if self.resting.replace(false) {
+            self.show(&cursor());
+        }
+        let weak = Rc::downgrade(self);
+        self.idle.call(move || {
+            if let Some(laser) = weak.upgrade() {
+                laser.resting.set(true);
+                laser.show(&shown(true));
+            }
+        });
+    }
+
+    /// Show `cursor` on each widget the laser covers.
+    fn show(&self, cursor: &gdk::Cursor) {
+        for covered in self.covered.borrow().iter() {
+            if let Some(widget) = covered.widget.upgrade() {
+                widget.set_cursor(Some(cursor));
+            }
         }
     }
 
@@ -253,6 +290,18 @@ pub fn cursor() -> gdk::Cursor {
         };
     }
     DOT.with(Clone::clone)
+}
+
+/// What the laser shows for a pointer, its dot or, once the pointer has rested, none at all.
+fn shown(resting: bool) -> gdk::Cursor {
+    thread_local! {
+        static NONE: gdk::Cursor =
+            gdk::Cursor::from_name("none", None).expect("GDK makes a cursor of any name");
+    }
+    match resting {
+        true => NONE.with(Clone::clone),
+        false => cursor(),
+    }
 }
 
 /// Where the pointer rests over `area`, in its coordinates.
