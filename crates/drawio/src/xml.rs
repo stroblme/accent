@@ -19,6 +19,17 @@ pub fn parse(bytes: &[u8]) -> Result<File, Error> {
     parse_within(bytes, Budget::FILE)
 }
 
+/// [`parse`] without the file's [`Budget`], for one its reader asked to open anyway.
+pub fn parse_unbounded(bytes: &[u8]) -> Result<File, Error> {
+    parse_within(
+        bytes,
+        Budget {
+            inflated: usize::MAX,
+            elements: usize::MAX,
+        },
+    )
+}
+
 /// What one file may hold, every page of it being read in and kept, as the bytes its compressed
 /// pages inflate to and the elements of its XML and theirs. Each page once had the bytes to
 /// itself, so that twelve pages of a file of 100 kB held 72 MiB of labels, and bytes alone leave
@@ -42,7 +53,7 @@ impl Budget {
     fn element(&mut self) -> Result<(), Error> {
         self.elements = self.elements.checked_sub(1).ok_or_else(|| {
             let most = Budget::FILE.elements;
-            Error::Format(format!("the file holds more than {most} elements"))
+            Error::TooLarge(format!("the file holds more than {most} elements"))
         })?;
         Ok(())
     }
@@ -265,7 +276,7 @@ fn decompress_within(text: &str, left: &mut usize) -> Result<String, Error> {
         TINFLStatus::HasMoreOutput => {
             *left = 0;
             let most = MAX_INFLATED >> 20;
-            Error::Format(format!(
+            Error::TooLarge(format!(
                 "the compressed pages inflate to more than {most} MiB"
             ))
         }
@@ -819,7 +830,7 @@ mod tests {
         let bomb = "S0wcBaNgFAx3AAA=";
         assert!(matches!(
             decompress_within(bomb, &mut 999),
-            Err(Error::Format(_))
+            Err(Error::TooLarge(_))
         ));
         let mut left = 1500;
         assert_eq!(decompress_within(bomb, &mut left).unwrap().len(), 1000);
@@ -938,7 +949,7 @@ mod tests {
         };
         let e = read(12, bytes).unwrap_err();
         assert!(
-            matches!(&e, Error::Format(why) if why.contains("inflate")),
+            matches!(&e, Error::TooLarge(why) if why.contains("inflate")),
             "{e}"
         );
         let elements = Budget {
@@ -947,7 +958,7 @@ mod tests {
         };
         let e = read(12, elements).unwrap_err();
         assert!(
-            matches!(&e, Error::Format(why) if why.contains("elements")),
+            matches!(&e, Error::TooLarge(why) if why.contains("elements")),
             "{e}"
         );
     }

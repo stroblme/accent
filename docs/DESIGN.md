@@ -819,6 +819,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 ### Unreadable file
 
 - An `AdwStatusPage` in the tab itself, not a dialog or a toast: `dialog-warning-symbolic`, Binary File or File Too Large, the size, and one Show in Files button (Download… on a remote vault).
+  File Too Large offers Open Anyway in its place, which reads the file whole into the same tab and keeps reading it whole while the window is open (user decision 2026-11-25).
+  A text file is too large past Preferences → File Size Limit, 16 MiB unless set and -1 for any size, and a diagram only past its reader's budget of 64 MiB inflated and a million elements, since a diagram's bytes say little of what it costs to draw.
   The tab keeps the warning icon, so the bar says which open file would not open.
 
 ### Preview
@@ -1224,6 +1226,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - Editor leads with Text Editor, which lists Accent and the terminal editors the login shell finds, marks a picked one it no longer finds as not found, and lists Custom Command while `config.toml` picks one, which only the file sets (Terminal).
   The shell is asked once a process, when the row is first shown or a window opens with a terminal editor picked, and never while Accent is picked and Preferences stays shut.
 - Files holds Show Hidden Files and Colour Changed Files, both on, and Sort Folders Among Files, off; the second tints the tree's changed names and leaves its dims alone (Sidebar → Files).
+  File Size Limit, last, is the largest text file a tab opens, in MiB (Unreadable file).
 - Graph holds Open Found Files, off, under which each step of the graph's find bar opens its file beside the graph as a click on its node does, without growing the graph (Graph).
 - Commands holds the user's own commands (Terminal), each an `AdwExpanderRow` of its name over its command line, opening on Name, Command, its Shortcut (recorded as the palette records one, refusing a chord in use by name, a clash from a hand edit marked) and Remove Command; Add Command puts a new one at the end, opened. Restore Defaults keeps them, as it keeps the recent vaults: they are the user's, not settings with a default.
 - Each window builds its dialog once, on idle after it opens, and presents that one again: an open held the main thread about 60 ms before its animation could run, a stutter, and a dialog shown before holds it about 30 (release, Xvfb, `ACCENT_BENCH_SWITCHER=prefs`).

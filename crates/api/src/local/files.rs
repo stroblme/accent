@@ -128,6 +128,11 @@ impl Local {
         fs::read_text(&self.resolve(rel)?).map_err(named(rel))
     }
 
+    /// [`read_text`](Self::read_text) capped at `cap` bytes, or not at all ([`fs::read_text_within`]).
+    pub fn read_text_within(&self, rel: &str, cap: Option<u64>) -> Result<fs::Read> {
+        fs::read_text_within(&self.resolve(rel)?, cap).map_err(named(rel))
+    }
+
     /// Read a host dependency only while a live language session has named its absolute path, or
     /// a file a shell's output named once [`shell_file`](Self::shell_file) has found it.
     pub fn read_named(&self, abs: &str) -> Result<fs::Read> {

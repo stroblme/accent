@@ -190,6 +190,20 @@ impl Held {
         })
     }
 
+    /// `page`, a status page's tab, held again for another read of `key` (`App::open_anyway`),
+    /// on the loading page meanwhile.
+    pub fn over(key: &str, page: &adw::TabPage) -> Option<Rc<Held>> {
+        let holder = holder_of(page)?;
+        holder.set_visible_child_name(LOADING);
+        Some(Rc::new(Held {
+            key: RefCell::new(key.to_string()),
+            page: page.clone(),
+            holder,
+            failed: Cell::new(false),
+            unread: Cell::new(false),
+        }))
+    }
+
     pub fn key(&self) -> String {
         self.key.borrow().clone()
     }

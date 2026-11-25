@@ -375,6 +375,7 @@ impl App {
             .filter(|_| !doc::is_loose_key(key) || doc::host_file_path(key).is_some())
             .cloned();
         let (key, path) = (key.to_string(), path.to_path_buf());
+        let cap = self.read_cap(&key);
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
             let read = crate::work::off_thread("reader", {
@@ -387,8 +388,8 @@ impl App {
                         Some(vault) if doc::host_file_path(&key).is_some() => {
                             vault.read_named(doc::host_file_path(&key).unwrap())
                         }
-                        Some(vault) => vault.read_text(&key),
-                        None => accent_core::fs::read_text(&path).map_err(Into::into),
+                        Some(vault) => vault.read_text_within(&key, cap),
+                        None => accent_core::fs::read_text_within(&path, cap).map_err(Into::into),
                     }
                 }
             })
@@ -423,6 +424,7 @@ impl App {
                     key,
                     "Binary File",
                     &format!("This file cannot be edited as text ({}).", human(size)),
+                    false,
                     how,
                 );
             }
@@ -437,13 +439,14 @@ impl App {
                     key,
                     "File Too Large",
                     // The file's size goes through `human`, which is decimal because that is what
-                    // GNOME shows in Files. The cap does not: it is `16 * 1024 * 1024`, and
-                    // decimal units render that as "16.8 MB", which is not the number anyone set.
+                    // GNOME shows in Files. The limit does not: it is set in MiB, and decimal
+                    // units render 16 of them as "16.8 MB", which is not the number anyone set.
                     &format!(
                         "{} exceeds the {} MiB editor limit.",
                         human(size),
-                        accent_core::fs::MAX_TEXT / (1024 * 1024)
+                        self.config.borrow().text_limit_mib
                     ),
+                    true,
                     how,
                 );
             }
@@ -901,8 +904,15 @@ impl App {
     }
 
     /// A file we decline to open, as a page saying why (DESIGN.md, States: a status page with one
-    /// sentence and at most one button), in its held tab.
-    pub(crate) fn open_status(self: &Rc<Self>, key: &str, title: &str, body: &str, how: Opened) {
+    /// sentence and at most one button), in its held tab. One `too_large` offers Open Anyway.
+    pub(crate) fn open_status(
+        self: &Rc<Self>,
+        key: &str,
+        title: &str,
+        body: &str,
+        too_large: bool,
+        how: Opened,
+    ) {
         self.drop_awaiting(key, &title.to_lowercase());
         let Some(held) = self.take_held(key) else {
             return;
@@ -913,8 +923,24 @@ impl App {
             .title(title)
             .description(body)
             .build();
+        // A host dependency is read through its language session's gate, which keeps its cap.
+        if too_large && doc::host_file_path(&key).is_none() {
+            let button = gtk::Button::builder()
+                .label("Open Anyway")
+                .halign(gtk::Align::Center)
+                .css_classes(["pill"])
+                .build();
+            let page = held.page.clone();
+            button.connect_clicked(glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                #[weak]
+                page,
+                move |_| app.open_anyway(&page)
+            ));
+            status.set_child(Some(&button));
         // The vault downloader takes vault paths; a host dependency has no such path.
-        if doc::host_file_path(&key).is_none() {
+        } else if doc::host_file_path(&key).is_none() {
             let on_host = self.on_host(&key);
             let button = gtk::Button::builder()
                 .label(if on_host {
@@ -949,6 +975,41 @@ impl App {
             .borrow_mut()
             .push(Doc::Status(doc::Viewer::new(&key, page.clone())));
         self.landed(&page, how);
+    }
+
+    /// Open Anyway on a File Too Large page: its tab held again, and its file read whole into it.
+    fn open_anyway(self: &Rc<Self>, page: &adw::TabPage) {
+        let Some((key, path)) = self
+            .doc_for_page(page)
+            .and_then(|doc| self.locate(&doc.key()))
+        else {
+            return;
+        };
+        let Some(held) = loading::Held::over(&key, page) else {
+            return;
+        };
+        self.whole.borrow_mut().insert(key.clone());
+        {
+            let mut docs = self.docs.borrow_mut();
+            docs.retain(|d| d.page() != page);
+            docs.push(Doc::Loading(held));
+        }
+        self.read(&key, &path, Opened::Kept);
+    }
+
+    /// The most of `key`'s file a tab's read takes, `None` for all of it: Preferences → File Size
+    /// Limit for text, nothing for a file opened anyway, nor for a diagram, which its reader's
+    /// budget holds instead ([`App::opened_whole`]).
+    pub(crate) fn read_cap(&self, key: &str) -> Option<u64> {
+        if doc::kind_of(key) == Kind::Diagram || self.opened_whole(key) {
+            return None;
+        }
+        self.config.borrow().text_limit()
+    }
+
+    /// Whether the reader asked to Open Anyway `key`, which is then read and parsed whole.
+    pub(crate) fn opened_whole(&self, key: &str) -> bool {
+        self.whole.borrow().contains(key)
     }
 
     /// Put up the tab a Git row compares `key` in before the comparison is read, so a click on a

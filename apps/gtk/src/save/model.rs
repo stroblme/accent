@@ -18,8 +18,10 @@ pub(crate) trait SavesModel: Saves {
         move || text
     }
 
-    /// The file at `key` as read for a reload, parsed on the worker.
-    fn parse(key: &str, read: accent_api::Result<accent_core::fs::Read>) -> Self::Read;
+    /// The file at `key` as read for a reload, parsed on the worker, `whole` if the reader asked
+    /// to open it anyway past its reader's limit ([`App::opened_whole`]).
+    fn parse(key: &str, read: accent_api::Result<accent_core::fs::Read>, whole: bool)
+    -> Self::Read;
 
     /// Put a reload's read in the tab, which nothing overtook while it was out, or say why not.
     fn reloaded(app: &Rc<App>, tab: &Rc<Self>, read: Self::Read);
@@ -157,18 +159,19 @@ impl App {
             .filter(|_| !doc::is_loose_key(&tab.key()))
             .cloned();
         let (key, path) = (tab.key(), tab.path());
+        let (cap, whole) = (self.read_cap(&key), self.opened_whole(&key));
         let reading = tab.save_state().begin_reload(&key);
         let reader = format!("{} reader", T::KIND.to_lowercase());
         let (app, reloading) = (Rc::downgrade(self), Rc::downgrade(tab));
         glib::spawn_future_local(async move {
             let read = crate::work::off_thread(&reader, move || {
                 let read = match vault {
-                    Some(vault) => vault.read_text(&key),
-                    None => accent_core::fs::read_text(&path).map_err(Into::into),
+                    Some(vault) => vault.read_text_within(&key, cap),
+                    None => accent_core::fs::read_text_within(&path, cap).map_err(Into::into),
                 };
                 #[cfg(feature = "bench")]
                 crate::bench::hold(&crate::bench::SLOW_RELOAD_MS);
-                T::parse(&key, read)
+                T::parse(&key, read, whole)
             })
             .await;
             let (Some(app), Some(tab)) = (app.upgrade(), reloading.upgrade()) else {

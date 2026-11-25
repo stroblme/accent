@@ -251,7 +251,7 @@ impl SavesModel for NotebookTab {
     const KIND: &'static str = "Notebook";
     type Read = Result<(notebook::Notebook, Etag, Digest), String>;
 
-    fn parse(key: &str, read: accent_api::Result<accent_core::fs::Read>) -> Self::Read {
+    fn parse(key: &str, read: accent_api::Result<accent_core::fs::Read>, _: bool) -> Self::Read {
         match read {
             Ok(accent_core::fs::Read::Text(text)) => notebook::read(key, &text.text)
                 .map(|nb| (nb, text.etag, text.digest()))

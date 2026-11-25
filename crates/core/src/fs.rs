@@ -71,16 +71,20 @@ fn open_stamped(path: &Path) -> io::Result<(std::fs::File, std::fs::Metadata)> {
 }
 
 /// The bytes of the file at `path` and its etag, taken as [`open_stamped`] takes it, or the
-/// file's size as the error when it holds more than [`MAX_TEXT`]. The cap holds while reading, so
-/// a file that grows past it mid-read is too large too, never read to wherever it ends.
-fn read_capped(path: &Path) -> io::Result<Result<(Vec<u8>, Etag), u64>> {
+/// file's size as the error when it holds more than `cap` bytes (`None` reads it whole). The cap
+/// holds while reading, so a file that grows past it mid-read is too large too, never read to
+/// wherever it ends.
+fn read_capped(path: &Path, cap: Option<u64>) -> io::Result<Result<(Vec<u8>, Etag), u64>> {
     let (file, meta) = open_stamped(path)?;
-    if meta.size() > MAX_TEXT {
+    let cap = cap.unwrap_or(u64::MAX);
+    if meta.size() > cap {
         return Ok(Err(meta.size()));
     }
     let mut bytes = Vec::with_capacity(meta.size() as usize);
-    (&file).take(MAX_TEXT + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_TEXT {
+    (&file)
+        .take(cap.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > cap {
         return Ok(Err(file.metadata()?.size()));
     }
     Ok(Ok((bytes, Etag::from_meta(&meta))))
@@ -89,7 +93,7 @@ fn read_capped(path: &Path) -> io::Result<Result<(Vec<u8>, Etag), u64>> {
 /// Read a note and the etag to hand back to [`write_note`]. A file over [`MAX_TEXT`], or one that
 /// is not UTF-8, is [`Error::Invalid`].
 pub fn read_note(path: &Path) -> Result<(String, Etag)> {
-    let read = read_capped(path).map_err(|e| Error::io(path.display(), e))?;
+    let read = read_capped(path, Some(MAX_TEXT)).map_err(|e| Error::io(path.display(), e))?;
     let (bytes, etag) = read.map_err(|_| {
         Error::Invalid(format!(
             "the file is larger than {} MiB",
@@ -127,7 +131,13 @@ pub struct Text {
 /// Read any file as text, saying so when it is binary or too big to hold. The etag is taken as
 /// [`read_note`] takes it.
 pub fn read_text(path: &Path) -> Result<Read> {
-    let (bytes, etag) = match read_capped(path).map_err(|e| Error::io(path.display(), e))? {
+    read_text_within(path, Some(MAX_TEXT))
+}
+
+/// [`read_text`] with a cap of `cap` bytes in place of [`MAX_TEXT`], or none: what a tab opens
+/// with, as Preferences → File Size Limit or Open Anyway sets it.
+pub fn read_text_within(path: &Path, cap: Option<u64>) -> Result<Read> {
+    let (bytes, etag) = match read_capped(path, cap).map_err(|e| Error::io(path.display(), e))? {
         Ok(read) => read,
         Err(size) => return Ok(Read::TooLarge { size }),
     };
@@ -707,6 +717,11 @@ mod tests {
         assert!(
             matches!(read_text(&big).unwrap(), Read::TooLarge { size } if size == MAX_TEXT + 1)
         );
+        // Open Anyway lifts the cap.
+        assert!(matches!(
+            read_text_within(&big, None).unwrap(),
+            Read::Binary { size } if size == MAX_TEXT + 1
+        ));
 
         // Opening a FIFO nobody writes to for reading would wait forever.
         let fifo = dir.path().join("fifo.md");

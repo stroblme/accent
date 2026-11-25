@@ -57,6 +57,11 @@ impl File {
         crate::xml::parse(bytes)
     }
 
+    /// [`from_bytes`](Self::from_bytes) of a file past the reader's budget, read all the same.
+    pub fn from_bytes_unbounded(bytes: &[u8]) -> Result<File, Error> {
+        crate::xml::parse_unbounded(bytes)
+    }
+
     /// The file as draw.io writes it, uncompressed.
     pub fn to_xml(&self) -> String {
         crate::xml::write(self)

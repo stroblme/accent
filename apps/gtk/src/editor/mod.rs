@@ -689,13 +689,15 @@ impl Tab {
         self.page.set_title(&self.tab_title());
     }
 
-    /// Reload a clean tab on a worker and call `done` once with the result.
+    /// Reload a clean tab on a worker, up to `cap` bytes ([`crate::App::read_cap`]), and call `done`
+    /// once with the result.
     ///
     /// Large reads must not block watcher handling. Vault files read through `vault`, including
     /// remote paths; loose files read their own local path.
     pub fn reload_keep_cursor(
         self: &Rc<Self>,
         vault: Option<Arc<Vault>>,
+        cap: Option<u64>,
         done: impl Fn(&Rc<Tab>, accent_api::Result<()>) + 'static,
     ) {
         // Where the caret and the page are, measured before the read: replacing the buffer empties
@@ -715,11 +717,11 @@ impl Tab {
                 Some(vault) if crate::doc::host_file_path(&rel).is_some() => {
                     vault.read_named(crate::doc::host_file_path(&rel).unwrap())
                 }
-                Some(vault) => vault.read_text(&rel),
+                Some(vault) => vault.read_text_within(&rel, cap),
                 None if crate::doc::host_file_path(&rel).is_some() => {
                     Err(Core::Invalid("remote host file has no vault".into()).into())
                 }
-                None => fs::read_text(&path).map_err(Into::into),
+                None => fs::read_text_within(&path, cap).map_err(Into::into),
             })
             .await;
             let Some(tab) = weak.upgrade() else { return };

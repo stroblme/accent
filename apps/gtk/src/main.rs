@@ -319,6 +319,9 @@ struct App {
     docs: RefCell<Vec<Doc>>,
     /// What waits on documents still being opened, by key: see [`pending::Pending`].
     pending: pending::Pending,
+    /// Files the reader asked to Open Anyway past the size limit, which every read of them then
+    /// takes whole ([`App::read_cap`]).
+    whole: RefCell<HashSet<String>>,
     /// The tabs the files of the last launch naming several have landed in so far, each with its
     /// place among them: see [`App::land_in_order`].
     launched: RefCell<Vec<(usize, glib::WeakRef<adw::TabPage>)>>,

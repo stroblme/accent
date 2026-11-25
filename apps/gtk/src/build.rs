@@ -300,6 +300,7 @@ pub fn build_window(
         statusbar,
         docs: RefCell::new(Vec::new()),
         pending: pending::Pending::default(),
+        whole: RefCell::default(),
         launched: RefCell::new(Vec::new()),
         restore: RefCell::new(std::rc::Weak::new()),
         tree: OnceCell::new(),

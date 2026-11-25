@@ -713,6 +713,17 @@ fn files_group(rows: &Rc<Rows>) -> adw::PreferencesGroup {
         Some("Use the accent colour for changes and green for new files"),
         |c| &mut c.git_tint,
     ));
+    // Signed for its -1, so not `spin_row`'s.
+    let limit = adw::SpinRow::with_range(-1.0, 1024.0, 1.0);
+    limit.set_title("File Size Limit");
+    limit.set_subtitle("Largest text file to open, in MiB, or -1 for any size");
+    limit.set_value(f64::from(rows.config.borrow().text_limit_mib));
+    limit.connect_value_notify({
+        let rows = rows.clone();
+        move |r| rows.set(|c| c.text_limit_mib = r.value().round() as i32)
+    });
+    rows.follow(&limit, |row, c| row.set_value(f64::from(c.text_limit_mib)));
+    group.add(&limit);
     group
 }
 

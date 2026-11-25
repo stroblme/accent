@@ -48,6 +48,9 @@ pub enum Error {
     Format(String),
     #[error("malformed XML: {0}")]
     Xml(String),
+    /// A diagram past what its reader holds (`xml::Budget`), which Open Anyway reads all the same.
+    #[error("{0}")]
+    TooLarge(String),
     #[error("there is no page {0}")]
     NoPage(usize),
     #[error("there is no cell {0} on this page")]

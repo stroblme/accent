@@ -18,31 +18,40 @@ pub(crate) enum Parsed {
     Diagram(File, Etag, Digest),
     /// Not something to draw on, and why: a status page's title and sentence.
     Refused(&'static str, String),
+    /// Past its reader's budget, and why: a File Too Large page with Open Anyway.
+    TooLarge(String),
     Failed(Error),
 }
 
-/// Read and parse on a worker thread: the file is XML of up to 16 MiB.
-fn parse(read: accent_api::Result<accent_core::fs::Read>) -> Parsed {
+/// Read and parse on a worker thread, held to the reader's budget unless `whole`. A `.drawio` is
+/// read whole, as no size of its own says what a diagram costs: a picture's bytes are cheap to
+/// hold, while a page of cells costs their number squared to draw (2026-11-25).
+fn parse(read: accent_api::Result<accent_core::fs::Read>, whole: bool) -> Parsed {
     match read {
-        Ok(accent_core::fs::Read::Text(text)) => parse_text(text),
+        Ok(accent_core::fs::Read::Text(text)) => parse_text(text, whole),
         Ok(accent_core::fs::Read::Binary { .. }) => Parsed::Refused(
             "Not a Diagram",
             "A draw.io diagram must be a text file.".to_string(),
         ),
-        Ok(accent_core::fs::Read::TooLarge { .. }) => Parsed::Refused(
-            "File Too Large",
-            format!(
-                "This file exceeds the {} MiB text file limit.",
-                accent_core::fs::MAX_TEXT / (1024 * 1024)
-            ),
-        ),
+        // Only an `.xml` diagram, which is read as text is, up to the File Size Limit.
+        Ok(accent_core::fs::Read::TooLarge { .. }) => {
+            Parsed::TooLarge("This file is past the File Size Limit.".to_string())
+        }
         Err(e) => Parsed::Failed(e),
     }
 }
 
-fn parse_text(text: accent_core::fs::Text) -> Parsed {
-    match File::from_bytes(text.text.as_bytes()) {
+fn parse_text(text: accent_core::fs::Text, whole: bool) -> Parsed {
+    let bytes = text.text.as_bytes();
+    let file = match whole {
+        true => File::from_bytes_unbounded(bytes),
+        false => File::from_bytes(bytes),
+    };
+    match file {
         Ok(file) => Parsed::Diagram(file, text.etag, text.digest()),
+        Err(accent_drawio::Error::TooLarge(why)) => Parsed::TooLarge(format!(
+            "This diagram is past the reader's limit, as {why}."
+        )),
         Err(e) => Parsed::Refused("Not a Diagram", format!("Could not read this file: {e}.")),
     }
 }
@@ -65,6 +74,7 @@ impl App {
     pub(crate) fn open_diagram(self: &Rc<Self>, key: &str, path: &Path, how: Opened) {
         let vault = self.vault().filter(|_| !doc::is_loose_key(key)).cloned();
         let (key, path) = (key.to_string(), path.to_path_buf());
+        let whole = self.opened_whole(&key);
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
             let parsed = crate::work::off_thread("diagram reader", {
@@ -72,10 +82,11 @@ impl App {
                 move || {
                     #[cfg(feature = "bench")]
                     crate::bench::hold(&crate::bench::SLOW_READ_MS);
-                    parse(match vault {
-                        Some(vault) => vault.read_text(&key),
-                        None => accent_core::fs::read_text(&path).map_err(Into::into),
-                    })
+                    let read = match vault {
+                        Some(vault) => vault.read_text_within(&key, None),
+                        None => accent_core::fs::read_text_within(&path, None).map_err(Into::into),
+                    };
+                    parse(read, whole)
                 }
             })
             .await;
@@ -99,9 +110,11 @@ impl App {
     ) {
         let key = key.to_string();
         let path = self.root().join(&key);
+        let whole = self.opened_whole(&key);
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
-            let parsed = crate::work::off_thread("diagram reader", move || parse_text(text)).await;
+            let parsed =
+                crate::work::off_thread("diagram reader", move || parse_text(text, whole)).await;
             if let (Some(app), Some(parsed)) = (weak.upgrade(), parsed) {
                 app.adopt_diagram(&key, &path, parsed, how);
             }
@@ -111,7 +124,10 @@ impl App {
     fn adopt_diagram(self: &Rc<Self>, key: &str, path: &Path, parsed: Parsed, how: Opened) {
         let (file, etag, digest) = match parsed {
             Parsed::Diagram(file, etag, digest) => (file, etag, digest),
-            Parsed::Refused(title, body) => return self.open_status(key, title, &body, how),
+            Parsed::Refused(title, body) => return self.open_status(key, title, &body, false, how),
+            Parsed::TooLarge(body) => {
+                return self.open_status(key, "File Too Large", &body, true, how);
+            }
             Parsed::Failed(e) => return self.read_failed(key, e),
         };
         let Some(held) = self.take_held(key) else {
@@ -549,14 +565,14 @@ impl SavesModel for DiagramTab {
     const KIND: &'static str = "Diagram";
     type Read = Parsed;
 
-    /// The model as it is now, written out on the worker: up to 16 MiB of XML.
+    /// The model as it is now, written out on the worker.
     fn contents(&self) -> impl FnOnce() -> String + Send + 'static {
         let file = self.file();
         move || file.to_xml()
     }
 
-    fn parse(_: &str, read: accent_api::Result<accent_core::fs::Read>) -> Parsed {
-        parse(read)
+    fn parse(_: &str, read: accent_api::Result<accent_core::fs::Read>, whole: bool) -> Parsed {
+        parse(read, whole)
     }
 
     fn reloaded(app: &Rc<App>, tab: &Rc<Self>, read: Parsed) {
@@ -565,7 +581,7 @@ impl SavesModel for DiagramTab {
                 tab.reload(file, etag, digest);
                 app.sync_status();
             }
-            Parsed::Refused(_, why) => app.cannot("reload", why),
+            Parsed::Refused(_, why) | Parsed::TooLarge(why) => app.cannot("reload", why),
             Parsed::Failed(e) => app.cannot("reload", e),
         }
     }

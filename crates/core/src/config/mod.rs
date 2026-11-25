@@ -28,6 +28,7 @@ indent_width = 4
 forward_keys_to_terminal = false
 debug_terminal = "down"
 graph_find_opens = true
+text_limit_mib = 64
 editor = "helix"
 theme = "solarized"
 focus_mode = "high"
@@ -232,6 +233,9 @@ pub struct Config {
     /// A step through the Graph tab's find bar also opens the file it reaches beside the graph,
     /// as a click on its node does. Off by default: a step brings the node to the middle alone.
     pub graph_find_opens: bool,
+    /// The largest text file a tab opens, in MiB, which the File Too Large page's Open Anyway
+    /// overrides; -1 opens any size. A diagram is held to its reader's budget instead.
+    pub text_limit_mib: i32,
     /// The editor a text file opens in.
     #[serde(skip_serializing_if = "Editor::is_accent")]
     pub editor: Editor,
@@ -440,6 +444,7 @@ impl Default for Config {
             forward_keys_to_terminal: false,
             debug_terminal: DebugTerminal::Same,
             graph_find_opens: false,
+            text_limit_mib: (crate::fs::MAX_TEXT >> 20) as i32,
             editor: Editor::Accent,
             editor_command: String::new(),
             theme: Theme::System,
@@ -454,6 +459,16 @@ impl Default for Config {
             debug: DebugConfig::default(),
             vaults: BTreeMap::new(),
         }
+    }
+}
+
+impl Config {
+    /// [`Config::text_limit_mib`] in bytes, `None` for no limit.
+    pub fn text_limit(&self) -> Option<u64> {
+        u64::try_from(self.text_limit_mib)
+            .ok()
+            .filter(|&mib| mib > 0)
+            .map(|mib| mib << 20)
     }
 }
 

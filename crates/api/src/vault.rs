@@ -407,6 +407,8 @@ methods! {
     // ------------------------------------------------------------------ files
     read(rel: ref str) -> (String, Etag);
     read_text(rel: ref str) -> fs::Read;
+    /// [`read_text`](Vault::read_text) capped at `cap` bytes, or not at all: what a tab opens with.
+    read_text_within(rel: ref str, cap: val Option<u64>) -> fs::Read;
     /// Read an absolute file outside the vault only if a live host language session named it, or
     /// [`shell_file`](Vault::shell_file) found it where a shell named it.
     read_named(abs: ref str) -> fs::Read;

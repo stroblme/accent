@@ -243,6 +243,7 @@ impl App {
         let (rel, path) = (tab.key(), tab.path());
         let vault = self.vault().filter(|_| !doc::is_loose_key(&rel)).cloned();
         let base = tab.save_state().digest.get();
+        let cap = self.read_cap(&rel);
         move |text, over| {
             #[cfg(feature = "bench")]
             crate::bench::hold(&crate::bench::SLOW_WRITE_MS);
@@ -267,7 +268,7 @@ impl App {
             };
             let mut written = write(over);
             if let Err(Error::Core(Core::ChangedOnDisk { .. })) = written
-                && let Some(etag) = unchanged(vault.as_deref(), &rel, &path, base)
+                && let Some(etag) = unchanged(vault.as_deref(), &rel, &path, base, cap)
             {
                 written = write(Over::File(Some(etag)));
             }
@@ -403,13 +404,14 @@ impl App {
         let (rel, path) = (tab.key(), tab.path());
         let vault = self.vault().filter(|_| !doc::is_loose_key(&rel)).cloned();
         let (ours, base) = (tab.save_state().etag.get(), tab.save_state().digest.get());
+        let cap = self.read_cap(&rel);
         let (app, watched) = (Rc::downgrade(self), Rc::downgrade(tab));
         glib::spawn_future_local(async move {
             let looked = crate::work::off_thread("stat", move || {
                 let disk = stat(vault.as_deref(), &rel, &path)?;
                 Ok(match disk {
                     Some(_) if disk != ours => {
-                        let same = unchanged(vault.as_deref(), &rel, &path, base);
+                        let same = unchanged(vault.as_deref(), &rel, &path, base, cap);
                         (disk, same)
                     }
                     _ => (disk, None),
@@ -485,6 +487,7 @@ impl App {
         // than here: a reload writes the buffer without an edit event, and nothing else would ask.
         tab.reload_keep_cursor(
             vault,
+            self.read_cap(&tab.rel()),
             glib::clone!(
                 #[weak(rename_to = app)]
                 self,
@@ -1241,12 +1244,19 @@ fn stat(vault: Option<&Vault>, rel: &str, path: &Path) -> accent_api::Result<Opt
 }
 
 /// The etag of the file at `rel` (at `path` outside a vault) if it still holds what `base`
-/// digests, its etag having moved alone; `None` if it holds anything else or cannot be read.
-fn unchanged(vault: Option<&Vault>, rel: &str, path: &Path, base: Option<Digest>) -> Option<Etag> {
+/// digests, its etag having moved alone; `None` if it holds anything else or cannot be read
+/// within `cap` bytes ([`App::read_cap`]).
+fn unchanged(
+    vault: Option<&Vault>,
+    rel: &str,
+    path: &Path,
+    base: Option<Digest>,
+    cap: Option<u64>,
+) -> Option<Etag> {
     let base = base?;
     let read = match vault {
-        Some(vault) => vault.read_text(rel),
-        None => accent_core::fs::read_text(path).map_err(Into::into),
+        Some(vault) => vault.read_text_within(rel, cap),
+        None => accent_core::fs::read_text_within(path, cap).map_err(Into::into),
     };
     match read {
         Ok(accent_core::fs::Read::Text(text)) if text.digest() == base => Some(text.etag),
