@@ -96,6 +96,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A link the vault's git ignores is skipped as an ignored folder is, and a link to a dependency tree (a linked venv) as that tree is.
   The file tree lists it a level at a time and a file opened in it joins the index (An opened file joins the index), just as VS Code's search, through ripgrep, skips such a link and searches a file there only while an editor holds it open.
   A gitignored link into a 49 GB data tree once grew an index to 15 GB.
+  A linked folder keeps the vault's ignore rule, so the walk skips the folders its git ignores and indexes the files, which the tree dims as it does the vault's own.
   A vault that is itself on a FUSE mount is walked as any other.
 - **Watch set**: one non-recursive inotify watch per directory the walk kept, plus each gitignored folder the file tree lists — a recursive watch re-adds every skipped tree, and the walk's own directory opens overflow `max_queued_events` into a rescan that loops.
   On macOS one FSEvents stream covers the root, and the same set decides which of its events stand: notify restarts the stream on every watch, which took 25 s for the generated vault's 2,715 folders and dropped what was in flight.

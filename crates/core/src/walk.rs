@@ -6,9 +6,8 @@
 //!
 //! The vault pass indexes individually ignored files so ignored markdown remains available;
 //! query exclusions handle them later. Git-ignored directories are skipped and listed lazily
-//! through [`unindexed_children`]. External symlink passes honour their own `.gitignore` and
-//! `.ignore`, including files. Accepted directory links become separate passes with
-//! `follow_links(false)`.
+//! through [`unindexed_children`]. Linked folders keep the same rule, so the tree lists every
+//! file they hold. Accepted directory links become separate passes with `follow_links(false)`.
 //!
 //! [`DEPENDENCY_MARKERS`] also excludes unignored cache and virtual-environment trees without an
 //! ecosystem-specific name list. Unix metadata is required; supported targets are Linux and
@@ -194,8 +193,9 @@ pub struct ScanOptions {
     /// Honour `.gitignore`/`.ignore` *inside the vault tree*. Off by default: vaults are
     /// commonly git repos that ignore `*.md`, and hiding the user's notes is never right.
     pub vault_gitignore: bool,
-    /// Honour `.gitignore`/`.ignore` inside directory-symlink targets. On by default: those
-    /// are external trees (code repos) whose build output nobody wants in a note index.
+    /// Skip the directories git ignores inside directory-symlink targets, as the vault's own
+    /// are, while their ignored files are indexed. On by default: those are often code repos
+    /// whose build output nobody wants in a note index.
     pub target_gitignore: bool,
     /// Skip [`DEPENDENCY_MARKERS`] trees by default to bound index size and inotify use. They
     /// remain visible in the file tree and reachable through Search's All mode.
@@ -685,13 +685,18 @@ fn walk_passes(
             break;
         }
         let out = walk_pass(&pass, opts, root, &canonical_root, &followed, &sink);
-        skipped.extend(out.skipped);
+        // A linked folder's ignored folders stay out of `ignored_files`: that listing walks every
+        // one on each Go to File, and a linked repo's can be any size. The tree still lists them.
+        skipped.extend(
+            (out.skipped.into_iter())
+                .filter(|s| !(pass.linked && s.reason == SkipReason::GitIgnored)),
+        );
         for (target, prefix) in out.targets {
             queue.push_back(Pass {
                 root: target,
                 prefix,
-                gitignore: opts.target_gitignore,
-                dir_gitignore: false,
+                gitignore: false,
+                dir_gitignore: opts.target_gitignore,
                 linked: true,
             });
         }
@@ -706,8 +711,7 @@ struct Pass {
     prefix: String,
     /// Honour the ignore files whole, files included.
     gitignore: bool,
-    /// Apply ignores to directories only so vault notes remain indexed. Symlink targets instead
-    /// honour all ignore rules or none.
+    /// Apply ignores to directories only so ignored notes and files remain indexed.
     dir_gitignore: bool,
     /// A symlink target, walked on its own filesystem only: a mount below it is not entered,
     /// as `/run/user/<uid>/gvfs` is not below a link to `/run`.
@@ -1430,6 +1434,34 @@ mod tests {
         };
         let r = scan(vault.path(), &loose);
         assert!(rels(&r).iter().any(|p| p.contains("junk.md")));
+    }
+
+    /// A linked folder keeps the vault's rule: a file its git ignores is indexed and listed, an
+    /// ignored folder is left to the tree, and the watcher agrees with the walk on both.
+    #[test]
+    fn a_linked_folder_keeps_its_gitignored_files() {
+        let repo = tempfile::tempdir().unwrap();
+        fs::write(repo.path().join(".gitignore"), "*.md\nmain.pdf\nbuild/\n").unwrap();
+        fs::write(repo.path().join("main.tex"), "t").unwrap();
+        fs::write(repo.path().join("main.pdf"), "p").unwrap();
+        fs::write(repo.path().join("n.md"), "n").unwrap();
+        fs::create_dir(repo.path().join("build")).unwrap();
+        fs::write(repo.path().join("build/o.log"), "o").unwrap();
+        let vault = tempfile::tempdir().unwrap();
+        symlink(repo.path(), vault.path().join("linked")).unwrap();
+
+        let r = scan(vault.path(), &ScanOptions::default());
+        let paths = rels(&r);
+        for kept in ["linked/main.tex", "linked/main.pdf", "linked/n.md"] {
+            assert!(paths.contains(&kept), "{kept} missing from {paths:?}");
+            assert!(stat_one(vault.path(), kept).unwrap().is_some(), "{kept}");
+        }
+        assert!(!paths.iter().any(|p| p.contains("build")), "{paths:?}");
+        assert!(
+            stat_one(vault.path(), "linked/build/o.log")
+                .unwrap()
+                .is_none()
+        );
     }
 
     /// `stat_one` is the watcher path into the same rows `scan` produces: if the two ever
