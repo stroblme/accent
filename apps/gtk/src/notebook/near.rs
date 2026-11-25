@@ -11,6 +11,11 @@ use super::NotebookTab;
 use super::cell::CellView;
 use super::selection::line_in;
 
+/// How many times GDK lays one frame out (`gdk_frame_clock_run_layout`). A layout asked for in
+/// the last of them goes unmet, the window is left unallocated for the frame's paint, and GTK
+/// then never draws it again (ISSUES.md).
+const LAYOUTS: u32 = 4;
+
 /// What a zoom keeps where it was in the view: what was at a point of it, the pointer's for a
 /// Ctrl+scroll, the middle of the top for a chord, as the cells take their new heights.
 pub(super) struct ZoomAnchor {
@@ -102,7 +107,25 @@ impl NotebookTab {
     /// The window was laid out. What it lays out again before the frame is drawn, after a scroll
     /// or an editor built here, comes back through here.
     pub(super) fn laid_out(self: &Rc<Self>, clock: &gdk::FrameClock) {
+        let frame = clock.frame_counter();
+        let layouts = match self.layouts.get() {
+            (at, n) if at == frame => n + 1,
+            _ => 1,
+        };
+        self.layouts.set((frame, layouts));
         if !self.scroller.is_mapped() {
+            return;
+        }
+        // The frame's last layout asks for nothing: the scroll that keeps what shows, and the
+        // heights the text views ask for again, wait for the next frame, which this one may
+        // draw a few pixels off.
+        if layouts >= LAYOUTS {
+            let tab = Rc::downgrade(self);
+            glib::idle_add_local_once(move || {
+                if let Some(tab) = tab.upgrade() {
+                    tab.scroller.queue_allocate();
+                }
+            });
             return;
         }
         let adjustment = self.scroller.vadjustment();
@@ -114,8 +137,8 @@ impl NotebookTab {
         self.keep_anchor();
         self.show_pending();
         self.build_near(clock);
-        // Every pass, not once a frame: GTK lays out again within the frame, and a view built in
-        // one pass first wraps at its width in the next.
+        // Every pass but the frame's last, not once a frame: GTK lays out again within the frame,
+        // and a view built in one pass first wraps at its width in the next.
         for view in self
             .near
             .borrow()

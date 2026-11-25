@@ -90,6 +90,9 @@ pub struct NotebookTab {
     /// Where in the view the pointer of the Ctrl+scroll asking for the zoom under way is.
     zoom_at: Cell<Option<(f64, f64)>>,
     layout_hook: RefCell<Option<(gdk::FrameClock, glib::SignalHandlerId)>>,
+    /// The frame the window was last laid out in, and how many times it was laid out in it
+    /// ([`laid_out`](Self::laid_out)).
+    layouts: Cell<(i64, u32)>,
     model: RefCell<Notebook>,
     /// A view per cell, in the model's order.
     views: RefCell<Vec<Rc<CellView>>>,
@@ -293,6 +296,7 @@ fn build(
         zoom_anchor: RefCell::default(),
         zoom_at: Cell::new(None),
         layout_hook: RefCell::default(),
+        layouts: Cell::new((-1, 0)),
         model: RefCell::new(notebook),
         views: RefCell::default(),
         fade_new: Cell::new(false),
